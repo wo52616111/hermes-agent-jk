@@ -299,6 +299,20 @@ const TRANSPORT_KINDS = new Set([
   SSH_ERROR.UNREACHABLE
 ])
 
+function powerShellErrorDetail(value) {
+  const raw = String(value || '')
+  const errors = [...raw.matchAll(/<S S="Error">([\s\S]*?)<\/S>/g)].map(match => match[1])
+  const detail = errors.length ? errors.join(' ') : raw
+
+  return detail
+    .replace(/_x([0-9a-fA-F]{4})_/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&')
+}
+
 async function detectRemotePlatform(ssh, explicitHermesPath = '') {
   try {
     const output = (await ssh.exec('uname -s; uname -m')).trim().split('\n')
@@ -325,7 +339,7 @@ async function detectRemotePlatform(ssh, explicitHermesPath = '') {
     const kind = cause?.kind
 
     // detail is remote-controlled output headed for the UI: redact + strip control chars.
-    const detail = redactSecrets(String(cause?.message || cause || ''))
+    const detail = redactSecrets(powerShellErrorDetail(cause?.message || cause || ''))
       // eslint-disable-next-line no-control-regex -- deliberately strip control chars from remote output
       .replace(/[\x00-\x1f\x7f]/g, ' ')
       .trim()
