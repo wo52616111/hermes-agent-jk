@@ -73,7 +73,30 @@ def _trust_granted(server_name: str, tool_name: str) -> bool:
                                                       _trust_approval_key(server_name, tool_name))
 
 
-def _trust_gate_check(server_name: str, tool_name: str, booked: Optional[list] = None) -> Optional[str]:
+_TRUST_GATE_ARGUMENTS_MAX_CHARS = 2_048
+_TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER = "\n... [arguments truncated]"
+
+
+def _format_trust_gate_arguments(args: dict) -> str:
+    """Return redacted, bounded JSON for the user-facing approval card."""
+    from agent.redact import redact_sensitive_text
+
+    rendered = json.dumps(args, ensure_ascii=False, indent=2, default=str)
+    rendered = redact_sensitive_text(rendered)
+    if len(rendered) > _TRUST_GATE_ARGUMENTS_MAX_CHARS:
+        prefix_length = (
+            _TRUST_GATE_ARGUMENTS_MAX_CHARS
+            - len(_TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER)
+        )
+        rendered = (
+            rendered[:prefix_length].rstrip()
+            + _TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER
+        )
+    return rendered
+
+
+def _trust_gate_check(server_name: str, tool_name: str, booked: Optional[list] = None,
+                      args: Optional[dict] = None) -> Optional[str]:
     """Approval gate for write-capable tools on ``trust: untrusted`` servers, plus the declared spend
     limit on any server. None to proceed, else a ``tool_error``. Fail-closed: approval-system errors
     block. An admitted costed call is charged to the chat's tally and appended to *booked* so the
@@ -90,17 +113,17 @@ def _trust_gate_check(server_name: str, tool_name: str, booked: Optional[list] =
         from tools.approval_context import get_current_session_key
         charge = _costs.pending_charge(key, server_name, tool_name, get_current_session_key())
     if charge is None:
-        return _ask_for_call(server_name, tool_name, None, booked) if gated else None
+        return _ask_for_call(server_name, tool_name, None, booked, args=args) if gated else None
     if not gated and charge.reserve_within_limit()[0]:
         if booked is not None:
             booked.append(charge)
         return None
     with charge.asking():  # re-read under the slot: a call that asked first may have booked meanwhile
-        return _ask_for_call(server_name, tool_name, charge, booked, gated=gated)
+        return _ask_for_call(server_name, tool_name, charge, booked, gated=gated, args=args)
 
 
 def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[list], *,
-                  gated: bool = True) -> Optional[str]:
+                  gated: bool = True, args: Optional[dict] = None) -> Optional[str]:
     """Ask the user about one gated and/or costed call; book the charge only on an explicit yes."""
     spent, over = 0.0, False
     if charge is not None:
@@ -120,6 +143,8 @@ def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[lis
         tail = "This tool is write-capable (no readOnlyHint=true annotation) and may modify external state."
         # The limit notice leads: the messaging gateway's text fallback keeps only the first ~200 characters.
         message = " ".join([head, *(["This call goes past the chat's spend limit."] if over else []), *extra, tail])
+        display_args = _format_trust_gate_arguments(args or {})
+        message += f"\n\nArguments:\n```json\n{display_args}\n```"
         # Over the limit the answer covers this call only: a remembered trust grant must not
         # pre-approve the next over-limit call.
         remember_key = None if over else _trust_approval_key(server_name, tool_name)
@@ -649,7 +674,7 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *,
     def _handler(args: dict, **kwargs) -> Any:
         # Security boundary: untrusted-server write tools need approval before ANY transport work (incl. lazy spawn).
         booked: list = []  # a costed call's charge; refunded when the call never reaches the server
-        error = _trust_gate_check(server_name, tool_name, booked)
+        error = _trust_gate_check(server_name, tool_name, booked, args)
         if error is not None:
             return error
         server, error = None, _check_circuit_breaker(server_name)
