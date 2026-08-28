@@ -205,7 +205,20 @@ export interface SessionInfo {
   version?: string
 }
 
+export interface AccountUsageWindow {
+  period: string
+  reset_at?: null | string
+  used_percent: number
+}
+
+export interface AccountUsage {
+  fetched_at: string
+  provider: string
+  windows: AccountUsageWindow[]
+}
+
 export interface Usage {
+  account_usage?: AccountUsage | null
   active_subagents?: number
   /** Rolling mean API latency over the last 10 calls (seconds). */
   avg_latency_s?: number

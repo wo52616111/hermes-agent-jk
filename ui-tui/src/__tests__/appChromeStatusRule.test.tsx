@@ -1,7 +1,7 @@
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { StatusRule } from '../components/appChrome.js'
+import { formatResetRemaining, StatusRule } from '../components/appChrome.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 type ReactNodeLike = React.ReactNode
@@ -100,9 +100,53 @@ const baseProps = {
   statusColor: DEFAULT_THEME.color.ok,
   t: DEFAULT_THEME,
   turnStartedAt: null,
-  usage: { context_max: 200_000, context_percent: 25, context_used: 50_000, total: 50_000 },
+  usage: { calls: 1, input: 1, output: 1, context_max: 200_000, context_percent: 25, context_used: 50_000, total: 50_000 },
   voiceLabel: ''
 }
+
+describe('StatusRule capacity row', () => {
+  it('moves context and provider quota onto a dedicated second row', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-08-28T10:00:00Z'))
+
+    const element = StatusRule({
+      ...baseProps,
+      usage: {
+        ...baseProps.usage,
+        account_usage: {
+          provider: 'openai-codex',
+          fetched_at: '2026-08-28T10:00:00Z',
+          windows: [
+            { period: '5h', used_percent: 34, reset_at: '2026-08-28T12:15:00Z' },
+            { period: '7d', used_percent: 62, reset_at: '2026-09-02T08:00:00Z' }
+          ]
+        }
+      }
+    })
+
+    const rows = React.Children.toArray(element.props.children)
+
+    expect(rows).toHaveLength(2)
+    expect(textContent(rows[0])).not.toContain('50k/200k')
+    const capacity = rows[1] as React.ReactElement<any>
+    expect(capacity.type).toBeDefined()
+    expect(capacity.props.ctxLabel).toBe('50k/200k')
+    expect(capacity.props.quotaWindows.map((window: { period: string }) => window.period)).toEqual(['5h', '7d'])
+    expect(formatResetRemaining('2026-08-28T12:15:00Z', Date.parse('2026-08-28T10:00:00Z'))).toBe('2h 15m')
+    expect(formatResetRemaining('2026-09-02T08:00:00Z', Date.parse('2026-08-28T10:00:00Z'))).toBe('4d 22h')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps context on the capacity row before account quota is available', () => {
+    const element = StatusRule({ ...baseProps })
+    const rows = React.Children.toArray(element.props.children)
+
+    expect(rows).toHaveLength(2)
+    expect(textContent(rows[0])).not.toContain('50k/200k')
+    expect((rows[1] as React.ReactElement<any>).props.ctxLabel).toBe('50k/200k')
+  })
+})
 
 describe('StatusRule session title', () => {
   it('pins the named session at the far-right edge instead of the cwd label', () => {
@@ -281,7 +325,7 @@ describe('StatusRule credits notice render priority', () => {
     expect(rendered).not.toContain('ready')
     // … but model + context stay visible.
     expect(rendered).toContain('opus 4.8')
-    expect(rendered).toContain('50k')
+    expect((React.Children.toArray(element.props.children)[1] as React.ReactElement<any>).props.ctxLabel).toBe('50k/200k')
   })
 
   it('busy wins: the FaceTicker shows, the notice is hidden mid-turn', () => {

@@ -258,8 +258,95 @@ function ctxBar(pct: number | undefined, w = 10) {
   return '█'.repeat(filled) + '░'.repeat(w - filled)
 }
 
+export function formatResetRemaining(resetAt: null | string | undefined, now = Date.now()) {
+  if (!resetAt) {
+    return ''
+  }
+
+  const reset = Date.parse(resetAt)
+
+  if (!Number.isFinite(reset)) {
+    return ''
+  }
+
+  const minutes = Math.max(0, Math.ceil((reset - now) / 60_000))
+
+  if (minutes === 0) {
+    return 'now'
+  }
+
+  if (minutes >= 24 * 60) {
+    const days = Math.floor(minutes / (24 * 60))
+    const hours = Math.floor((minutes % (24 * 60)) / 60)
+
+    return hours ? `${days}d ${hours}h` : `${days}d`
+  }
+
+  const hours = Math.floor(minutes / 60)
+  const mins = minutes % 60
+
+  return hours ? `${hours}h${mins ? ` ${mins}m` : ''}` : `${mins}m`
+}
+
+function quotaColor(pct: number, t: Theme) {
+  return pct >= 90 ? t.color.error : pct >= 70 ? t.color.warn : t.color.statusGood
+}
+
+function CapacityRow({
+  bar,
+  barColor,
+  ctxLabel,
+  quotaWindows,
+  t,
+  pct
+}: {
+  bar?: string
+  barColor: string
+  ctxLabel: string
+  pct?: number
+  quotaWindows: NonNullable<Usage['account_usage']>['windows']
+  t: Theme
+}) {
+  const prefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaWindows.length ? '─ usage' : ''
+  let budget = Math.max(0, 9999 - stringWidth(prefix))
+  const barText = bar && pct != null ? ` [${bar}] ${pct}%` : ''
+  const showBar = !!barText && budget >= stringWidth(barText)
+
+  if (showBar) {
+    budget -= stringWidth(barText)
+  }
+
+  const quota = quotaWindows.flatMap(window => {
+    const used = Math.max(0, Math.min(100, Math.round(window.used_percent)))
+    const reset = formatResetRemaining(window.reset_at)
+    const compact = ` │ ${window.period} ${used}%`
+    const full = reset ? `${compact} ↻ ${reset}` : compact
+    const chosen = budget >= stringWidth(full) ? full : budget >= stringWidth(compact) ? compact : ''
+
+    if (!chosen) {
+      return []
+    }
+
+    budget -= stringWidth(chosen)
+
+    return [{ color: quotaColor(used, t), key: window.period, text: chosen }]
+  })
+
+  return (
+    <Box flexDirection="row" height={1} overflow="hidden">
+      <Text color={t.color.muted}>{prefix}</Text>
+      {showBar ? <Text color={barColor}> {barText}</Text> : null}
+      {quota.map(item => (
+        <Text color={item.color} key={item.key}>
+          {item.text}
+        </Text>
+      ))}
+    </Box>
+  )
+}
+
 // `minLeftContent` is the display width of the high-priority left segments
-// (status indicator + model + context). Reserving it makes the cwd/branch
+// (status indicator + model). Reserving it makes the cwd/branch
 // segment on the right yield FIRST on narrow terminals, instead of squeezing
 // the loading indicator and model down to nothing.
 export function statusRuleWidths(cols: number, cwdLabel: string, minLeftContent = 0) {
@@ -548,12 +635,7 @@ export function StatusRule({
       : stringWidth(status)
 
   const essentialWidth =
-    stringWidth('─ ') +
-    batteryWidth +
-    slotWidth +
-    stringWidth(' │ ') +
-    stringWidth(modelText) +
-    (ctxLabel ? stringWidth(' │ ') + stringWidth(ctxLabel) : 0)
+    stringWidth('─ ') + batteryWidth + slotWidth + stringWidth(' │ ') + stringWidth(modelText)
 
   const rightLabel = sessionTitle && ok('title') ? ` ${sessionTitle} ` : cwdLabel
   const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, rightLabel, essentialWidth)
@@ -588,7 +670,8 @@ export function StatusRule({
       ? `Δ ${(usage.dev_credits_spent_micros / 10000).toFixed(1)}¢`
       : ''
 
-  const showBar = !!bar && fits(SEP + stringWidth(`[${bar}] ${pct != null ? `${pct}%` : ''}`))
+  // Context and quota usage render in the dedicated capacity row below, so
+  // this primary status row only budgets upstream's duration segment.
   const showDuration = segs.duration && ok('duration') && !!sessionStartedAt && fits(SEP + MAX_DURATION_WIDTH)
 
   // Idle clock — time since the last final agent response. Hidden while busy
@@ -637,6 +720,10 @@ export function StatusRule({
   // seeing it, so it must not drop off a narrow terminal.
   const showFocus = !!focusView
 
+  const quotaWindows = usage.account_usage?.windows ?? []
+  const capacityPrefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaWindows.length ? '─ usage' : ''
+  const showCapacityRow = !!capacityPrefix
+
   const handleSessionCountClick = (event: { stopImmediatePropagation?: () => void }) => {
     event.stopImmediatePropagation?.()
     onSessionCountClick?.()
@@ -650,7 +737,7 @@ export function StatusRule({
     <Text color={t.color.muted}> │ {sessionCountText}</Text>
   )
 
-  return (
+  const statusRow = (
     <Box height={1}>
       <Box flexDirection="row" flexShrink={1} overflow="hidden" width={leftWidth}>
         {/* Leading pinned chrome: border + busy face / idle status. When a
@@ -694,24 +781,12 @@ export function StatusRule({
             {' │ '}
             {modelText}
           </Text>
-          {ctxLabel ? (
-            <Text color={t.color.muted} wrap="truncate-end">
-              {' │ '}
-              {ctxLabel}
-            </Text>
-          ) : null}
         </Box>
         {showFocus ? (
           <Box flexDirection="row" flexShrink={0}>
             <Text color={t.color.muted}>{' │ '}</Text>
             <Text color={t.color.warn}>◉ focus</Text>
           </Box>
-        ) : null}
-        {showBar ? (
-          <Text color={t.color.muted} wrap="truncate-end">
-            {' │ '}
-            <Text color={barColor}>[{bar}]</Text> <Text color={barColor}>{pct != null ? `${pct}%` : ''}</Text>
-          </Text>
         ) : null}
         {showDuration ? (
           <Text color={t.color.muted} wrap="truncate-end">
@@ -813,6 +888,17 @@ export function StatusRule({
         </>
       ) : null}
     </Box>
+  )
+
+  const capacityRow = showCapacityRow ? (
+    <CapacityRow bar={bar} barColor={barColor} ctxLabel={ctxLabel} pct={pct} quotaWindows={quotaWindows} t={t} />
+  ) : null
+
+  return (
+    <>
+      {statusRow}
+      {capacityRow}
+    </>
   )
 }
 

@@ -273,6 +273,7 @@ export interface SessionUndoResponse {
 }
 
 export interface SessionUsageResponse {
+  account_usage?: Usage['account_usage']
   active_subagents?: number
   avg_latency_s?: number
   avg_tps?: number

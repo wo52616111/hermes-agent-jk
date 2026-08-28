@@ -7307,13 +7307,94 @@ def _current_profile_name() -> str:
 DESKTOP_BACKEND_CONTRACT = 6
 
 
+def _account_usage_wire(snapshot, provider: str) -> dict | None:
+    """Serialize a current-provider account quota snapshot for UI surfaces."""
+    if snapshot is None or snapshot.provider != provider:
+        return None
+
+    period_by_label = {
+        "session": "5h",
+        "current session": "5h",
+        "weekly": "7d",
+        "current week": "7d",
+        "opus week": "opus 7d",
+        "sonnet week": "sonnet 7d",
+    }
+    windows = []
+    for window in snapshot.windows:
+        period = period_by_label.get(str(window.label).strip().lower())
+        if not period or window.used_percent is None:
+            continue
+        windows.append(
+            {
+                "period": period,
+                "used_percent": float(window.used_percent),
+                "reset_at": window.reset_at.isoformat() if window.reset_at else None,
+            }
+        )
+    if not windows:
+        return None
+    return {
+        "provider": snapshot.provider,
+        "fetched_at": snapshot.fetched_at.isoformat(),
+        "windows": windows,
+    }
+
+
+def _refresh_account_usage_async(sid: str, session: dict):
+    """Refresh provider quota once without blocking the completed turn."""
+    agent = session.get("agent")
+    if agent is None:
+        return None
+    provider = str(getattr(agent, "provider", "") or "").strip().lower()
+    if provider not in {"openai-codex", "anthropic"}:
+        return None
+    refresh_lock = session.setdefault("_account_usage_refresh_lock", threading.Lock())
+    with refresh_lock:
+        if session.get("_account_usage_refreshing"):
+            session["_account_usage_refresh_pending"] = True
+            return None
+        session["_account_usage_refreshing"] = True
+
+    def _refresh() -> None:
+        try:
+            from agent.account_usage import fetch_account_usage
+
+            snapshot = fetch_account_usage(
+                getattr(agent, "provider", None),
+                base_url=getattr(agent, "base_url", None),
+                api_key=getattr(agent, "api_key", None),
+            )
+            if snapshot is not None:
+                session["_account_usage_snapshot"] = snapshot
+                _emit("session.usage", sid, {"usage": _session_usage_snapshot(session)})
+        except Exception:
+            logger.debug("account usage refresh failed", exc_info=True)
+        finally:
+            with refresh_lock:
+                session["_account_usage_refreshing"] = False
+                pending = session.pop("_account_usage_refresh_pending", False)
+            if pending:
+                _refresh_account_usage_async(sid, session)
+
+    thread = _RealThread(target=_refresh, daemon=True)
+    thread.start()
+    return thread
+
+
 def _session_usage_snapshot(session: dict | None) -> dict:
     agent = (session or {}).get("agent")
     mirror_usage = _metadata_mirror(session).get("usage")
     if (session or {}).get("_compute_host_active") and isinstance(mirror_usage, dict):
         return dict(mirror_usage)
     if agent is not None:
-        return _get_usage(agent)
+        usage = _get_usage(agent)
+        account_usage = _account_usage_wire(
+            (session or {}).get("_account_usage_snapshot"),
+            str(getattr(agent, "provider", "") or ""),
+        )
+        usage["account_usage"] = account_usage
+        return usage
     return dict(mirror_usage) if isinstance(mirror_usage, dict) else {}
 
 
@@ -13204,6 +13285,7 @@ def _run_prompt_submit(
             if terminal_receipt_committed:
                 _retire_turn_marker(session, marker_key)
             _emit("message.complete", sid, payload)
+            _refresh_account_usage_async(sid, session)
 
             # ── /goal continuation (Ralph-style loop) ─────────────────
             # After every TUI turn, if a /goal is active, ask the judge

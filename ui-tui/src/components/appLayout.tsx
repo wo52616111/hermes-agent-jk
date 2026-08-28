@@ -487,7 +487,7 @@ const StatusRulePane = memo(function StatusRulePane({
   }
 
   return (
-    <Box marginTop={at === 'top' ? 1 : 0}>
+    <Box flexDirection="column" marginTop={at === 'top' ? 1 : 0}>
       <StatusRule
         battery={ui.battery ? ui.batteryStatus : null}
         bgCount={ui.bgTasks.size}

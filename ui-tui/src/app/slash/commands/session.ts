@@ -14,7 +14,7 @@ import type {
 import { formatVoiceRecordKey, parseVoiceRecordKey } from '../../../lib/platform.js'
 import { fmtK } from '../../../lib/text.js'
 import type { PanelSection } from '../../../types.js'
-import { applyConfiguredTuiTheme } from '../../createGatewayEventHandler.js'
+import { applyConfiguredTuiTheme, mergeUsageStable } from '../../createGatewayEventHandler.js'
 import { DEFAULT_INDICATOR_STYLE, INDICATOR_STYLES, type IndicatorStyle } from '../../interfaces.js'
 import { patchOverlayState } from '../../overlayStore.js'
 import { patchUiState } from '../../uiStore.js'
@@ -674,9 +674,21 @@ export const sessionCommands: SlashCommand[] = [
         const sys = ctx.transcript.sys
 
         if (r) {
-          patchUiState({
-            usage: { calls: r.calls ?? 0, input: r.input ?? 0, output: r.output ?? 0, total: r.total ?? 0 }
-          })
+          patchUiState(state => ({
+            ...state,
+            usage: mergeUsageStable(state.usage, {
+              account_usage: r.account_usage,
+              active_subagents: r.active_subagents,
+              calls: r.calls ?? 0,
+              compressions: r.compressions,
+              context_max: r.context_max,
+              context_percent: r.context_percent,
+              context_used: r.context_used,
+              input: r.input ?? 0,
+              output: r.output ?? 0,
+              total: r.total ?? 0
+            })
+          }))
         }
 
         // Nous balance block is agent-independent (a portal fetch), so it shows

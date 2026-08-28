@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT"
+
+UPSTREAM_REMOTE=${HERMES_UPSTREAM_REMOTE:-upstream}
+UPSTREAM_BRANCH=${HERMES_UPSTREAM_BRANCH:-main}
+
+if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
+  printf 'Missing git remote %q. Add it with:\n' "$UPSTREAM_REMOTE" >&2
+  printf '  git remote add %s git@github.com:NousResearch/hermes-agent.git\n' "$UPSTREAM_REMOTE" >&2
+  exit 1
+fi
+
+if pgrep -f "$ROOT/ui-tui/dist/entry.js" >/dev/null 2>&1; then
+  printf 'Refusing to update while this checkout has a running TUI.\n' >&2
+  printf 'Exit the TUI first to avoid mixing old in-memory modules with new files.\n' >&2
+  exit 2
+fi
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  printf 'Refusing to update a dirty checkout. Commit or stash local changes first.\n' >&2
+  git status --short >&2
+  exit 3
+fi
+
+printf 'Fetching %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+git fetch "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+printf 'Rebasing local changes onto %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+git rebase "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
+
+uv sync --extra dev
+npx -y npm@11.17.0 ci --include=dev
+npx -y npm@11.17.0 run build:ink --workspace ui-tui
+npx -y npm@11.17.0 run build --workspace ui-tui
+
+printf 'Updated and built patched Hermes from %s/%s.\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
