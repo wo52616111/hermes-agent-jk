@@ -58,6 +58,95 @@ def test_session_usage_matches_provider_case_insensitively():
     assert usage["account_usage"]["windows"][0]["period"] == "5h"
 
 
+def test_session_usage_serializes_opencode_go_windows():
+    snapshot = AccountUsageSnapshot(
+        provider="opencode-go",
+        source="usage_api",
+        fetched_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
+        windows=(
+            AccountUsageWindow(label="5h", used_percent=12),
+            AccountUsageWindow(label="7d", used_percent=34),
+            AccountUsageWindow(label="monthly", used_percent=56),
+        ),
+    )
+    agent = _agent("custom")
+    agent.base_url = "https://opencode.ai/zen/go/v1/responses"
+    session = {"agent": agent, "_account_usage_snapshot": snapshot}
+
+    usage = server._session_usage_snapshot(session)
+
+    assert [window["period"] for window in usage["account_usage"]["windows"]] == [
+        "5h",
+        "7d",
+        "monthly",
+    ]
+
+
+def test_fetch_account_usage_supports_opencode_go(monkeypatch):
+    """A custom entry pointed at the Go relay resolves the Go profile's usage hook.
+
+    Upstream owns the fetch (``providers/model-providers/opencode-zen``): the Go profile's
+    ``fetch_account_usage`` reads ``/zen/go/v1/usage``. What the downstream keeps is the
+    bridge case — a custom provider name with an opencode.ai/zen/go base_url still resolves
+    that hook, and the capacity row's wire map labels the windows 5h/7d/monthly.
+    """
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "usage": {
+                    "rolling": {"status": "ok", "percent": 12, "resetsAt": "2026-08-28T15:00:00+00:00"},
+                    "weekly": {"status": "ok", "percent": 34, "resetsAt": "2026-09-02T08:30:00+00:00"},
+                    "monthly": {"status": "ok", "percent": 56, "resetsAt": "2026-09-28T00:00:00+00:00"},
+                }
+            }
+
+    class _Client:
+        def __init__(self, timeout=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, headers=None):
+            return _Response()
+
+    monkeypatch.setattr("httpx.Client", _Client)
+    monkeypatch.setattr(
+        "hermes_cli.runtime_provider.resolve_runtime_provider",
+        lambda requested, explicit_base_url=None, explicit_api_key=None: {
+            "provider": "opencode-go",
+            "base_url": "https://opencode.ai/zen/go",
+            "api_key": "sk-test",
+        },
+    )
+
+    from agent.account_usage import fetch_account_usage
+
+    snapshot = fetch_account_usage(
+        "custom", base_url="https://opencode.ai/zen/go/v1/responses", api_key="secret"
+    )
+
+    assert snapshot is not None
+    assert snapshot.provider == "opencode-go"
+    assert [window.label for window in snapshot.windows] == ["Rolling window", "Weekly", "Monthly"]
+
+    agent = _agent("custom")
+    agent.base_url = "https://opencode.ai/zen/go/v1/responses"
+    usage = server._session_usage_snapshot({"agent": agent, "_account_usage_snapshot": snapshot})
+
+    assert [window["period"] for window in usage["account_usage"]["windows"]] == ["5h", "7d", "monthly"]
+
+    # Without the Go relay in the base_url there is no bridge fallback to resolve.
+    assert fetch_account_usage("custom", base_url="https://relay.example.com/v1", api_key="s") is None
+
+
 def test_session_usage_clears_quota_from_previous_provider():
     snapshot = AccountUsageSnapshot(
         provider="anthropic",

@@ -2057,8 +2057,14 @@ def _account_usage_wire(snapshot, provider: str) -> dict | None:
     period_by_label = {
         "session": "5h",
         "current session": "5h",
+        "5h": "5h",
+        # Upstream's opencode-go profile labels its Go subscription windows this way
+        # (``providers/model-providers/opencode-zen``): the rolling window is the 5h one.
+        "rolling window": "5h",
         "weekly": "7d",
         "current week": "7d",
+        "7d": "7d",
+        "monthly": "monthly",
         "opus week": "opus 7d",
         "sonnet week": "sonnet 7d",
     }
@@ -2089,7 +2095,9 @@ def _refresh_account_usage_async(sid: str, session: dict):
     if agent is None:
         return None
     provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    if provider not in {"openai-codex", "anthropic"}:
+    base_url = str(getattr(agent, "base_url", "") or "").lower()
+    is_opencode_go = "opencode.ai" in base_url and "/zen/go" in base_url
+    if provider not in {"openai-codex", "anthropic", "opencode-go"} and not is_opencode_go:
         return None
     refresh_lock = session.setdefault("_account_usage_refresh_lock", threading.Lock())
     with refresh_lock:
@@ -2130,9 +2138,12 @@ def _session_usage_snapshot(session: dict | None) -> dict:
     if sess.get("agent") is not None and not (sess.get("_compute_host_active") and isinstance(mirror_usage, dict)):
         agent = sess["agent"]
         usage = _get_usage(agent)
+        provider = str(getattr(agent, "provider", "") or "").strip().lower()
+        base_url = str(getattr(agent, "base_url", "") or "").lower()
+        wire_provider = "opencode-go" if "opencode.ai" in base_url and "/zen/go" in base_url else provider
         usage["account_usage"] = _account_usage_wire(
             sess.get("_account_usage_snapshot"),
-            str(getattr(agent, "provider", "") or "").strip().lower(),
+            wire_provider,
         )
         return usage
     return dict(mirror_usage) if isinstance(mirror_usage, dict) else {}

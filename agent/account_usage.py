@@ -75,6 +75,11 @@ def _parse_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+def _is_opencode_go_base_url(base_url: Optional[str]) -> bool:
+    value = str(base_url or "").lower()
+    return "opencode.ai" in value and "/zen/go" in value
+
+
 def _format_reset(dt: Optional[datetime]) -> str:
     if not dt:
         return "unknown"
@@ -674,13 +679,17 @@ def _call_plugin_usage_hook(profile, base_url: Optional[str], api_key: Optional[
 def fetch_account_usage(
     provider: Optional[str], *, base_url: Optional[str] = None, api_key: Optional[str] = None,
 ) -> Optional[AccountUsageSnapshot]:
-    fetcher = _USAGE_FETCHERS.get(str(provider or "").strip().lower())
+    # An opencode.ai/zen/go endpoint IS the Go subscription, whatever the entry is named
+    # (``opencode-go-bridge``, #85589): the Go profile owns the /zen/go usage hook, while a
+    # custom entry only carries the base no-op.
+    normalized = "opencode-go" if _is_opencode_go_base_url(base_url) else str(provider or "").strip().lower()
+    fetcher = _USAGE_FETCHERS.get(normalized)
     try:
         if fetcher:
             return fetcher(base_url, api_key)
         from providers import get_provider_profile
 
-        profile = get_provider_profile(str(provider or "").strip().lower())
+        profile = get_provider_profile(normalized)
         return _call_plugin_usage_hook(profile, base_url, api_key) if profile else None
     except Exception:
         return None

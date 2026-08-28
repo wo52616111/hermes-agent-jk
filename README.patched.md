@@ -14,16 +14,39 @@ The current patch adds provider account-capacity information to the TUI:
 - failed refreshes retain the last successful snapshot;
 - provider changes clear stale quota data.
 
-## Install
+## Install for a new user
 
-Requirements: Python 3.11–3.13, `uv`, Node.js, and npm.
+Requirements:
+
+- macOS, Linux, WSL2, or another POSIX-like environment;
+- Python 3.11–3.13;
+- `uv`;
+- Node.js >= 22.22;
+- network access for Python and npm dependencies.
+
+Install `uv` if necessary, then clone and install:
 
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+git clone <your-repository-url> hermes-agent-jk
+cd hermes-agent-jk
 ./scripts/hermes-local-install
 ```
 
-This creates/updates the repository environment and builds the TUI bundle.
-No files under `~/.hermes` are required for the application itself.
+The installer creates the local Python environment, installs dependencies,
+builds the TUI bundle, installs the bundled `jk-spaceduck` skin into
+`$HERMES_HOME/skins`, and selects it as the default skin. It does not copy
+credentials or session history from the publisher.
+
+Authenticate using the normal Hermes flow:
+
+```bash
+./scripts/hermes-local-run setup
+# or use the relevant provider command, for example:
+./scripts/hermes-local-run auth
+```
+
+The exact provider credentials remain in the installer's own Hermes home.
 
 ## Run
 
