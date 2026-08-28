@@ -16,6 +16,22 @@ class OpenModel(Result):
     model_config = Result.model_config | {"extra": "allow"}
 
 
+class AccountUsageWindow(Result):
+    """One provider quota window (``tui_gateway/server.py::_account_usage_wire``)."""
+
+    period: str
+    used_percent: float
+    reset_at: str | None = None
+
+
+class AccountUsage(Result):
+    """The active provider's quota snapshot as the TUI capacity row renders it."""
+
+    provider: str
+    fetched_at: str
+    windows: list[AccountUsageWindow] = Field(default_factory=list)
+
+
 class Usage(OpenModel):
     """``tui_gateway/server.py::_get_usage`` + ``agent/context_breakdown.py::context_usage_fields``."""
 
@@ -42,6 +58,7 @@ class Usage(OpenModel):
     dev_credits_spent_micros: int | None = None
     cost_usd: float | None = None
     cost_status: str | None = None
+    account_usage: AccountUsage | None = None
 
 
 class ProjectRef(Result):
@@ -258,7 +275,8 @@ class EmptyPayload(Payload):
 
 
 __all__ = [
-    "TERMINAL_SUBAGENT_STATUSES", "AccountOwner", "ConnectorOwner", "EmptyPayload", "EmptyResult", "McpServerStatus",
+    "TERMINAL_SUBAGENT_STATUSES", "AccountOwner", "AccountUsage", "AccountUsageWindow", "ConnectorOwner",
+    "EmptyPayload", "EmptyResult", "McpServerStatus",
     "MessageReaction", "OkResult", "OpenModel", "PendingApproval",
     "ProfileParams", "ProjectRef", "SessionLiveInfo", "SessionOwner", "SessionParams", "StatusResult", "StoredSessionRow",
     "SubagentStatus", "ToolLabel", "ToolLabelKind", "TranscriptMessage", "Usage",

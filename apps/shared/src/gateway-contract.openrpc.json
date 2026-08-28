@@ -4074,6 +4074,65 @@
         "title": "AccountOwner",
         "type": "object"
       },
+      "AccountUsage": {
+        "additionalProperties": false,
+        "description": "The active provider's quota snapshot as the TUI capacity row renders it.",
+        "properties": {
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "fetched_at": {
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/AccountUsageWindow"
+            },
+            "title": "Windows",
+            "type": "array"
+          }
+        },
+        "required": [
+          "provider",
+          "fetched_at"
+        ],
+        "title": "AccountUsage",
+        "type": "object"
+      },
+      "AccountUsageWindow": {
+        "additionalProperties": false,
+        "description": "One provider quota window (``tui_gateway/server.py::_account_usage_wire``).",
+        "properties": {
+          "period": {
+            "title": "Period",
+            "type": "string"
+          },
+          "used_percent": {
+            "title": "Used Percent",
+            "type": "number"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
+          }
+        },
+        "required": [
+          "period",
+          "used_percent"
+        ],
+        "title": "AccountUsageWindow",
+        "type": "object"
+      },
       "ActiveIdResult": {
         "additionalProperties": false,
         "properties": {
@@ -28973,6 +29032,17 @@
             "default": null,
             "title": "Cost Status"
           },
+          "account_usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
           "credits_lines": {
             "anyOf": [
               {
@@ -33316,6 +33386,17 @@
             ],
             "default": null,
             "title": "Cost Status"
+          },
+          "account_usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
           }
         },
         "title": "Usage",

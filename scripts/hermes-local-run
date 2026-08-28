@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+if [[ ! -x "$ROOT/.venv/bin/hermes" ]]; then
+  printf 'Hermes is not installed in this checkout. Run:\n  %s/scripts/hermes-local-install\n' "$ROOT" >&2
+  exit 1
+fi
+
+exec "$ROOT/.venv/bin/hermes" "$@"

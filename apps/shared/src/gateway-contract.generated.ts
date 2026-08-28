@@ -579,7 +579,20 @@ export interface Usage {
   dev_credits_spent_micros?: number | null
   cost_usd?: number | null
   cost_status?: string | null
+  account_usage?: AccountUsage | null
   [key: string]: unknown
+}
+/** The active provider's quota snapshot as the TUI capacity row renders it. */
+export interface AccountUsage {
+  provider: string
+  fetched_at: string
+  windows?: AccountUsageWindow[]
+}
+/** One provider quota window (``tui_gateway/server.py::_account_usage_wire``). */
+export interface AccountUsageWindow {
+  period: string
+  used_percent: number
+  reset_at?: string | null
 }
 export interface McpServerStatus {
   name?: string
@@ -2987,6 +3000,7 @@ export interface SessionUsageResult {
   dev_credits_spent_micros?: number | null
   cost_usd?: number | null
   cost_status?: string | null
+  account_usage?: AccountUsage | null
   credits_lines?: string[] | null
   [key: string]: unknown
 }

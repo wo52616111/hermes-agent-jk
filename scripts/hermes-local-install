@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT"
+
+command -v uv >/dev/null 2>&1 || { printf 'hermes-local-install: uv is required\n' >&2; exit 1; }
+command -v npx >/dev/null 2>&1 || { printf 'hermes-local-install: npx is required\n' >&2; exit 1; }
+
+uv sync --extra dev
+npx -y npm@11.17.0 ci --include=dev
+npx -y npm@11.17.0 run build:ink --workspace ui-tui
+npx -y npm@11.17.0 run build --workspace ui-tui
+
+printf 'Installed patched Hermes in %s\n' "$ROOT"
+printf 'Run with: %s/scripts/hermes-local-run\n' "$ROOT"
