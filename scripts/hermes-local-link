@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+TARGET=${HERMES_LAUNCHER_PATH:-$HOME/.local/bin/hermes}
+
+mkdir -p "$(dirname -- "$TARGET")"
+ln -sfn "$ROOT/scripts/hermes" "$TARGET"
+printf 'Installed hermes launcher: %s -> %s/scripts/hermes\n' "$TARGET" "$ROOT"
