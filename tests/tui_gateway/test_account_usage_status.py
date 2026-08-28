@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
 from tui_gateway import server
@@ -56,6 +57,53 @@ def test_session_usage_matches_provider_case_insensitively():
 
     assert usage["account_usage"]["provider"] == "anthropic"
     assert usage["account_usage"]["windows"][0]["period"] == "5h"
+
+
+def test_session_usage_serializes_opencode_go_windows():
+    snapshot = AccountUsageSnapshot(
+        provider="opencode-go",
+        source="usage_api",
+        fetched_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
+        windows=(
+            AccountUsageWindow(label="5h", used_percent=12),
+            AccountUsageWindow(label="7d", used_percent=34),
+            AccountUsageWindow(label="monthly", used_percent=56),
+        ),
+    )
+    agent = _agent("custom")
+    agent.base_url = "https://opencode.ai/zen/go/v1/responses"
+    session = {"agent": agent, "_account_usage_snapshot": snapshot}
+
+    usage = server._session_usage_snapshot(session)
+
+    assert [window["period"] for window in usage["account_usage"]["windows"]] == [
+        "5h",
+        "7d",
+        "monthly",
+    ]
+
+
+def test_fetch_account_usage_supports_opencode_go(monkeypatch):
+    response = Mock()
+    response.json.return_value = {
+        "usage": {
+            "rolling": {"status": "ok", "percent": 12, "resetsAt": "2026-08-28T15:00:00+00:00"},
+            "weekly": {"status": "ok", "percent": 34, "resetsAt": "2026-09-02T08:30:00+00:00"},
+            "monthly": {"status": "ok", "percent": 56, "resetsAt": "2026-09-28T00:00:00+00:00"},
+        }
+    }
+    response.raise_for_status.return_value = None
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: response)
+
+    from agent.account_usage import fetch_account_usage
+
+    snapshot = fetch_account_usage(
+        "custom", base_url="https://opencode.ai/zen/go/v1/responses", api_key="secret"
+    )
+
+    assert snapshot is not None
+    assert snapshot.provider == "opencode-go"
+    assert [window.label for window in snapshot.windows] == ["5h", "7d", "monthly"]
 
 
 def test_session_usage_clears_quota_from_previous_provider():

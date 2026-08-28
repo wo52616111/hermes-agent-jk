@@ -72,6 +72,52 @@ def _parse_dt(value: Any) -> Optional[datetime]:
     return None
 
 
+def _is_opencode_go_base_url(base_url: Optional[str]) -> bool:
+    value = str(base_url or "").lower()
+    return "opencode.ai" in value and "/zen/go" in value
+
+
+def _fetch_opencode_go_account_usage(api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
+    token = str(api_key or "").strip()
+    if not token:
+        return None
+    response = httpx.get(
+        "https://opencode.ai/zen/go/v1/usage",
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/json"},
+        timeout=15.0,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return None
+
+    labels = {"rolling": "5h", "weekly": "7d", "monthly": "monthly"}
+    windows: list[AccountUsageWindow] = []
+    for key, label in labels.items():
+        item = usage.get(key)
+        if not isinstance(item, dict):
+            continue
+        percent = item.get("percent")
+        if not _is_finite_num(percent) or not 0 <= percent <= 100:
+            continue
+        windows.append(
+            AccountUsageWindow(
+                label=label,
+                used_percent=float(percent),
+                reset_at=_parse_dt(item.get("resetsAt")),
+            )
+        )
+    if not windows:
+        return None
+    return AccountUsageSnapshot(
+        provider="opencode-go",
+        source="usage_api",
+        fetched_at=_utc_now(),
+        windows=tuple(windows),
+    )
+
+
 def _format_reset(dt: Optional[datetime]) -> str:
     if not dt:
         return "unknown"
@@ -888,6 +934,8 @@ def fetch_account_usage(
     api_key: Optional[str] = None,
 ) -> Optional[AccountUsageSnapshot]:
     normalized = str(provider or "").strip().lower()
+    if _is_opencode_go_base_url(base_url):
+        normalized = "opencode-go"
     if normalized in {"", "auto", "custom"}:
         return None
     try:
@@ -895,6 +943,8 @@ def fetch_account_usage(
             return _fetch_codex_account_usage(base_url=base_url, api_key=api_key)
         if normalized == "anthropic":
             return _fetch_anthropic_account_usage()
+        if normalized == "opencode-go" or _is_opencode_go_base_url(base_url):
+            return _fetch_opencode_go_account_usage(api_key)
         if normalized == "openrouter":
             return _fetch_openrouter_account_usage(base_url, api_key)
     except Exception:

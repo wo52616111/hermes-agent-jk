@@ -7315,8 +7315,11 @@ def _account_usage_wire(snapshot, provider: str) -> dict | None:
     period_by_label = {
         "session": "5h",
         "current session": "5h",
+        "5h": "5h",
         "weekly": "7d",
         "current week": "7d",
+        "7d": "7d",
+        "monthly": "monthly",
         "opus week": "opus 7d",
         "sonnet week": "sonnet 7d",
     }
@@ -7347,7 +7350,9 @@ def _refresh_account_usage_async(sid: str, session: dict):
     if agent is None:
         return None
     provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    if provider not in {"openai-codex", "anthropic"}:
+    base_url = str(getattr(agent, "base_url", "") or "").lower()
+    is_opencode_go = "opencode.ai" in base_url and "/zen/go" in base_url
+    if provider not in {"openai-codex", "anthropic", "opencode-go"} and not is_opencode_go:
         return None
     refresh_lock = session.setdefault("_account_usage_refresh_lock", threading.Lock())
     with refresh_lock:
@@ -7389,9 +7394,12 @@ def _session_usage_snapshot(session: dict | None) -> dict:
         return dict(mirror_usage)
     if agent is not None:
         usage = _get_usage(agent)
+        provider = str(getattr(agent, "provider", "") or "").strip().lower()
+        base_url = str(getattr(agent, "base_url", "") or "").lower()
+        wire_provider = "opencode-go" if "opencode.ai" in base_url and "/zen/go" in base_url else provider
         account_usage = _account_usage_wire(
             (session or {}).get("_account_usage_snapshot"),
-            str(getattr(agent, "provider", "") or "").strip().lower(),
+            wire_provider,
         )
         usage["account_usage"] = account_usage
         return usage
