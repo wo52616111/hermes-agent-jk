@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { sessionCommands } from '../app/slash/commands/session.js'
+import { getUiState, patchUiState } from '../app/uiStore.js'
 import type { SessionUsageResponse } from '../gatewayTypes.js'
 import { applyLocale, resetLocale, t } from '../i18n/runtime.js'
 
@@ -72,6 +73,26 @@ describe('/usage slash command', () => {
     } finally {
       resetLocale()
     }
+  })
+
+  it('updates the status-bar quota from the session usage RPC', async () => {
+    patchUiState({ usage: { calls: 1, input: 1, output: 1, total: 2 } })
+
+    const accountUsage = {
+      provider: 'openai-codex',
+      fetched_at: '2026-08-28T10:00:00Z',
+      windows: [{ period: '7d', used_percent: 62, reset_at: '2026-09-02T08:00:00Z' }]
+    }
+
+    const { run } = buildCtx({
+      'session.usage': baseUsage({ account_usage: accountUsage, calls: 2, context_max: 200_000, context_used: 50_000 })
+    })
+
+    await run('')
+
+    expect(getUiState().usage.account_usage).toEqual(accountUsage)
+    expect(getUiState().usage.context_used).toBe(50_000)
+>>>>>>> 0f7791f06b (✨ feat: ship capacity status bar as downstream build)
   })
 
   it('always shows the CTA; "no API calls yet" only when there is no balance', async () => {

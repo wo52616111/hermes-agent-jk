@@ -1163,6 +1163,9 @@ def _run_prompt_submit(
                 from tui_gateway.free_tier_task_done import note_task_done
                 note_task_done(session, st.result, st.agent, display_kind)
             _emit("message.complete", sid, payload)
+            # Downstream capacity row: refresh the provider quota snapshot on the live
+            # turn path so the completed turn's usage readout carries fresh windows.
+            _refresh_account_usage_async(sid, session)
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
             if status == "complete":
                 _after_complete_turn(sid, session, st, raw)
