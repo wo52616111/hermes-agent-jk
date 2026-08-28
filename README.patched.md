@@ -1,4 +1,4 @@
-# hermes-agent-patched
+# hermes-agent-jk
 
 A shareable Hermes Agent checkout with a small, maintainable local patch set.
 The repository remains a complete Hermes Agent tree; this is not a TUI plugin.
@@ -75,8 +75,8 @@ Share this repository through your own GitHub fork or another Git remote. On a
 new computer:
 
 ```bash
-git clone <your-repository-url> hermes-agent-patched
-cd hermes-agent-patched
+git clone <your-repository-url> hermes-agent-jk
+cd hermes-agent-jk
 ./scripts/hermes-local-install
 ./scripts/hermes-local-run --tui
 ```
@@ -93,7 +93,7 @@ This project is maintained as a downstream branch of
 ```text
 upstream/main
     ↓ rebase
-local/hermes-capacity-statusbar
+hermes-agent-jk/main
 ```
 
 If this feature is useful broadly, the commits can later be submitted upstream.
