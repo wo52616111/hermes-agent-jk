@@ -85,6 +85,11 @@ def _parse_dt(value: Any) -> Optional[datetime]:
         return None
 
 
+def _is_opencode_go_base_url(base_url: Optional[str]) -> bool:
+    value = str(base_url or "").lower()
+    return "opencode.ai" in value and "/zen/go" in value
+
+
 def _format_reset(dt: Optional[datetime]) -> str:
     if not dt:
         return "unknown"
@@ -734,7 +739,10 @@ def fetch_account_usage(
 ) -> Optional[AccountUsageSnapshot]:
     from agent.account_usage_cache import remember_account_usage
 
-    slug = str(provider or "").strip().lower()
+    # An opencode.ai/zen/go endpoint IS the Go subscription, whatever the entry is named
+    # (``opencode-go-bridge``, #85589): the Go profile owns the /zen/go usage hook, while a
+    # custom entry only carries the base no-op.
+    slug = "opencode-go" if _is_opencode_go_base_url(base_url) else str(provider or "").strip().lower()
     # The picker's per-credential path resolves variants that never rotate/refresh a credential
     # on failure (Codex 401), so a read cannot repair or bench a pool entry it does not own.
     fetcher = _READ_ONLY_USAGE_FETCHERS.get(slug) if read_only else None
