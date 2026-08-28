@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+
+if [[ "${1:-}" == "update" ]]; then
+  shift
+  exec "$ROOT/scripts/hermes-local-update" "$@"
+fi
+
+exec "$ROOT/scripts/hermes-local-run" "$@"

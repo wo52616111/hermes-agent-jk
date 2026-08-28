@@ -41,10 +41,14 @@ hermes-jk --tui
 
 The project does not overwrite an existing global `hermes` launcher.
 
-If you want plain `hermes` to use this checkout, point your launcher at the
-project wrapper. The wrapper accepts `HERMES_CUSTOM_HOME` for machines where
-the clone lives somewhere other than `~/mygit/hermes-agent-jk` and routes
-`hermes update` to the downstream updater.
+To make plain `hermes` use this checkout, run:
+
+```bash
+./scripts/hermes-local-link
+```
+
+The link accepts `HERMES_LAUNCHER_PATH` for a custom install location. The
+launcher routes `hermes update` to the downstream updater.
 
 ## Update from Hermes upstream
 
