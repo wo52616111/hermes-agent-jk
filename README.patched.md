@@ -39,7 +39,9 @@ ln -sfn "$PWD/scripts/hermes-local-run" "$HOME/.local/bin/hermes-jk"
 hermes-jk --tui
 ```
 
-The project does not overwrite an existing global `hermes` launcher.
+The project does not overwrite an existing global `hermes` launcher during install;
+`hermes-local-link` is the explicit opt-in command that makes this checkout the
+normal `hermes` command.
 
 To make plain `hermes` use this checkout, run:
 
