@@ -35,11 +35,16 @@ To make this checkout available as a short command, create a user-local
 symlink:
 
 ```bash
-ln -sfn "$PWD/scripts/hermes-local-run" "$HOME/.local/bin/hermes-patched"
-hermes-patched --tui
+ln -sfn "$PWD/scripts/hermes-local-run" "$HOME/.local/bin/hermes-jk"
+hermes-jk --tui
 ```
 
 The project does not overwrite an existing global `hermes` launcher.
+
+If you want plain `hermes` to use this checkout, point your launcher at the
+project wrapper. The wrapper accepts `HERMES_CUSTOM_HOME` for machines where
+the clone lives somewhere other than `~/mygit/hermes-agent-jk` and routes
+`hermes update` to the downstream updater.
 
 ## Update from Hermes upstream
 
