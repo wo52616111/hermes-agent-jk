@@ -1,0 +1,97 @@
+# jk-spaceduck skin — every canonical Hermes color token (SKIN_COLOR_TOKENS,
+# apps/shared/src/skin.ts) is set explicitly below, so nothing silently
+# inherits the gold `default` skin. Source palette: user's customized
+# jk-spaceduck theme (~/.tmux.conf + ~/.config/ghostty/config).
+#
+# Palette roles used:
+#   bg0     #000000  base background
+#   bg1     #0f111b  raised surface (status bar, menus, response box bg)
+#   bg2     #25294a  selected/active row
+#   purple  #b3a1e6  PRIMARY ACCENT (tmux "variable") — brand color
+#   purple2 #7a5ccc  secondary accent / title emphasis
+#   fg      #ecf0c1  primary text
+#   muted   #686f9a  secondary/dim text, borders
+#   dark    #30365f  faint borders, comments
+#   cyan    #00a3cc  string/identifier syntax (secondary, NOT brand accent)
+#   green   #5ccc96  success/ok/diff-added
+#   yellow  #f2ce00  constant/warn
+#   orange  #e39400  keyword
+#   red     #e33400  error/diff-removed
+#   magenta #ce6f8f  type (unused directly, reserved)
+
+name: jk-spaceduck
+description: jk-spaceduck — dark navy/black with purple accent, matches Ghostty & tmux
+
+colors:
+  # Base surface
+  background: "#000000"
+
+  # Brand accent + primary (ui_accent/banner_accent drive tool markers,
+  # headings, links, chevrons, session title text, shell $, everything
+  # that means "this is the theme color")
+  ui_accent: "#b3a1e6"
+  banner_accent: "#b3a1e6"
+  ui_primary: "#ecf0c1"
+  banner_title: "#ecf0c1"
+
+  # Text
+  ui_text: "#ecf0c1"
+  banner_text: "#ecf0c1"
+  banner_dim: "#686f9a"
+
+  # Structure / borders
+  ui_border: "#686f9a"
+  banner_border: "#686f9a"
+
+  # Semantic status
+  ui_ok: "#5ccc96"
+  ui_warn: "#f2ce00"
+  ui_error: "#e33400"
+  ui_label: "#b3a1e6"
+
+  # Element-specific
+  ui_tool: "#b3a1e6"
+  ui_thinking: "#686f9a"
+  # diff_added / diff_removed 是「行背景色」，*_word 是「行文字色」
+  # (ui-tui/src/components/markdown.tsx:839)。两者必须有对比度，
+  # 否则整行 diff 会变成一片纯色块，看不到任何代码。
+  diff_added: "#10331f"        # 暗绿底
+  diff_removed: "#3d1210"      # 暗红底
+  diff_added_word: "#5ccc96"   # 亮绿字
+  diff_removed_word: "#ff6b52" # 亮红字
+  syntax_string: "#00a3cc"
+  syntax_number: "#f2ce00"
+  syntax_keyword: "#e39400"
+  syntax_comment: "#686f9a"
+
+  # CLI / TUI chrome
+  prompt: "#ecf0c1"
+  input_rule: "#b3a1e6"
+  response_border: "#b3a1e6"
+  shell_dollar: "#b3a1e6"
+  selection_bg: "#25294a"
+  session_label: "#b3a1e6"
+  session_border: "#686f9a"
+
+  # Status bar — model name / session title / context bar all live here
+  status_bar_bg: "#0f111b"
+  status_bar_text: "#ecf0c1"
+  status_bar_strong: "#b3a1e6"
+  status_bar_dim: "#686f9a"
+  status_bar_good: "#5ccc96"
+  status_bar_warn: "#f2ce00"
+  status_bar_bad: "#e39400"
+  status_bar_critical: "#e33400"
+  voice_status_bg: "#0f111b"
+
+  # Completion menu
+  completion_menu_bg: "#0f111b"
+  completion_menu_current_bg: "#25294a"
+  completion_menu_meta_bg: "#0f111b"
+  completion_menu_meta_current_bg: "#25294a"
+
+branding:
+  agent_name: Hermes Agent
+  prompt_symbol: "❯"
+
+tool_prefix: "┊"

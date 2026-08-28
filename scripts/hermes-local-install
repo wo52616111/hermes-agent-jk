@@ -12,5 +12,10 @@ npx -y npm@11.17.0 ci --include=dev
 npx -y npm@11.17.0 run build:ink --workspace ui-tui
 npx -y npm@11.17.0 run build --workspace ui-tui
 
+HERMES_HOME_DIR=${HERMES_HOME:-$HOME/.hermes}
+mkdir -p "$HERMES_HOME_DIR/skins"
+cp "$ROOT/skins/jk-spaceduck.yaml" "$HERMES_HOME_DIR/skins/jk-spaceduck.yaml"
+"$ROOT/.venv/bin/hermes" config set display.skin jk-spaceduck >/dev/null
+
 printf 'Installed patched Hermes in %s\n' "$ROOT"
 printf 'Run with: %s/scripts/hermes-local-run\n' "$ROOT"
