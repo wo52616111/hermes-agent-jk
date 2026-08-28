@@ -7309,7 +7309,7 @@ DESKTOP_BACKEND_CONTRACT = 6
 
 def _account_usage_wire(snapshot, provider: str) -> dict | None:
     """Serialize a current-provider account quota snapshot for UI surfaces."""
-    if snapshot is None or snapshot.provider != provider:
+    if snapshot is None or snapshot.provider != str(provider or "").strip().lower():
         return None
 
     period_by_label = {
@@ -7391,7 +7391,7 @@ def _session_usage_snapshot(session: dict | None) -> dict:
         usage = _get_usage(agent)
         account_usage = _account_usage_wire(
             (session or {}).get("_account_usage_snapshot"),
-            str(getattr(agent, "provider", "") or ""),
+            str(getattr(agent, "provider", "") or "").strip().lower(),
         )
         usage["account_usage"] = account_usage
         return usage

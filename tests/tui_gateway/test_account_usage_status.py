@@ -43,6 +43,21 @@ def test_session_usage_includes_cached_capacity_windows_with_reset_times():
     }
 
 
+def test_session_usage_matches_provider_case_insensitively():
+    snapshot = AccountUsageSnapshot(
+        provider="anthropic",
+        source="oauth_usage_api",
+        fetched_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
+        windows=(AccountUsageWindow(label="Current session", used_percent=19),),
+    )
+    session = {"agent": _agent("Anthropic"), "_account_usage_snapshot": snapshot}
+
+    usage = server._session_usage_snapshot(session)
+
+    assert usage["account_usage"]["provider"] == "anthropic"
+    assert usage["account_usage"]["windows"][0]["period"] == "5h"
+
+
 def test_session_usage_clears_quota_from_previous_provider():
     snapshot = AccountUsageSnapshot(
         provider="anthropic",
