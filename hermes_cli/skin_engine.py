@@ -1016,6 +1016,7 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     status_warn = skin.get_color("status_bar_warn", warn)
     status_bad = skin.get_color("status_bar_bad", skin.get_color("banner_accent", warn))
     status_critical = skin.get_color("status_bar_critical", error)
+    session_label = skin.get_color("session_label", skin.get_color("ui_accent", title))
     voice_bg = skin.get_color("voice_status_bg", status_bg)
     menu_bg = skin.get_color("completion_menu_bg", "#1a1a2e")
     menu_current_bg = skin.get_color("completion_menu_current_bg", "#333355")
@@ -1039,6 +1040,7 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
         "status-bar-warn": f"bg:{status_bg} {status_warn} bold",
         "status-bar-bad": f"bg:{status_bg} {status_bad} bold",
         "status-bar-critical": f"bg:{status_bg} {status_critical} bold",
+        "status-bar-session-title": f"bg:{session_label} {status_bg} bold",
         "input-rule": input_rule,
         "image-badge": f"{label} bold",
         "completion-menu": f"bg:{menu_bg} {text}",
