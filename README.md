@@ -1,3 +1,12 @@
+> [!IMPORTANT]
+> **This is a personal fork, not upstream Hermes Agent.** It is a maintained
+> personal checkout with custom TUI capacity features (5h/7d provider quota
+> display, jk-spaceduck skin). It is **not** installed via the standard
+> `curl | bash` installer.
+>
+> **→ See [`README.patched.md`](README.patched.md) for install, run, and
+> upstream-update instructions before doing anything else in this repo.**
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
@@ -15,10 +24,6 @@
   <a href="README.ur-pk.md"><img src="https://img.shields.io/badge/Lang-اردو-green?style=for-the-badge" alt="اردو"></a>
   <a href="README.es.md"><img src="https://img.shields.io/badge/Lang-Español-orange?style=for-the-badge" alt="Español"></a>
 </p>
-
-> **Personal build:** this repository is a maintained personal Hermes checkout
-> with custom TUI capacity features. See [`README.patched.md`](README.patched.md)
-> for install, run, and upstream-update instructions.
 
 **The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
 
