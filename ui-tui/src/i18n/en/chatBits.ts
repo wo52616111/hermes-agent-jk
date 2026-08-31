@@ -11,8 +11,8 @@
 export const chatBitsEn = {
   chatBits: {
     branding: {
-      tagFull: 'Nous Research · Messenger of the Digital Gods',
-      tagMid: 'Messenger of the Digital Gods',
+      tagFull: 'Nous Research · Messenger of the Digital Gods · Customized by junkai',
+      tagMid: 'Messenger of the Digital Gods · Customized by junkai',
       scanningSkills: 'scanning skills',
       moreCategories: (count: number) => `(and ${count} more categories…)`,
       moreToolsets: (count: number) => `(and ${count} more toolsets…)`,

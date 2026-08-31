@@ -2,8 +2,21 @@
 set -euo pipefail
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
-TARGET=${HERMES_LAUNCHER_PATH:-$HOME/.local/bin/hermes}
+
+if [[ -n "${HERMES_LAUNCHER_PATH:-}" ]]; then
+  TARGET=$HERMES_LAUNCHER_PATH
+else
+  # Reuse the command the current shell already invokes when it is a
+  # user-writable file. This lets a downstream install replace an existing
+  # user-level Hermes launcher instead of creating a competing command.
+  EXISTING=$(command -v hermes 2>/dev/null || true)
+  if [[ "$EXISTING" == /* ]] && [[ -e "$EXISTING" || -L "$EXISTING" ]] && [[ -w "$(dirname -- "$EXISTING")" ]]; then
+    TARGET=$EXISTING
+  else
+    TARGET=$HOME/.local/bin/hermes
+  fi
+fi
 
 mkdir -p "$(dirname -- "$TARGET")"
 ln -sfn "$ROOT/scripts/hermes" "$TARGET"
-printf 'Installed hermes launcher: %s -> %s/scripts/hermes\n' "$TARGET" "$ROOT"
+printf 'Installed customized hermes launcher: %s -> %s/scripts/hermes\n' "$TARGET" "$ROOT"
