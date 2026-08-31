@@ -1,4 +1,5 @@
 from argparse import Namespace
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -265,6 +266,9 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert active_path_during_call == active_path
     assert not active_path.exists()
     assert env["NODE_ENV"] == "production"
+    boot_skin = json.loads(env["HERMES_TUI_BOOT_SKIN"])
+    assert boot_skin["name"] == "default"
+    assert boot_skin["colors"]["banner_title"] == "#FFD700"
 
 
 def test_launch_tui_prefers_launch_cwd_over_inherited_hermes_cwd(monkeypatch, main_mod, tmp_path):
@@ -296,6 +300,34 @@ def test_launch_tui_prefers_launch_cwd_over_inherited_hermes_cwd(monkeypatch, ma
     handed_to_tui = Path(captured["env"]["HERMES_CWD"]).resolve()
     assert handed_to_tui == launch.resolve(), "the TUI gateway must start where the user launched"
     assert handed_to_tui != stale.resolve()
+
+
+def test_serialize_tui_boot_skin_preserves_custom_startup_art(main_mod):
+    from hermes_cli.skin_engine import SkinConfig
+
+    skin = SkinConfig(
+        name="jk-spaceduck",
+        colors={"background": "#000000", "ui_accent": "#b3a1e6"},
+        branding={"agent_name": "Hermes Agent"},
+        banner_logo="[#d8c8ff]logo[/]",
+        banner_hero="[#7a5ccc]hero[/]",
+        tool_prefix="┊",
+    )
+
+    payload = json.loads(main_tui_launch._serialize_tui_boot_skin(skin))
+
+    assert payload == {
+        "banner_hero": "[#7a5ccc]hero[/]",
+        "banner_logo": "[#d8c8ff]logo[/]",
+        "branding": {"agent_name": "Hermes Agent"},
+        "colors": {"background": "#000000", "ui_accent": "#b3a1e6"},
+        "dark_colors": {},
+        "help_header": "",
+        "light_colors": {},
+        "name": "jk-spaceduck",
+        "tool_prefix": "┊",
+    }
+
 
 
 def test_launch_tui_worktree_still_outranks_the_launch_cwd(monkeypatch, main_mod, tmp_path):
