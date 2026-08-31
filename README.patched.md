@@ -83,14 +83,19 @@ Then update and rebuild with:
 ./scripts/hermes-local-update
 ```
 
-The script refuses to update a dirty checkout. Running TUI sessions are allowed
+The script first fast-forwards local work onto the latest customized
+`origin/main`, then rebases that complete customized stack onto `upstream/main`.
+It never pushes the resulting rebase: only a fork maintainer should publish it
+after review and CI. The script refuses to update a dirty checkout. Running TUI sessions are allowed
 to continue on their already-loaded version; exit and relaunch them after the
 update to use the rebuilt version.
 It then performs:
 
 ```text
+git fetch origin main
+git rebase origin/main
 git fetch upstream main
- git rebase upstream/main
+git rebase upstream/main
 uv sync --extra dev
 npm ci --include=dev
 build the TUI

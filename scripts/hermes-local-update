@@ -6,6 +6,14 @@ cd "$ROOT"
 
 UPSTREAM_REMOTE=${HERMES_UPSTREAM_REMOTE:-upstream}
 UPSTREAM_BRANCH=${HERMES_UPSTREAM_BRANCH:-main}
+CUSTOMIZED_REMOTE=${HERMES_CUSTOMIZED_REMOTE:-origin}
+CUSTOMIZED_BRANCH=${HERMES_CUSTOMIZED_BRANCH:-main}
+
+if ! git remote get-url "$CUSTOMIZED_REMOTE" >/dev/null 2>&1; then
+  printf 'Missing customized remote %q. Add it with:\n' "$CUSTOMIZED_REMOTE" >&2
+  printf '  git remote add %s <your-hermes-agent-jk-repository-url>\n' "$CUSTOMIZED_REMOTE" >&2
+  exit 1
+fi
 
 if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
   printf 'Missing git remote %q. Add it with:\n' "$UPSTREAM_REMOTE" >&2
@@ -24,9 +32,13 @@ if [[ -n "$(git status --porcelain)" ]]; then
   exit 3
 fi
 
-printf 'Fetching %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+printf 'Fetching customized %s/%s...\n' "$CUSTOMIZED_REMOTE" "$CUSTOMIZED_BRANCH"
+git fetch "$CUSTOMIZED_REMOTE" "$CUSTOMIZED_BRANCH"
+printf 'Rebasing local commits onto %s/%s...\n' "$CUSTOMIZED_REMOTE" "$CUSTOMIZED_BRANCH"
+git rebase "$CUSTOMIZED_REMOTE/$CUSTOMIZED_BRANCH"
+printf 'Fetching upstream %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 git fetch "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
-printf 'Rebasing local changes onto %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+printf 'Rebasing customized stack onto %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 git rebase "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
 uv sync --extra dev
@@ -39,4 +51,5 @@ mkdir -p "$HERMES_HOME_DIR/skins"
 cp "$ROOT/skins/jk-spaceduck.yaml" "$HERMES_HOME_DIR/skins/jk-spaceduck.yaml"
 "$ROOT/.venv/bin/hermes" config set display.skin jk-spaceduck >/dev/null
 
-printf 'Updated and built patched Hermes from %s/%s.\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
+printf 'Updated and built patched Hermes from %s/%s on %s/%s.\n' \
+  "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH" "$CUSTOMIZED_REMOTE" "$CUSTOMIZED_BRANCH"
