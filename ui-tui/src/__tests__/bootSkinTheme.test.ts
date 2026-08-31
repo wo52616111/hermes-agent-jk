@@ -10,7 +10,9 @@ describe('themeForBootSkin', () => {
       branding: { agent_name: 'Hermes Agent' },
       colors: { background: '#000000', ui_accent: '#b3a1e6', ui_primary: '#d8c8ff' },
       dark_colors: {},
+      help_header: '',
       light_colors: {},
+      name: 'jk-spaceduck',
       tool_prefix: '┊'
     })
 
