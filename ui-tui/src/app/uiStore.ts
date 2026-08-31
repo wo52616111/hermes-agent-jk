@@ -7,16 +7,42 @@ import { DEFAULT_THEME, fromSkin, skinIsLight, type Theme } from '../theme.js'
 
 import { DEFAULT_INDICATOR_STYLE, type UiState } from './interfaces.js'
 
-export function themeForBootSkin(skin: BootSkin | null): Theme | null {
+export interface ThemeSkinPayload {
+  banner_hero?: string
+  banner_logo?: string
+  branding?: Parameters<typeof fromSkin>[1]
+  colors?: Parameters<typeof fromSkin>[0]
+  dark_colors?: Parameters<typeof fromSkin>[0]
+  help_header?: string
+  light_colors?: Parameters<typeof fromSkin>[0]
+  tool_prefix?: string
+}
+
+// Both the launcher seed and gateway-ready payload enter through this resolver.
+// Keeping the conversion here makes the first and settled banner share artwork,
+// spacing, and every palette decision.
+export function themeForSkinPayload(skin: ThemeSkinPayload | null): Theme | null {
   if (!skin) {
     return null
   }
 
-  const paired = skinIsLight(skin.colors) ? skin.light_colors : skin.dark_colors
-  const colors = Object.keys(paired).length ? { ...skin.colors, ...paired } : skin.colors
+  const base = skin.colors ?? {}
+  const paired = skinIsLight(base) ? skin.light_colors : skin.dark_colors
+  const colors = paired && Object.keys(paired).length ? { ...base, ...paired } : base
 
-  return fromSkin(colors, skin.branding, skin.banner_logo, skin.banner_hero, skin.tool_prefix, skin.help_header)
+  return fromSkin(
+    colors,
+    skin.branding ?? {},
+    skin.banner_logo ?? '',
+    skin.banner_hero ?? '',
+    skin.tool_prefix ?? '',
+    skin.help_header ?? ''
+  )
 }
+
+export const themeForBootSkin = (skin: BootSkin | null): Theme | null => themeForSkinPayload(skin)
+
+export const startupTheme = themeForBootSkin(bootSkin) ?? bootTheme ?? DEFAULT_THEME
 
 const buildUiState = (): UiState => ({
   battery: false,
@@ -48,7 +74,7 @@ const buildUiState = (): UiState => ({
   timestamps: false,
   // The launcher-provided skin is authoritative on a cold boot; the persisted
   // theme remains the direct-Node fallback before gateway.ready.
-  theme: themeForBootSkin(bootSkin) ?? bootTheme ?? DEFAULT_THEME,
+  theme: startupTheme,
   usage: ZERO
 })
 

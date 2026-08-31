@@ -22,7 +22,7 @@ import { topLevelSubagents } from '../lib/subagentTree.js'
 import { isPaintableHex, setTerminalBackground, setTerminalForeground } from '../lib/terminalModes.js'
 import { formatAbandonedClarify, formatAbandonedClarifyBatch, formatToolCall, stripAnsi } from '../lib/text.js'
 import { bootSeededPin, invalidateBootBackground, writeBootTheme } from '../lib/themeBoot.js'
-import { defaultThemeForCurrentBackground, fromSkin, skinIsLight, type Theme, themeToneHex } from '../theme.js'
+import { defaultThemeForCurrentBackground, type Theme, themeToneHex } from '../theme.js'
 import type { Msg, SubagentProgress, SubagentStatus, Usage } from '../types.js'
 
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
@@ -31,7 +31,7 @@ import { getOverlayState, patchOverlayState } from './overlayStore.js'
 import { flashGoodVibes, flashPet } from './petFlashStore.js'
 import { turnController } from './turnController.js'
 import { getTurnState } from './turnStore.js'
-import { getUiState, patchUiState } from './uiStore.js'
+import { getUiState, patchUiState, themeForSkinPayload } from './uiStore.js'
 import { isWakeUserDisabled } from './wakeState.js'
 
 const NO_PROVIDER_RE = /\bNo (?:LLM|inference) provider configured\b/i
@@ -76,27 +76,7 @@ const statusFromBusy = () => (getUiState().busy ? 'running…' : 'ready')
 // background answer arrives after (or without) gateway.ready.
 let lastSkin: GatewaySkin | null = null
 
-const themeForSkin = (s: GatewaySkin) => {
-  // Polarity overrides OVERLAY the base palette, they don't replace it: a skin
-  // can ship a fills-only `light_colors` (flip the dark navy menu/status fills
-  // to light on a light terminal) while its vivid foreground golds keep coming
-  // from `colors` and render raw through fromSkin's shim. A full paired block
-  // still works — it just overrides every key it lists. Polarity follows the
-  // skin's authored background when it has one (the skin paints the terminal
-  // with it), else the host's.
-  const paired = skinIsLight(s.colors ?? {}) ? s.light_colors : s.dark_colors
-
-  const colors = paired && Object.keys(paired).length ? { ...(s.colors ?? {}), ...paired } : (s.colors ?? {})
-
-  return fromSkin(
-    colors,
-    s.branding ?? {},
-    s.banner_logo ?? '',
-    s.banner_hero ?? '',
-    s.tool_prefix ?? '',
-    s.help_header ?? ''
-  )
-}
+const themeForSkin = (skin: GatewaySkin): Theme => themeForSkinPayload(skin) ?? defaultThemeForCurrentBackground()
 
 // Patch the live theme AND persist it for the next launch's first frame
 // (flash-free boot — see lib/themeBoot.ts).

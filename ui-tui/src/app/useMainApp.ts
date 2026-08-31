@@ -69,9 +69,9 @@ const BRACKET_PASTE_ON = '\x1b[?2004h'
 const BRACKET_PASTE_OFF = '\x1b[?2004l'
 const MAX_HEIGHT_CACHE_BUCKETS = 12
 
-// Do not mount the fallback title before gateway/session info can provide the
-// configured skin; otherwise a default-gold intro paints for one frame.
-export const initialHistoryItems = (): Msg[] => []
+// Keep the startup surface responsive while AppLayout renders it through the
+// shared launcher/gateway theme resolver.
+export const initialHistoryItems = (): Msg[] => [{ kind: 'intro', role: 'system', text: '' }]
 
 const statusColorOf = (status: string, t: { error: string; muted: string; ok: string; warn: string }) => {
   if (status === 'ready') {
