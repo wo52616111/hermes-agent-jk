@@ -9,7 +9,7 @@ import { useGateway } from '../app/gatewayContext.js'
 import type { AppLayoutProps } from '../app/interfaces.js'
 import { $isBlocked, $overlayState, patchOverlayState } from '../app/overlayStore.js'
 import { $petBox } from '../app/petFlashStore.js'
-import { $uiState } from '../app/uiStore.js'
+import { $uiState, startupTheme } from '../app/uiStore.js'
 import { usePet } from '../app/usePet.js'
 import { $voicePartial } from '../app/voicePartialStore.js'
 import { INLINE_MODE, NATIVE_MODE, SHOW_FPS, TERMUX_TUI_MODE } from '../config/env.js'
@@ -212,7 +212,7 @@ const TranscriptPane = memo(function TranscriptPane({
           {row.msg.kind === 'intro' ? (
             nativeMode ? null : (
               <Box flexDirection="column" paddingTop={1}>
-                <Banner maxWidth={Math.max(1, composer.cols - 2)} t={ui.theme} />
+                <Banner maxWidth={Math.max(1, composer.cols - 2)} t={row.msg.info ? ui.theme : startupTheme} />
 
                 {row.msg.info && (
                   <SessionPanel

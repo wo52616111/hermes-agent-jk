@@ -586,7 +586,7 @@ export interface Usage {
 export interface AccountUsage {
   provider: string
   fetched_at: string
-  windows?: AccountUsageWindow[]
+  windows: AccountUsageWindow[]
 }
 /** One provider quota window (``tui_gateway/server.py::_account_usage_wire``). */
 export interface AccountUsageWindow {
