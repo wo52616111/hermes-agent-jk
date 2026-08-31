@@ -5,6 +5,7 @@ import React from 'react'
 import { describe, expect, it } from 'vitest'
 
 import { Banner } from '../components/branding.js'
+import { stripAnsi } from '../lib/text.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
@@ -31,8 +32,8 @@ async function renderBanner(columns = 80): Promise<string> {
 
   try {
     await delay(20)
-    // eslint-disable-next-line no-control-regex
-    return captured.replace(/\u001b\[[0-9;]*m/g, '')
+
+    return stripAnsi(captured)
   } finally {
     instance.unmount()
     instance.cleanup()

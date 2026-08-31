@@ -631,6 +631,20 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return patchOverlayState({ modelPicker: true })
     }
 
+    if (isCtrl(key, ch, 's')) {
+      const outcome = cActions.toggleStash()
+
+      if (outcome === 'stashed') {
+        return actions.sys('draft stashed — Ctrl-S to restore')
+      }
+
+      if (outcome === 'restored') {
+        return actions.sys('draft restored')
+      }
+
+      return actions.sys('no draft to stash')
+    }
+
     if (key.ctrl && ch.toLowerCase() === 'c') {
       const ctrlC = resolveCtrlCComposerAction({
         busy: live.busy,
