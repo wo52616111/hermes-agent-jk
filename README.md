@@ -7,6 +7,22 @@
 > **→ See [`README.patched.md`](README.patched.md) for install, run, and
 > upstream-update instructions before doing anything else in this repo.**
 
+## junkai customizations
+
+- **Provider capacity in the TUI** — a dedicated capacity row shows context
+  usage plus provider quota windows (`5h` / `7d`) and reset countdowns when
+  available; OpenAI Codex, Anthropic, and OpenCode Go usage refreshes after a
+  completed turn without discarding the last successful snapshot on failure.
+- **TUI-first, branded runtime** — bare `hermes` starts the Ink TUI, installs
+  the `jk-spaceduck` skin, and identifies the build as “Customized by junkai”.
+- **Draft stash hotkey** — `Ctrl-S` parks the entire composer draft (including
+  multiline input and attachment/paste tokens); press it again to restore the
+  one in-memory stash after using a slash command or `!cmd`.
+- **Downstream-aware update path** — `hermes update` first syncs this fork's
+  latest `origin/main`, then rebases its customized stack onto Nous upstream;
+  running TUI sessions may finish on their loaded build and pick up the update
+  after relaunching.
+
 <p align="center">
   <img src="assets/banner.png" alt="Hermes Agent" width="100%">
 </p>
