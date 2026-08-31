@@ -16,6 +16,8 @@ HERMES_HOME_DIR=${HERMES_HOME:-$HOME/.hermes}
 mkdir -p "$HERMES_HOME_DIR/skins"
 cp "$ROOT/skins/jk-spaceduck.yaml" "$HERMES_HOME_DIR/skins/jk-spaceduck.yaml"
 "$ROOT/.venv/bin/hermes" config set display.skin jk-spaceduck >/dev/null
+"$ROOT/.venv/bin/hermes" config set display.interface tui >/dev/null
+"$ROOT/scripts/hermes-local-link"
 
-printf 'Installed patched Hermes in %s\n' "$ROOT"
-printf 'Run with: %s/scripts/hermes-local-run\n' "$ROOT"
+printf 'Installed customized Hermes in %s\n' "$ROOT"
+printf 'Run with: hermes --tui\n'
