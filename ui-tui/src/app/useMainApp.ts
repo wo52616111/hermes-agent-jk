@@ -69,6 +69,10 @@ const BRACKET_PASTE_ON = '\x1b[?2004h'
 const BRACKET_PASTE_OFF = '\x1b[?2004l'
 const MAX_HEIGHT_CACHE_BUCKETS = 12
 
+// Do not mount the fallback title before gateway/session info can provide the
+// configured skin; otherwise a default-gold intro paints for one frame.
+export const initialHistoryItems = (): Msg[] => []
+
 const statusColorOf = (status: string, t: { error: string; muted: string; ok: string; warn: string }) => {
   if (status === 'ready') {
     return t.ok
@@ -181,7 +185,7 @@ export function useMainApp(gw: GatewayClient) {
     }
   }, [stdout])
 
-  const [historyItems, setHistoryItemsState] = useState<Msg[]>(() => [{ kind: 'intro', role: 'system', text: '' }])
+  const [historyItems, setHistoryItemsState] = useState<Msg[]>(initialHistoryItems)
   const [historyGeneration, setHistoryGeneration] = useState(0)
 
   const setHistoryItems = useCallback<StateSetter<Msg[]>>(value => {
