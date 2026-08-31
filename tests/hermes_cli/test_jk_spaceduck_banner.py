@@ -6,7 +6,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SKIN_PATH = ROOT / "skins" / "jk-spaceduck.yaml"
-PURPLE_GRADIENT = {"#d8c8ff", "#b3a1e6", "#7a5ccc", "#686f9a"}
+PURPLE_GRADIENT = {"#c792ea", "#aa7ae6", "#8b5cf6", "#6d4cc7"}
 RICH_COLOR = re.compile(r"\[(?:bold )?(#[0-9a-fA-F]{6})\]")
 
 
