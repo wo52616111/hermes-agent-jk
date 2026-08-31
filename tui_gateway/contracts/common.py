@@ -29,7 +29,9 @@ class AccountUsage(Result):
 
     provider: str
     fetched_at: str
-    windows: list[AccountUsageWindow] = Field(default_factory=list)
+    # Always present when the snapshot is: the wire helper returns None instead of an
+    # empty window list, so the field is required rather than defaulted.
+    windows: list[AccountUsageWindow]
 
 
 class Usage(OpenModel):

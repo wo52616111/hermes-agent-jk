@@ -4096,7 +4096,8 @@
         },
         "required": [
           "provider",
-          "fetched_at"
+          "fetched_at",
+          "windows"
         ],
         "title": "AccountUsage",
         "type": "object"
