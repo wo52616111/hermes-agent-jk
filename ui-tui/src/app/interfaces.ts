@@ -416,6 +416,8 @@ export interface ComposerActions {
   setInputBuf: StateSetter<string[]>
   setQueueEdit: (index: null | number) => void
   takeQueue: (index: number, editedDisplay?: string) => QueueItem | Promise<QueueItem | undefined> | undefined
+  /** Move the active composer draft to/from the one-slot in-memory stash. */
+  toggleStash: () => 'empty' | 'restored' | 'stashed'
   /** Reconcile attached payloads against tokens still present in the text. */
   syncTokens: (value: string) => void
 }

@@ -9,6 +9,7 @@ import { useCallback, useMemo, useRef, useState } from 'react'
 
 import type { PasteEvent } from '../components/textInput.js'
 import { droppedTokens, imageToken, nextImageIndex } from '../domain/attachments.js'
+import { type ComposerDraft, toggleComposerStash } from '../domain/composerStash.js'
 import type { ClipboardPasteResponse, ImageAttachResponse, InputDetectDropResponse } from '../gatewayTypes.js'
 import { useCompletion } from '../hooks/useCompletion.js'
 import { useInputHistory } from '../hooks/useInputHistory.js'
@@ -133,12 +134,19 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
   // times before React re-renders, so the refs — not the state — are the source
   // of truth for "what is in the composer right now".
   const inputRef = useRef('')
+  const inputBufRef = useRef<string[]>([])
   const tokensRef = useRef<ComposerToken[]>([])
+  const stashRef = useRef<ComposerDraft | null>(null)
 
   const setInput = useCallback<StateSetter<string>>(next => {
     composerRevision.current++
     inputRef.current = typeof next === 'function' ? next(inputRef.current) : next
     setInputState(inputRef.current)
+  }, [])
+
+  const setInputBuf = useCallback<StateSetter<string[]>>(next => {
+    inputBufRef.current = typeof next === 'function' ? next(inputBufRef.current) : next
+    setInputBufState(inputBufRef.current)
   }, [])
 
   const setComposerTokens = useCallback<StateSetter<ComposerToken[]>>(next => {
@@ -175,6 +183,32 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
     setHistoryIdx(null)
     historyDraftRef.current = ''
   }, [historyDraftRef, setComposerTokens, setHistoryIdx, setInput, setInputBuf, setQueueEdit])
+
+  const toggleStash = useCallback(() => {
+    const result = toggleComposerStash(
+      {
+        input: inputRef.current,
+        inputBuf: inputBufRef.current,
+        queueEditIdx: queueEditRef.current,
+        tokens: tokensRef.current
+      },
+      stashRef.current
+    )
+
+    if (result.action === 'empty') {
+      return result.action
+    }
+
+    stashRef.current = result.stash
+    setInput(result.current.input)
+    setInputBuf(result.current.inputBuf)
+    setComposerTokens(result.current.tokens)
+    setQueueEdit(result.current.queueEditIdx)
+    setHistoryIdx(null)
+    historyDraftRef.current = ''
+
+    return result.action
+  }, [historyDraftRef, queueEditRef, setComposerTokens, setHistoryIdx, setInput, setInputBuf, setQueueEdit])
 
   /**
    * Deleting an `[[ Image N ]]` token IS how you unattach the image — there is
@@ -575,6 +609,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
       setInputBuf,
       setQueueEdit,
       takeQueue: takeQ,
+      toggleStash,
       syncTokens
     }),
     [
@@ -594,9 +629,10 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
       setComposerTokens,
       setHistoryIdx,
       setInput,
+      setInputBuf,
       setQueueEdit,
       takeQ,
-      setInputBuf,
+      toggleStash,
       syncTokens
     ]
   )
