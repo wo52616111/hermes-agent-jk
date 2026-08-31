@@ -2,10 +2,21 @@ import { atom, computed } from 'nanostores'
 
 import { MOUSE_TRACKING } from '../config/env.js'
 import { ZERO } from '../domain/usage.js'
-import { bootTheme } from '../lib/themeBoot.js'
-import { DEFAULT_THEME } from '../theme.js'
+import { type BootSkin, bootSkin, bootTheme } from '../lib/themeBoot.js'
+import { DEFAULT_THEME, fromSkin, skinIsLight, type Theme } from '../theme.js'
 
 import { DEFAULT_INDICATOR_STYLE, type UiState } from './interfaces.js'
+
+export function themeForBootSkin(skin: BootSkin | null): Theme | null {
+  if (!skin) {
+    return null
+  }
+
+  const paired = skinIsLight(skin.colors) ? skin.light_colors : skin.dark_colors
+  const colors = Object.keys(paired).length ? { ...skin.colors, ...paired } : skin.colors
+
+  return fromSkin(colors, skin.branding, skin.banner_logo, skin.banner_hero, skin.tool_prefix, skin.help_header)
+}
 
 const buildUiState = (): UiState => ({
   battery: false,
@@ -35,9 +46,9 @@ const buildUiState = (): UiState => ({
   statusBarFields: null,
   streaming: true,
   timestamps: false,
-  // Last session's resolved theme paints frame one (flash-free boot, like
-  // the desktop's hermes-boot-* keys); DEFAULT_THEME only on first launch.
-  theme: bootTheme ?? DEFAULT_THEME,
+  // The launcher-provided skin is authoritative on a cold boot; the persisted
+  // theme remains the direct-Node fallback before gateway.ready.
+  theme: themeForBootSkin(bootSkin) ?? bootTheme ?? DEFAULT_THEME,
   usage: ZERO
 })
 
