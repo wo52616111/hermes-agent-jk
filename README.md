@@ -41,7 +41,11 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 
 ---
 
-## Quick Install
+## Install upstream Hermes instead
+
+> This upstream installer does **not** include the `junkai` customizations in
+> this repository. Use the custom-build instructions above when sharing this
+> fork.
 
 ### Linux, macOS, WSL2, Termux
 

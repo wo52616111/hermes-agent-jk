@@ -154,9 +154,9 @@ class TestParserFlags:
 
 
 # ---------------------------------------------------------------------------
-# config default — shipped default preserves classic behavior
+# config default — this downstream build launches the Ink TUI by default
 # ---------------------------------------------------------------------------
-def test_default_config_interface_is_cli():
+def test_default_config_interface_is_tui():
     from hermes_cli.config import DEFAULT_CONFIG
 
-    assert DEFAULT_CONFIG["display"]["interface"] == "cli"
+    assert DEFAULT_CONFIG["display"]["interface"] == "tui"

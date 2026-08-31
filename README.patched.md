@@ -35,15 +35,16 @@ cd hermes-agent-jk
 
 The installer creates the local Python environment, installs dependencies,
 builds the TUI bundle, installs the bundled `jk-spaceduck` skin into
-`$HERMES_HOME/skins`, and selects it as the default skin. It does not copy
-credentials or session history from the publisher.
+`$HERMES_HOME/skins`, selects it as the default skin, and rewires the current
+user-writable `hermes` launcher to this checkout. It does not copy credentials
+or session history from the publisher.
 
 Authenticate using the normal Hermes flow:
 
 ```bash
-./scripts/hermes-local-run setup
+hermes setup
 # or use the relevant provider command, for example:
-./scripts/hermes-local-run auth
+hermes auth
 ```
 
 The exact provider credentials remain in the installer's own Hermes home.
@@ -51,28 +52,21 @@ The exact provider credentials remain in the installer's own Hermes home.
 ## Run
 
 ```bash
+hermes
+```
+
+`./scripts/hermes-local-install` makes plain `hermes` launch this checkout in TUI mode.
+It reuses the current user-writable `hermes` launcher when possible; otherwise
+it installs `~/.local/bin/hermes`, which must precede any other Hermes launcher
+on `PATH`. Set `HERMES_LAUNCHER_PATH` to choose an explicit launcher path.
+
+For a one-off invocation that bypasses `PATH`, run:
+
+```bash
 ./scripts/hermes-local-run --tui
 ```
 
-To make this checkout available as a short command, create a user-local
-symlink:
-
-```bash
-ln -sfn "$PWD/scripts/hermes-local-run" "$HOME/.local/bin/hermes-jk"
-hermes-jk --tui
-```
-
-The project does not overwrite an existing global `hermes` launcher during install;
-`hermes-local-link` is the explicit opt-in command that makes this checkout the
-normal `hermes` command.
-
-To make plain `hermes` use this checkout, run:
-
-```bash
-./scripts/hermes-local-link
-```
-
-The link accepts `HERMES_LAUNCHER_PATH` for a custom install location. The
+`./scripts/hermes-local-link` can be rerun after moving the checkout. The
 launcher routes `hermes update` to the downstream updater.
 
 ## Update from Hermes upstream
@@ -112,7 +106,7 @@ new computer:
 git clone <your-repository-url> hermes-agent-jk
 cd hermes-agent-jk
 ./scripts/hermes-local-install
-./scripts/hermes-local-run --tui
+hermes
 ```
 
 The repository contains the source changes and the update/install workflow. It
