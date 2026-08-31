@@ -5,14 +5,24 @@ The repository remains a complete Hermes Agent tree; this is not a TUI plugin.
 
 ## What is patched
 
-The current patch adds provider account-capacity information to the TUI:
+This downstream build adds a focused TUI and maintenance layer on top of
+upstream Hermes:
 
-- context usage is moved to a dedicated capacity row;
-- provider windows use `5h` and `7d` labels;
-- reset countdowns are shown when the provider supplies reset timestamps;
-- OpenAI Codex and Anthropic usage refreshes run after completed turns;
-- failed refreshes retain the last successful snapshot;
-- provider changes clear stale quota data.
+- **Provider account capacity** — context usage is moved to a dedicated
+  capacity row; provider windows use `5h` and `7d` labels; reset countdowns
+  appear when timestamps are available; OpenAI Codex, Anthropic, and OpenCode
+  Go usage refreshes run after completed turns; failed refreshes retain the
+  last successful snapshot; and provider switches clear stale quota data.
+- **TUI-first identity** — bare `hermes` defaults to the Ink TUI, installs the
+  bundled `jk-spaceduck` skin, and labels the startup banner as customized by
+  junkai.
+- **Composer draft stash** — `Ctrl-S` swaps the full composer state with a
+  one-slot in-memory stash, preserving multiline input, queue-edit state, and
+  attachment/paste tokens while a slash command or `!cmd` is run.
+- **Shareable downstream updates** — `hermes update` syncs the fork's latest
+  `origin/main` before rebasing the customized stack onto upstream, rebuilds
+  the local runtime, and permits existing TUI sessions to finish on their
+  already-loaded version.
 
 ## Install for a new user
 
