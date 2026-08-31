@@ -702,6 +702,37 @@ def _apply_tui_python_env(env: dict) -> None:
         env["HERMES_PYTHON"] = sys.executable
 
 
+def _serialize_tui_boot_skin(skin) -> str:
+    """Serialize the already-resolved skin for the TUI's synchronous first frame."""
+    branding = getattr(skin, "branding", {}) or {}
+    return json.dumps(
+        {
+            "name": str(getattr(skin, "name", "")),
+            "colors": getattr(skin, "colors", {}) or {},
+            "light_colors": getattr(skin, "light_colors", {}) or {},
+            "dark_colors": getattr(skin, "dark_colors", {}) or {},
+            "branding": branding,
+            "banner_logo": str(getattr(skin, "banner_logo", "") or ""),
+            "banner_hero": str(getattr(skin, "banner_hero", "") or ""),
+            "tool_prefix": str(getattr(skin, "tool_prefix", "") or ""),
+            "help_header": str(branding.get("help_header", "") or ""),
+        },
+        separators=(",", ":"),
+    )
+
+
+def _configured_tui_boot_skin() -> str:
+    """Return the active skin without waiting for the TUI gateway handshake."""
+    try:
+        from hermes_cli.config import load_config
+        from hermes_cli.skin_engine import get_active_skin, init_skin_from_config
+
+        init_skin_from_config(load_config())
+        return _serialize_tui_boot_skin(get_active_skin())
+    except Exception:
+        return ""
+
+
 def _setup_tui_worktree() -> dict:
     """Create the ``--worktree`` checkout for a TUI launch (prune + async pack maintenance); exits on failure."""
     wt_info = None
@@ -763,6 +794,11 @@ def _launch_tui(
         env["TERMINAL_CWD"] = wt_info["path"]
 
     _apply_tui_python_env(env)
+    boot_skin = _configured_tui_boot_skin()
+    if boot_skin:
+        env["HERMES_TUI_BOOT_SKIN"] = boot_skin
+    else:
+        env.pop("HERMES_TUI_BOOT_SKIN", None)
 
     skills_value = ""
     if skills:

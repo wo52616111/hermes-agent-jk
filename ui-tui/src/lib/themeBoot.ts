@@ -197,7 +197,59 @@ export function invalidateBootBackground(env: NodeJS.ProcessEnv = process.env): 
   return true
 }
 
+export interface BootSkin {
+  banner_hero: string
+  banner_logo: string
+  branding: Record<string, string>
+  colors: Record<string, string>
+  dark_colors: Record<string, string>
+  help_header: string
+  light_colors: Record<string, string>
+  name: string
+  tool_prefix: string
+}
+
+const recordOrEmpty = (value: unknown): Record<string, string> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {}
+  }
+
+  return Object.fromEntries(Object.entries(value).filter(([, item]) => typeof item === 'string'))
+}
+
+/** Parse the configured launcher skin passed before the asynchronous gateway handshake. */
+export function parseBootSkin(raw: string | undefined): BootSkin | null {
+  if (!raw || raw.length > 128_000) {
+    return null
+  }
+
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>
+
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return null
+    }
+
+    return {
+      banner_hero: typeof value.banner_hero === 'string' ? value.banner_hero : '',
+      banner_logo: typeof value.banner_logo === 'string' ? value.banner_logo : '',
+      branding: recordOrEmpty(value.branding),
+      colors: recordOrEmpty(value.colors),
+      dark_colors: recordOrEmpty(value.dark_colors),
+      help_header: typeof value.help_header === 'string' ? value.help_header : '',
+      light_colors: recordOrEmpty(value.light_colors),
+      name: typeof value.name === 'string' ? value.name : '',
+      tool_prefix: typeof value.tool_prefix === 'string' ? value.tool_prefix : ''
+    }
+  } catch {
+    return null
+  }
+}
+
 const boot = readBootTheme()
+
+/** The configured skin passed by the Python launcher for a cold first frame. */
+export const bootSkin = parseBootSkin(process.env.HERMES_TUI_BOOT_SKIN)
 
 /** True when this boot replayed a cached config pin into HERMES_TUI_THEME.
  *  applyConfiguredTuiTheme treats it as config-owned so a later 'auto' can
