@@ -83,7 +83,9 @@ Then update and rebuild with:
 ./scripts/hermes-local-update
 ```
 
-The script refuses to update a dirty checkout or one with a TUI process running.
+The script refuses to update a dirty checkout. Running TUI sessions are allowed
+to continue on their already-loaded version; exit and relaunch them after the
+update to use the rebuilt version.
 It then performs:
 
 ```text

@@ -14,9 +14,8 @@ if ! git remote get-url "$UPSTREAM_REMOTE" >/dev/null 2>&1; then
 fi
 
 if pgrep -f "$ROOT/ui-tui/dist/entry.js" >/dev/null 2>&1; then
-  printf 'Refusing to update while this checkout has a running TUI.\n' >&2
-  printf 'Exit the TUI first to avoid mixing old in-memory modules with new files.\n' >&2
-  exit 2
+  printf 'Note: updating while this checkout has running TUI session(s).\n' >&2
+  printf 'They keep their loaded version; exit and relaunch them after the update to use the new build.\n' >&2
 fi
 
 if [[ -n "$(git status --porcelain)" ]]; then
