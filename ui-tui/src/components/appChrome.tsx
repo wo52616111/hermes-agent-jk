@@ -660,11 +660,15 @@ export function StatusRule({
   // yields first. The busy face width depends on the active /indicator style
   // (kaomoji is wide + verb; unicode is a bare 1-col spinner). When a notice
   // occupies the slot it reserves only `noticeReserve` (it shrinks/truncates).
+  const showStatus = !busy && status !== 'ready'
+
   const slotWidth = busy
     ? busyIndicatorWidth(indicatorStyle, turnStartedAt != null)
     : showNotice
       ? noticeReserve
-      : stringWidth(status)
+      : showStatus
+        ? stringWidth(status)
+        : 0
 
   const essentialWidth =
     stringWidth('─ ') + batteryWidth + slotWidth + stringWidth(' │ ') + stringWidth(modelText)
@@ -791,7 +795,7 @@ export function StatusRule({
               style={indicatorStyle}
               verbOverride={compacting ? 'compacting' : undefined}
             />
-          ) : showNotice ? null : (
+          ) : showNotice || !showStatus ? null : (
             <Text color={statusColor} wrap="truncate-end">
               {status}
             </Text>

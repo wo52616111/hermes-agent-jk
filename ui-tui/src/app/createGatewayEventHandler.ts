@@ -907,13 +907,25 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         if (p.kind === 'compressing' || p.kind === 'compacting') {
           sys(p.text)
           turnController.clearStatusTimer()
-          patchUiState({ compacting: true })
+          patchUiState({
+            compacting: true,
+            // 'compressing' means real work is in flight; 'compacting' can be announced
+            // while idle (auto-compaction before continuing), so it must not light the
+            // busy indicator on its own.
+            ...(p.kind === 'compressing' ? { busy: true } : {})
+          })
 
           return
         }
 
         if (p.kind === 'compacted') {
           patchUiState({ compacting: false })
+        }
+
+        if (p.text === 'ready') {
+          patchUiState({ busy: false, status: '' })
+
+          return
         }
 
         if (!p.kind || p.kind === 'status') {

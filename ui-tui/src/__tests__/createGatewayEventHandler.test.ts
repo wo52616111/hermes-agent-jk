@@ -325,6 +325,11 @@ describe('createGatewayEventHandler', () => {
 
     expect(ctx.system.sys).toHaveBeenCalledWith('compressing 968 messages (~123,400 tok)…')
     expect(getUiState().compacting).toBe(true)
+    expect(getUiState()).toMatchObject({ busy: true, status: 'compressing 968 messages (~123,400 tok)…' })
+
+    onEvent({ payload: { kind: 'status', text: 'ready' }, type: 'status.update' } as any)
+
+    expect(getUiState()).toMatchObject({ busy: false, status: '' })
   })
 
   it('keeps auto-compaction status visible until compaction finishes (#97239)', () => {
