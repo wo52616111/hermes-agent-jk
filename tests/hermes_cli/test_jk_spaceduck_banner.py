@@ -6,11 +6,21 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 SKIN_PATH = ROOT / "skins" / "jk-spaceduck.yaml"
-PURPLE_GRADIENT = {"#c792ea", "#aa7ae6", "#8b5cf6", "#a855f7", "#6d28d9", "#6d4cc7"}
+PURPLE_GRADIENT = {
+    "#ecf0c1",
+    "#b3a1e6",
+    "#7a5ccc",
+    "#6d4cc7",
+    "#c792ea",
+    "#aa7ae6",
+    "#8b5cf6",
+    "#a855f7",
+    "#6d28d9",
+}
 RICH_COLOR = re.compile(r"\[(?:bold )?(#[0-9a-fA-F]{6})\]")
 
 
-TITLE_STOPS = ["#c792ea", "#c792ea", "#a855f7", "#a855f7", "#6d28d9", "#6d28d9"]
+TITLE_STOPS = ["#ecf0c1", "#ecf0c1", "#b3a1e6", "#b3a1e6", "#7a5ccc", "#7a5ccc"]
 
 
 def test_jk_spaceduck_banner_art_uses_only_the_purple_gradient():
