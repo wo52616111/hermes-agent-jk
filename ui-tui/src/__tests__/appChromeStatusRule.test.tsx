@@ -304,7 +304,7 @@ describe('StatusRule session count click target', () => {
     const rendered = textContent(element)
 
     // Must-keep essentials survive intact …
-    expect(rendered).toContain('ready')
+    expect(rendered).not.toContain('ready')
     expect(rendered).toContain('opus 4.8')
     // … while the low-value tail (session count) is dropped, not truncated.
     expect(rendered).not.toContain('3 sessions')

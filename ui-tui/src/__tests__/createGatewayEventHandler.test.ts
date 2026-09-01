@@ -194,6 +194,11 @@ describe('createGatewayEventHandler', () => {
     } as any)
 
     expect(ctx.system.sys).toHaveBeenCalledWith('compressing 968 messages (~123,400 tok)…')
+    expect(getUiState()).toMatchObject({ busy: true, status: 'compressing 968 messages (~123,400 tok)…' })
+
+    onEvent({ payload: { kind: 'status', text: 'ready' }, type: 'status.update' } as any)
+
+    expect(getUiState()).toMatchObject({ busy: false, status: '' })
   })
 
   it('keeps goal verdict text in transcript but shows a brief idle status (#goal statusbar)', () => {

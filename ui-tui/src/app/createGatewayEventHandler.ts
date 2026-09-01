@@ -833,7 +833,14 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         setStatus(p.text)
 
         if (p.kind === 'compressing') {
+          patchUiState({ busy: true })
           sys(p.text)
+
+          return
+        }
+
+        if (p.text === 'ready') {
+          patchUiState({ busy: false, status: '' })
 
           return
         }

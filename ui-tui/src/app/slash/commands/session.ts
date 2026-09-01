@@ -239,6 +239,14 @@ export const sessionCommands: SlashCommand[] = [
     help: 'compress transcript',
     name: 'compress',
     run: (arg, ctx) => {
+      patchUiState({ busy: true, status: 'compressing…' })
+
+      const finish = () => {
+        if (!ctx.stale()) {
+          patchUiState({ busy: false, status: '' })
+        }
+      }
+
       ctx.gateway
         .rpc<SessionCompressResponse>('session.compress', {
           session_id: ctx.sid,
@@ -286,6 +294,7 @@ export const sessionCommands: SlashCommand[] = [
           })
         )
         .catch(ctx.guardedErr)
+        .finally(finish)
     }
   },
 

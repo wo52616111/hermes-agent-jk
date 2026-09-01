@@ -10209,7 +10209,7 @@ def test_session_compress_returns_compute_host_history(monkeypatch):
     }
 
 
-def test_session_compress_forwards_120_second_budget_to_compute_host(monkeypatch):
+def test_session_compress_forwards_extended_budget_to_compute_host(monkeypatch):
     session = _session(agent=None, _compute_host_active=True)
     server._sessions["sid"] = session
     calls = []
@@ -10244,7 +10244,7 @@ def test_session_compress_forwards_120_second_budget_to_compute_host(monkeypatch
                 "route_name": "session.compress",
                 "command": "/compress",
                 "wait": True,
-                "timeout": 120.0,
+                "timeout": 660.0,
             },
         )
     ]
