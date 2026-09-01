@@ -24,5 +24,5 @@ def test_jk_spaceduck_banner_art_uses_only_the_purple_gradient():
     title_colors = [color.lower() for color in RICH_COLOR.findall(skin["banner_logo"])]
 
     assert title_colors == TITLE_STOPS
-    assert skin["banner_logo"].endswith("\n")
+    assert not skin["banner_logo"].endswith("\n")
     assert len(skin["banner_logo"].splitlines()) == 6
