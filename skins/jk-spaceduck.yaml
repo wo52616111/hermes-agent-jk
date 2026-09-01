@@ -98,7 +98,7 @@ tool_prefix: "┊"
 
 # Startup art stays violet-only, with a saturated three-stop gradient.
 # Keep the original six-row block glyphs intact.
-banner_logo: |
+banner_logo: |-
   [bold #c792ea]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
   [bold #c792ea]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
   [#a855f7]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
