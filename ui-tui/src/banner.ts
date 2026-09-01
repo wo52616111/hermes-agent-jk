@@ -72,8 +72,34 @@ const CADUCEUS_ART = [
 
 const LOGO_GRADIENT = [0, 0, 1, 1, 2, 2] as const
 const CADUC_GRADIENT = [2, 2, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 3] as const
+const STARTUP_PURPLE = ['#c792ea', '#a855f7', '#6d28d9'] as const
+const STARTUP_CADUCEUS_PURPLE = [
+  '#6d4cc7',
+  '#6d4cc7',
+  '#8b5cf6',
+  '#8b5cf6',
+  '#c792ea',
+  '#c792ea',
+  '#aa7ae6',
+  '#aa7ae6',
+  '#8b5cf6',
+  '#8b5cf6',
+  '#6d4cc7',
+  '#6d4cc7',
+  '#6d4cc7',
+  '#6d4cc7',
+  '#6d4cc7'
+] as const
 
 const colorize = (art: string[], gradient: readonly number[], c: ThemeColors): Line[] => {
+  if (art === LOGO_ART) {
+    return art.map((text, i) => [STARTUP_PURPLE[gradient[i]!] ?? c.muted, text])
+  }
+
+  if (art === CADUCEUS_ART) {
+    return art.map((text, i) => [STARTUP_CADUCEUS_PURPLE[i] ?? c.muted, text])
+  }
+
   const p = [c.primary, c.accent, c.border, c.muted]
 
   return art.map((text, i) => [p[gradient[i]!] ?? c.muted, text])
