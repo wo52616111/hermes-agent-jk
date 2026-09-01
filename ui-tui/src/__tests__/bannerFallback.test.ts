@@ -8,12 +8,12 @@ describe('fallback startup logo', () => {
     const colors = logo(DEFAULT_THEME.color).map(([color]) => color)
 
     expect(colors).toEqual([
-      '#c792ea',
-      '#c792ea',
-      '#a855f7',
-      '#a855f7',
-      '#6d28d9',
-      '#6d28d9'
+      '#ecf0c1',
+      '#ecf0c1',
+      '#b3a1e6',
+      '#b3a1e6',
+      '#7a5ccc',
+      '#7a5ccc'
     ])
   })
 
