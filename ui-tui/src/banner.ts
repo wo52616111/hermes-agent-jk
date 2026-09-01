@@ -72,7 +72,7 @@ const CADUCEUS_ART = [
 
 const LOGO_GRADIENT = [0, 0, 1, 1, 2, 2] as const
 const CADUC_GRADIENT = [2, 2, 1, 1, 0, 0, 1, 1, 2, 2, 3, 3, 3, 3, 3] as const
-const STARTUP_PURPLE = ['#c792ea', '#a855f7', '#6d28d9'] as const
+const STARTUP_PURPLE = ['#ecf0c1', '#b3a1e6', '#7a5ccc'] as const
 const STARTUP_CADUCEUS_PURPLE = [
   '#6d4cc7',
   '#6d4cc7',
