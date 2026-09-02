@@ -146,7 +146,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_default_hermes_root, get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -786,8 +786,24 @@ _active_skin_name: str = "default"
 
 
 def _skins_dir() -> Path:
-    """User skins directory."""
+    """Skins directory owned by the active profile/home."""
     return get_hermes_home() / "skins"
+
+
+def _skin_search_dirs() -> List[Path]:
+    """Resolve profile overrides before skins shared by the default profile.
+
+    Named profiles own their state but inherit user-installed skins from the
+    root Hermes home. A profile can still override a shared skin by placing a
+    same-named YAML file in its own ``skins/`` directory.
+    """
+    active = _skins_dir()
+    shared = get_default_hermes_root() / "skins"
+    try:
+        same_dir = active.resolve(strict=False) == shared.resolve(strict=False)
+    except OSError:
+        same_dir = active == shared
+    return [active] if same_dir else [active, shared]
 
 
 def _load_skin_from_yaml(path: Path) -> Optional[Dict[str, Any]]:
@@ -871,33 +887,35 @@ def list_skins() -> List[Dict[str, str]]:
             "source": "builtin",
         })
 
-    skins_path = _skins_dir()
-    if skins_path.is_dir():
+    seen_names = {entry["name"] for entry in result}
+    for skins_path in _skin_search_dirs():
+        if not skins_path.is_dir():
+            continue
         for f in sorted(skins_path.glob("*.yaml")):
             data = _load_skin_from_yaml(f)
             if data:
                 skin_name = data.get("name", f.stem)
-                # Skip if it shadows a built-in
-                if any(s["name"] == skin_name for s in result):
+                # Built-ins and profile-local skins take precedence.
+                if skin_name in seen_names:
                     continue
                 result.append({
                     "name": skin_name,
                     "description": data.get("description", ""),
                     "source": "user",
                 })
+                seen_names.add(skin_name)
 
     return result
 
 
 def load_skin(name: str) -> SkinConfig:
-    """Load a skin by name. Checks user skins first, then built-in."""
-    # Check user skins directory
-    skins_path = _skins_dir()
-    user_file = skins_path / f"{name}.yaml"
-    if user_file.is_file():
-        data = _load_skin_from_yaml(user_file)
-        if data:
-            return _build_skin_config(data)
+    """Load a skin from the active profile, shared home, or built-ins."""
+    for skins_path in _skin_search_dirs():
+        user_file = skins_path / f"{name}.yaml"
+        if user_file.is_file():
+            data = _load_skin_from_yaml(user_file)
+            if data:
+                return _build_skin_config(data)
 
     # Check built-in skins
     if name in _BUILTIN_SKINS:
