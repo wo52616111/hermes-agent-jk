@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_constants import get_hermes_home
+from hermes_constants import get_default_hermes_root, get_hermes_home
 
 logger = logging.getLogger(__name__)
 
@@ -362,7 +362,24 @@ def _profile_config() -> dict:
 
 
 def _skins_dir() -> Path:
+    """Skins directory owned by the active profile/home."""
     return get_hermes_home() / "skins"
+
+
+def _skin_search_dirs() -> List[Path]:
+    """Resolve profile overrides before skins shared by the default profile.
+
+    Named profiles own their state but inherit user-installed skins from the
+    root Hermes home. A profile can still override a shared skin by placing a
+    same-named YAML file in its own ``skins/`` directory.
+    """
+    active = _skins_dir()
+    shared = get_default_hermes_root() / "skins"
+    try:
+        same_dir = active.resolve(strict=False) == shared.resolve(strict=False)
+    except OSError:
+        same_dir = active == shared
+    return [active] if same_dir else [active, shared]
 
 
 def _load_skin_from_yaml(path: Path) -> Optional[Dict[str, Any]]:
@@ -410,19 +427,27 @@ def list_skins() -> List[Dict[str, str]]:
     """List all available skins (built-in + user-installed); user skins never shadow built-ins."""
     result = [{"name": name, "description": data.get("description", ""), "source": "builtin"}
               for name, data in _BUILTIN_SKINS.items()]
-    skins_path = _skins_dir()
-    for f in sorted(skins_path.glob("*.yaml")) if skins_path.is_dir() else ():
-        data = _load_skin_from_yaml(f)
-        if data and not any(s["name"] == data.get("name", f.stem) for s in result):
-            result.append({"name": data.get("name", f.stem), "description": data.get("description", ""),
-                           "source": "user"})
+    # Profile-local skins win over the shared home's; first name seen is kept.
+    seen_names = {entry["name"] for entry in result}
+    for skins_path in _skin_search_dirs():
+        for f in sorted(skins_path.glob("*.yaml")) if skins_path.is_dir() else ():
+            data = _load_skin_from_yaml(f)
+            skin_name = data.get("name", f.stem) if data else None
+            if skin_name and skin_name not in seen_names:
+                result.append({"name": skin_name, "description": data.get("description", ""),
+                               "source": "user"})
+                seen_names.add(skin_name)
     return result
 
 
 def load_skin(name: str) -> SkinConfig:
-    """Load a skin by name: user skins first, then built-in, then default."""
-    user_file = _skins_dir() / f"{name}.yaml"
-    data = _load_skin_from_yaml(user_file) if user_file.is_file() else None
+    """Load a skin by name: profile/shared user skins first, then built-in, then default."""
+    data = None
+    for skins_path in _skin_search_dirs():
+        user_file = skins_path / f"{name}.yaml"
+        data = _load_skin_from_yaml(user_file) if user_file.is_file() else None
+        if data:
+            break
     if not data and name not in _BUILTIN_SKINS:
         logger.warning("Skin '%s' not found, using default", name)
     return _build_skin_config(data or _BUILTIN_SKINS.get(name) or _BUILTIN_SKINS["default"])
