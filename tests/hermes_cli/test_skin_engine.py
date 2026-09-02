@@ -139,6 +139,32 @@ class TestUserSkins:
         assert skin.name == "shared"
         assert skin.get_color("ui_accent") == "#B3A1E6"
 
+    def test_profile_uses_default_home_skin_when_skin_is_unspecified(self, tmp_path, monkeypatch):
+        from hermes_cli import skin_engine
+        import yaml
+
+        root_home = tmp_path / "root"
+        profile_home = root_home / "profiles" / "agent1"
+        root_skins = root_home / "skins"
+        root_skins.mkdir(parents=True)
+        profile_home.mkdir(parents=True)
+        (root_home / "config.yaml").write_text(
+            yaml.dump({"display": {"skin": "shared"}}),
+            encoding="utf-8",
+        )
+        (root_skins / "shared.yaml").write_text(
+            yaml.dump({"name": "shared", "colors": {"ui_accent": "#B3A1E6"}}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setattr(skin_engine, "get_hermes_home", lambda: profile_home)
+        monkeypatch.setattr(skin_engine, "get_default_hermes_root", lambda: root_home)
+
+        skin_engine.init_skin_from_config({"display": {}})
+
+        assert skin_engine.get_active_skin_name() == "shared"
+        assert skin_engine.get_active_skin().get_color("ui_accent") == "#B3A1E6"
+
     def test_load_user_skin_invalid_section_types_fall_back_to_defaults(self, tmp_path, monkeypatch):
         from hermes_cli.skin_engine import load_skin
 

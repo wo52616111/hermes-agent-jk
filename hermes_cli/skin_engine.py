@@ -947,6 +947,22 @@ def get_active_skin_name() -> str:
     return _active_skin_name
 
 
+def _default_home_skin_name() -> str:
+    """Return the root/default profile's configured skin, if any."""
+    config_path = get_default_hermes_root() / "config.yaml"
+    try:
+        import yaml
+        with open(config_path, "r", encoding="utf-8") as f:
+            config = yaml.safe_load(f) or {}
+        display = config.get("display") or {}
+        skin_name = display.get("skin") if isinstance(display, dict) else None
+        if isinstance(skin_name, str) and skin_name.strip():
+            return skin_name.strip()
+    except (OSError, ValueError, TypeError):
+        pass
+    return "default"
+
+
 def init_skin_from_config(config: dict) -> None:
     """Initialize the active skin from CLI config at startup.
 
@@ -955,11 +971,10 @@ def init_skin_from_config(config: dict) -> None:
     display = config.get("display") or {}
     if not isinstance(display, dict):
         display = {}
-    skin_name = display.get("skin", "default")
-    if isinstance(skin_name, str) and skin_name.strip():
-        set_active_skin(skin_name.strip())
-    else:
-        set_active_skin("default")
+    skin_name = display.get("skin")
+    if not isinstance(skin_name, str) or not skin_name.strip():
+        skin_name = _default_home_skin_name()
+    set_active_skin(skin_name.strip() if isinstance(skin_name, str) else "default")
 
 
 # =============================================================================
