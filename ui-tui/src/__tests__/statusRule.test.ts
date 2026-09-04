@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import type { StatusBarSegments } from '../components/appChrome.js'
-import { busyIndicatorWidth, statusBarSegments, statusRuleWidths } from '../components/appChrome.js'
+import {
+  busyIndicatorWidth,
+  renderIndicator,
+  statusBarSegments,
+  statusRuleWidths,
+  UNICODE_SPINNER_STYLES
+} from '../components/appChrome.js'
 
 describe('statusRuleWidths', () => {
   it('keeps the status rule within the terminal width', () => {
@@ -127,5 +133,30 @@ describe('busyIndicatorWidth', () => {
     for (const style of ['kaomoji', 'emoji', 'ascii', 'unicode'] as const) {
       expect(busyIndicatorWidth(style, true)).toBeGreaterThan(busyIndicatorWidth(style, false))
     }
+  })
+})
+
+describe('renderIndicator — unicode single-char spinner styles', () => {
+  it('renders a single-column frame for every style in the random pool', () => {
+    for (const name of UNICODE_SPINNER_STYLES) {
+      const { frame, showVerb } = renderIndicator('unicode', 0, name)
+
+      expect(showVerb).toBe(false)
+      expect([...frame]).toHaveLength(1)
+    }
+  })
+
+  it('defaults to braille when no spinner name is given (back-compat)', () => {
+    const withDefault = renderIndicator('unicode', 3)
+    const withBraille = renderIndicator('unicode', 3, 'braille')
+
+    expect(withDefault.frame).toBe(withBraille.frame)
+  })
+
+  it('falls back to braille for an unrecognized spinner name', () => {
+    const fallback = renderIndicator('unicode', 0, 'not-a-real-spinner')
+    const braille = renderIndicator('unicode', 0, 'braille')
+
+    expect(fallback.frame).toBe(braille.frame)
   })
 })

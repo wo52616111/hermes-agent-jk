@@ -534,6 +534,74 @@ describe('StatusRule idle-since read-out', () => {
 
     expect(findComponentByName(element, 'IdleSince')).toBeNull()
   })
+
+  it('honors the display.status_bar.fields filter when idle_since is omitted', () => {
+    const element = StatusRule({
+      ...baseProps,
+      lastTurnEndedAt: Date.now() - 42_000,
+      sessionStartedAt: Date.now() - 60_000,
+      statusBarFields: new Set(['model', 'context_pct'])
+    })
+
+    expect(findComponentByName(element, 'IdleSince')).toBeNull()
+  })
+})
+
+describe('StatusRule busy elapsed-time tail (prompt_elapsed)', () => {
+  const findComponentByName = (node: ReactNodeLike, name: string): React.ReactElement<any> | null => {
+    if (node === null || node === undefined || typeof node === 'boolean') {
+      return null
+    }
+
+    if (Array.isArray(node)) {
+      for (const child of node) {
+        const found = findComponentByName(child, name)
+
+        if (found) {
+          return found
+        }
+      }
+
+      return null
+    }
+
+    if (!React.isValidElement(node)) {
+      return null
+    }
+
+    if (typeof node.type === 'function' && node.type.name === name) {
+      return node
+    }
+
+    return findComponentByName(node.props.children, name)
+  }
+
+  it('shows the elapsed-time tail on the FaceTicker by default', () => {
+    const element = StatusRule({
+      ...baseProps,
+      busy: true,
+      turnStartedAt: Date.now() - 5_000
+    })
+
+    const face = findComponentByName(element, 'FaceTicker')
+
+    expect(face).not.toBeNull()
+    expect(face!.props.startedAt).not.toBeNull()
+  })
+
+  it('hides the elapsed-time tail when the fields filter omits prompt_elapsed', () => {
+    const element = StatusRule({
+      ...baseProps,
+      busy: true,
+      statusBarFields: new Set(['model']),
+      turnStartedAt: Date.now() - 5_000
+    })
+
+    const face = findComponentByName(element, 'FaceTicker')
+
+    expect(face).not.toBeNull()
+    expect(face!.props.startedAt).toBeNull()
+  })
 })
 
 describe('StatusRule perf read-outs (cache hit / latency / tps)', () => {

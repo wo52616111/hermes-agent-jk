@@ -414,7 +414,7 @@ const COMPACT_NUMBER = new Intl.NumberFormat('en-US', { maximumFractionDigits: 1
 
 export const fmtK = (n: number) => COMPACT_NUMBER.format(n).replace(/[KMBT]$/, s => s.toLowerCase())
 
-export const pick = <T>(a: T[]) => a[Math.floor(Math.random() * a.length)]!
+export const pick = <T>(a: readonly T[]) => a[Math.floor(Math.random() * a.length)]!
 
 export const isPasteBackedText = (text: string) =>
   /\[\[paste:\d+(?:[^\n]*?)\]\]|\[paste #\d+ (?:attached|excerpt)(?:[^\n]*?)\]/.test(text)

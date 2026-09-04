@@ -13,7 +13,7 @@ import { VERBS } from '../content/verbs.js'
 import { fmtDuration } from '../domain/messages.js'
 import { stickyPromptFromViewport } from '../domain/viewport.js'
 import { buildSubagentTree, treeTotals, widthByDepth } from '../lib/subagentTree.js'
-import { fmtK } from '../lib/text.js'
+import { fmtK, pick } from '../lib/text.js'
 import { useScrollbarSnapshot, useViewportSnapshot } from '../lib/viewportStore.js'
 import type { Theme } from '../theme.js'
 import type { Msg, Usage } from '../types.js'
@@ -47,7 +47,13 @@ interface IndicatorRender {
   showVerb: boolean
 }
 
-const renderIndicator = (style: IndicatorStyle, tick: number): IndicatorRender => {
+export const UNICODE_SPINNER_STYLES = ['braille', 'orbit', 'breathe'] as const
+
+export const renderIndicator = (
+  style: IndicatorStyle,
+  tick: number,
+  unicodeSpinnerName: string = 'braille'
+): IndicatorRender => {
   if (style === 'kaomoji') {
     return { frame: FACES[tick % FACES.length] ?? '', intervalMs: FACE_TICK_MS, showVerb: true }
   }
@@ -68,11 +74,14 @@ const renderIndicator = (style: IndicatorStyle, tick: number): IndicatorRender =
     }
   }
 
-  // 'unicode' — braille spinner (fixed 1-col).  Authored interval is
-  // ~80ms; honour it but bound below at a safe minimum so React
-  // re-renders stay reasonable.  This style is for users who want
-  // the cleanest possible status, so no verb rotation either.
-  const spinner = unicodeSpinners.braille
+  // 'unicode' — single-character spinner (fixed 1-col).  Style rotates
+  // randomly per FaceTicker mount across braille/orbit/breathe so the
+  // clean single-glyph presentation stays visually varied like the
+  // tool/thinking spinners (#XXXXX). Authored intervals differ per style;
+  // bound below at a safe minimum so React re-renders stay reasonable.
+  // This style is for users who want the cleanest possible status, so no
+  // verb rotation either.
+  const spinner = unicodeSpinners[unicodeSpinnerName as keyof typeof unicodeSpinners] ?? unicodeSpinners.braille
   const frame = spinner.frames[tick % spinner.frames.length] ?? '⠋'
 
   return { frame, intervalMs: Math.max(SPINNER_TICK_MS, spinner.interval), showVerb: false }
@@ -135,12 +144,19 @@ function FaceTicker({
   const [now, setNow] = useState(() => Date.now())
   const isOccluded = useStore($isStatusRuleOccluded)
 
+  // Randomize which single-character spinner represents 'unicode' — mirrors
+  // the tool/thinking spinners' pick-on-mount pattern (Spinner in
+  // thinking.tsx) so users don't get the same glyph set every session.
+  // Re-picks whenever `style` changes so switching /indicator styles (or
+  // back to unicode) gets a fresh roll instead of sticking to the first one.
+  const unicodeSpinnerName = useMemo(() => (style === 'unicode' ? pick(UNICODE_SPINNER_STYLES) : 'braille'), [style])
+
   // Pre-compute cadence + verb-visibility for the active style so an
   // `/indicator` switch re-arms the interval (and skips the verb timer
   // for verb-less styles like `unicode`) without leaving the previous
   // timer dangling. A frozen override (idle compaction) always shows the
   // verb so "compacting…" is visible even in unicode style (#97239).
-  const { intervalMs, showVerb } = renderIndicator(style, 0)
+  const { intervalMs, showVerb } = renderIndicator(style, 0, unicodeSpinnerName)
   const freezeVerb = Boolean(verbOverride)
   const displayVerb = freezeVerb || showVerb
 
@@ -175,7 +191,7 @@ function FaceTicker({
     }
   }, [displayVerb, freezeVerb, intervalMs, isOccluded])
 
-  const { frame } = renderIndicator(style, tick)
+  const { frame } = renderIndicator(style, tick, unicodeSpinnerName)
   const verb = verbOverride ?? VERBS[verbTick % VERBS.length] ?? ''
   const verbSegment = displayVerb ? ` ${padVerb(verb)}` : ''
   // Leading space keeps a gap between the frame and the duration when the
@@ -645,8 +661,10 @@ export function StatusRule({
   // occupies the slot it reserves only `noticeReserve` (it shrinks/truncates).
   const showStatus = !busy && status !== 'ready'
 
+  const showPromptElapsed = ok('prompt_elapsed')
+
   const slotWidth = busy
-    ? busyIndicatorWidth(indicatorStyle, turnStartedAt != null)
+    ? busyIndicatorWidth(indicatorStyle, showPromptElapsed && turnStartedAt != null)
     : showNotice
       ? noticeReserve
       : showStatus
@@ -697,7 +715,11 @@ export function StatusRule({
   // (the FaceTicker's elapsed tail covers the live turn) and before the first
   // turn completes. Shares the duration breakpoint and width reservation.
   const showIdle =
-    segs.duration && !busy && lastTurnEndedAt != null && fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
+    segs.duration &&
+    !busy &&
+    ok('idle_since') &&
+    lastTurnEndedAt != null &&
+    fits(SEP + stringWidth('✓ ') + MAX_DURATION_WIDTH)
 
   const showCompressions =
     segs.compressions && ok('compressions') && compressions > 0 && fits(SEP + stringWidth(`cmp ${compressions}`))
@@ -774,7 +796,7 @@ export function StatusRule({
           {busy ? (
             <FaceTicker
               color={statusColor}
-              startedAt={turnStartedAt}
+              startedAt={showPromptElapsed ? turnStartedAt : null}
               style={indicatorStyle}
               verbOverride={compacting ? 'compacting' : undefined}
             />

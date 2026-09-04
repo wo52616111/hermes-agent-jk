@@ -7519,7 +7519,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         Available fields: model, context_detail, context_pct, cache_hit,
         latency, tps, compressions, bg_tasks, bg_processes, bg_subagents,
         goal, duration, prompt_elapsed, idle_since, focus, yolo, stash,
-        battery, title, total_tokens.
+        battery, title, total_tokens, voice.
         ``total_tokens`` is opt-in only (never shown by default).
         The field order is fixed; the config controls visibility only.
         """
