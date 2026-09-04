@@ -400,7 +400,7 @@ export const clarifyBatchRevisitState = (
 
 export const flat = (r: Record<string, string[]>) => Object.values(r).flat()
 
-export const pick = <T>(a: T[]) => a[Math.floor(Math.random() * a.length)]!
+export const pick = <T>(a: readonly T[]) => a[Math.floor(Math.random() * a.length)]!
 
 export const isPasteBackedText = (text: string) =>
   /\[\[paste:\d+(?:[^\n]*?)\]\]|\[paste #\d+ (?:attached|excerpt)(?:[^\n]*?)\]/.test(text)
