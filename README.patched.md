@@ -79,6 +79,50 @@ For a one-off invocation that bypasses `PATH`, run:
 `./scripts/hermes-local-link` can be rerun after moving the checkout. The
 launcher routes `hermes update` to the downstream updater.
 
+## If you already have upstream Hermes installed
+
+If you (or a teammate you shared this repo with) previously ran the standard
+`curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash` installer,
+that install put a `hermes` launcher on `PATH` — usually `~/.local/bin/hermes`.
+`./scripts/hermes-local-install` reuses that exact launcher path when it can:
+it resolves whatever `hermes` your current shell would run, and if that path is
+a user-writable file or symlink, it overwrites it to point at this checkout
+instead of creating a second, competing `hermes-jk`-style command.
+
+That means installing this fork on a machine with existing upstream Hermes is
+**expected to just work** — plain `hermes` afterward launches this customized
+build, not the upstream one. Verify it landed correctly:
+
+```bash
+command -v hermes                  # should resolve to the launcher path
+readlink -f "$(command -v hermes)" # should end in hermes-agent-jk/scripts/hermes
+hermes --version                   # Install directory should be this checkout, not ~/.hermes/hermes-agent
+```
+
+Or launch it and check the TUI banner, which reads "Customized by junkai".
+
+If `hermes --version`'s Install directory still points at the old upstream
+checkout, the reuse path didn't fire — usually because another `hermes` earlier on `PATH` isn't a
+plain file/symlink the installer is allowed to overwrite (e.g. a shell
+function, an alias, or a path outside your home directory). Fix it with
+either:
+
+```bash
+# Point the installer at an explicit launcher path and re-run it
+HERMES_LAUNCHER_PATH=~/.local/bin/hermes ./scripts/hermes-local-install
+
+# Or re-link only, without reinstalling dependencies
+HERMES_LAUNCHER_PATH=~/.local/bin/hermes ./scripts/hermes-local-link
+```
+
+then confirm `~/.local/bin` precedes any other Hermes install directory in
+`PATH` (`echo $PATH`), and open a new shell so it's picked up.
+
+The original upstream checkout (commonly `~/.hermes/hermes-agent/`) is left
+in place untouched — this fork does not delete it, and `$HERMES_HOME`
+(`~/.hermes` by default) keeps being shared between both, so your existing
+sessions, memory, skills, and credentials carry over unchanged.
+
 ## Update from Hermes upstream
 
 Configure the upstream remote once:
