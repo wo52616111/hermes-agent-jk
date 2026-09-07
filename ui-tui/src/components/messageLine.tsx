@@ -48,6 +48,15 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
   return `[${hh}:${mm}]`
 }
 
+export const userBubbleColors = (role: Msg['role'], t: Theme): { background: string; text: string } | undefined =>
+  // Reversed video: swap the user role's own two existing tokens — the
+  // label (its normal text color) becomes the bubble fill, and completionBg
+  // (the theme's canvas/surface token — ThemeColors has no separate `bg`
+  // field; completionBg falls back to the skin's `background` seed, see
+  // fromSkin's `surface` comment) becomes the text color. No new or
+  // synthesized color, just the two swapped.
+  role === 'user' ? { background: t.color.label, text: t.color.completionBg } : undefined
+
 export const MessageLine = memo(function MessageLine({
   cols,
   compact,
@@ -165,7 +174,14 @@ export const MessageLine = memo(function MessageLine({
     )
   }
 
-  const { body, glyph, prefix } = ROLE[msg.role](t)
+  const { body: roleBody, glyph, prefix: rolePrefix } = ROLE[msg.role](t)
+  const bubble = userBubbleColors(msg.role, t)
+  // Reversed-video treatment: swap the user role's own label/bg tokens
+  // (not a synthesized color) so the bubble background IS the text's usual
+  // color and the text/glyph become the chat canvas color — same two
+  // theme tokens, just traded places.
+  const body = bubble ? bubble.text : roleBody
+  const prefix = bubble ? bubble.text : rolePrefix
   const gutterWidth = transcriptGutterWidth(msg.role, t.brand.prompt)
 
   const showDetails =
@@ -310,7 +326,7 @@ export const MessageLine = memo(function MessageLine({
         </Box>
       )}
 
-      <Box>
+      <Box backgroundColor={bubble?.background} width="100%">
         <NoSelect flexShrink={0} fromLeftEdge width={gutterWidth}>
           <Text bold={msg.role === 'user'} color={prefix}>
             {glyph}{' '}
