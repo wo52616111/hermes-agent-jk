@@ -14,6 +14,12 @@ export interface ThemeColors {
   completionMetaBg: string
   completionMetaCurrentBg: string
 
+  /** The terminal's true canvas background (skin's `background` seed / OSC-11
+   *  probe) — distinct from `completionBg`, which is the raised panel
+   *  surface tone. Used where a treatment needs the literal chat background,
+   *  not the panel fill. */
+  canvasBg: string
+
   label: string
   ok: string
   error: string
@@ -332,6 +338,7 @@ export function buildPalette(seeds: ThemeSeeds, isLight: boolean): ThemeColors {
     completionCurrentBg: activeRow,
     completionMetaBg: surface,
     completionMetaCurrentBg: activeRow,
+    canvasBg: seeds.bg,
 
     label: tones.label,
     ok: seeds.ok,
