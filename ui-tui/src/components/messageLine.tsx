@@ -53,11 +53,10 @@ export const userBubbleBackground = (role: Msg['role'], t: Theme): string | unde
   // accent token (no new/synthesized color) instead of a neutral panel fill.
   role === 'user' ? t.color.accent : undefined
 
-// Bubble text sits on the accent-colored fill, so it needs the canvas
-// background color (not the panel surface) to read cleanly against it —
-// same relationship the reversed-video treatment used, but scoped to text
-// color only this time.
-export const userMessageTextColor = (t: Theme): string => t.color.canvasBg
+// Bubble text: the theme's normal chat text color (fg), same as every
+// other role's plain text, instead of the canvas-color used by the
+// earlier reversed-video treatment.
+export const userMessageTextColor = (t: Theme): string => t.color.text
 
 export const MessageLine = memo(function MessageLine({
   cols,

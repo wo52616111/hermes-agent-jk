@@ -94,9 +94,9 @@ describe('MessageLine', () => {
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
   })
 
-  it('renders user message text in the canvas background color, to read against the accent-colored bubble', () => {
-    expect(DEFAULT_THEME.color.canvasBg).not.toBe(DEFAULT_THEME.color.accent)
-    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.canvasBg)
+  it('renders user message text in the theme\'s normal chat text color (light yellow fg), not accent or canvas color', () => {
+    expect(DEFAULT_THEME.color.text).not.toBe(DEFAULT_THEME.color.accent)
+    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.text)
   })
 
   it('preserves a separator after compound user prompt glyphs in transcript rows', () => {
