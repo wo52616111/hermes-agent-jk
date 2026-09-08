@@ -98,7 +98,7 @@ colors:
 
 branding:
   agent_name: Hermes Agent
-  prompt_symbol: "❯"
+  prompt_symbol: "▶︎"
 
 tool_prefix: "┊"
 
