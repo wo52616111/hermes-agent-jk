@@ -49,14 +49,15 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
 }
 
 export const userBubbleBackground = (role: Msg['role'], t: Theme): string | undefined =>
-  // Purple accent panel, per user request — reuses the existing brand
-  // accent token (no new/synthesized color) instead of a neutral panel fill.
-  role === 'user' ? t.color.accent : undefined
+  // Dark panel surface, distinct from the chat canvas (canvasBg) so the
+  // bubble is still visible against it — the same completionBg fill the
+  // completion menu / status bar already use. Reuses an existing token,
+  // no new/synthesized color.
+  role === 'user' ? t.color.completionBg : undefined
 
-// Bubble text: the theme's normal chat text color (fg), same as every
-// other role's plain text, instead of the canvas-color used by the
-// earlier reversed-video treatment.
-export const userMessageTextColor = (t: Theme): string => t.color.text
+// Bubble text: the theme's brand accent (purple), against the dark
+// completionBg fill above.
+export const userMessageTextColor = (t: Theme): string => t.color.accent
 
 export const MessageLine = memo(function MessageLine({
   cols,

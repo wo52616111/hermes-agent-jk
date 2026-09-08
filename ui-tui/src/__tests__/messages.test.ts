@@ -87,16 +87,16 @@ describe('toTranscriptMessages', () => {
 })
 
 describe('MessageLine', () => {
-  it('applies the accent color as a user message row background', () => {
-    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.accent)
+  it('applies a dark panel-surface background (completionBg) to a user message row, distinct from the chat canvas', () => {
+    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.completionBg)
     expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
   })
 
-  it('renders user message text in the theme\'s normal chat text color (light yellow fg), not accent or canvas color', () => {
-    expect(DEFAULT_THEME.color.text).not.toBe(DEFAULT_THEME.color.accent)
-    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.text)
+  it('renders user message text in the theme\'s brand accent (purple), not the plain text or canvas color', () => {
+    expect(DEFAULT_THEME.color.accent).not.toBe(DEFAULT_THEME.color.completionBg)
+    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.accent)
   })
 
   it('preserves a separator after compound user prompt glyphs in transcript rows', () => {
