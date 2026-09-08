@@ -4,7 +4,7 @@ import { renderSync } from '@hermes/ink'
 import React from 'react'
 import { describe, expect, it } from 'vitest'
 
-import { fmtMsgTimestamp, MessageLine, userBubbleBackground } from '../components/messageLine.js'
+import { fmtMsgTimestamp, MessageLine, userBubbleBackground, userMessageTextColor } from '../components/messageLine.js'
 import { MAX_HISTORY } from '../config/limits.js'
 import { toTranscriptMessages } from '../domain/messages.js'
 import { appendTranscriptMessage, capTranscriptHistory, upsert } from '../lib/messages.js'
@@ -94,6 +94,11 @@ describe('MessageLine', () => {
     expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
+  })
+
+  it('renders user message text in the theme\'s normal text color, not the brand label color', () => {
+    expect(DEFAULT_THEME.color.text).not.toBe(DEFAULT_THEME.color.label)
+    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.text)
   })
 
   it('preserves a separator after compound user prompt glyphs in transcript rows', () => {

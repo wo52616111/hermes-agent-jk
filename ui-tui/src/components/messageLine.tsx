@@ -49,12 +49,17 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
 }
 
 export const userBubbleBackground = (role: Msg['role'], t: Theme): string | undefined =>
-  // Panel-surface treatment: the same completionBg/purple pairing already
-  // used by the completion menu and status bar (bg1 + purple in the
-  // jk-spaceduck palette) — a calmer, native look instead of the harsh
-  // reversed-video swap tried earlier. The row's text/glyph colors are
-  // untouched (still ROLE.user's own `label`); only the fill changes.
+  // Panel-surface treatment: the same completionBg fill already used by the
+  // completion menu and status bar (bg1 in the jk-spaceduck palette) — a
+  // calmer, native look instead of the harsh reversed-video swap tried
+  // earlier. Text stays the normal body/primary color (ROLE.user no longer
+  // overrides it to `label`); only the fill changes.
   role === 'user' ? t.color.completionBg : undefined
+
+// ROLE.user (domain/roles.ts) uses `label` (brand accent) for its body/prefix,
+// which clashes against the completionBg panel fill. Transcript rows want
+// the same plain body text every other role already uses.
+export const userMessageTextColor = (t: Theme): string => t.color.text
 
 export const MessageLine = memo(function MessageLine({
   cols,
@@ -173,8 +178,11 @@ export const MessageLine = memo(function MessageLine({
     )
   }
 
-  const { body, glyph, prefix } = ROLE[msg.role](t)
+  const roleStyle = ROLE[msg.role](t)
   const bubbleBg = userBubbleBackground(msg.role, t)
+  const body = msg.role === 'user' ? userMessageTextColor(t) : roleStyle.body
+  const prefix = msg.role === 'user' ? userMessageTextColor(t) : roleStyle.prefix
+  const { glyph } = roleStyle
   const gutterWidth = transcriptGutterWidth(msg.role, t.brand.prompt)
 
   const showDetails =
