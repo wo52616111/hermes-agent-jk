@@ -1,3 +1,5 @@
+import { execFileSync } from 'node:child_process'
+
 import chalk from 'chalk'
 
 import type { Color, TextStyles } from './styles.js'
@@ -77,23 +79,63 @@ export function richEightBitColorNumber(red: number, green: number, blue: number
  * which tmux passes through cleanly. grey93 (255) is visually identical to
  * rgb(240,240,240).
  *
- * Users who HAVE set `terminal-overrides ,*:Tc` get a technically-unnecessary
- * downgrade, but the visual difference is imperceptible. Querying
- * `tmux show -gv terminal-overrides` to detect this would add a subprocess on
- * startup — not worth it.
+ * Detect the RGB/Tc capability instead of clamping unconditionally: `tmux
+ * display -p '#{client_termfeatures}'` reports the CURRENT client's negotiated
+ * feature set (populated from `terminal-features`/`terminal-overrides`
+ * against the client's actual TERM, e.g. `,xterm*:Tc`) — this is tmux's own
+ * resolved answer, not a config file re-parse, so it's correct even when the
+ * override is scoped by TERM pattern. One `tmux display` round-trip
+ * (~10-15ms locally) at startup only, memoized like every other check here.
+ *
+ * `HERMES_TUI_TRUECOLOR=1` (see shouldUseRichEightBitDowngradeForLegacyAppleTerminal
+ * above) remains an explicit override for anyone whose tmux/terminal combo
+ * this detection gets wrong; `HERMES_TUI_TRUECOLOR=0`/`false` forces the old
+ * unconditional clamp back on for anyone who preferred it.
  *
  * $TMUX is a pty-lifecycle env var set by tmux itself; it never comes from
  * globalSettings.env, so reading it here is correct. chalk is a singleton, so
  * this clamps ALL truecolor output (fg+bg+hex) across the entire app.
  */
-function clampChalkLevelForTmux(): boolean {
-  if (process.env.TMUX && chalk.level > 2) {
-    chalk.level = 2
+export function tmuxClientSupportsRgb(env: NodeJS.ProcessEnv, exec = execFileSync): boolean {
+  try {
+    const features = exec('tmux', ['display', '-p', '#{client_termfeatures}'], {
+      encoding: 'utf8',
+      env,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 200
+    })
 
-    return true
+    return /\bRGB\b|\bTc\b/.test(features)
+  } catch {
+    // tmux binary missing/unreachable, or the query failed for any reason —
+    // fall back to the historical conservative clamp rather than guessing.
+    return false
+  }
+}
+
+export function clampChalkLevelForTmux(
+  env: NodeJS.ProcessEnv = process.env,
+  level = chalk.level,
+  exec = execFileSync
+): boolean {
+  if (!env.TMUX || level <= 2) {
+    return false
   }
 
-  return false
+  const truecolorOverride = /^(?:1|true|yes|on)$/i.test((env.HERMES_TUI_TRUECOLOR ?? '').trim())
+  const noTruecolorOverride = /^(?:0|false|no|off)$/i.test((env.HERMES_TUI_TRUECOLOR ?? '').trim())
+
+  if (truecolorOverride) {
+    return false
+  }
+
+  if (!noTruecolorOverride && tmuxClientSupportsRgb(env, exec)) {
+    return false
+  }
+
+  chalk.level = 2
+
+  return true
 }
 
 // Computed once at module load — terminal/tmux environment doesn't change mid-session.
