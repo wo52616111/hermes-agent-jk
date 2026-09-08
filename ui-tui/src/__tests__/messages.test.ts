@@ -87,18 +87,16 @@ describe('toTranscriptMessages', () => {
 })
 
 describe('MessageLine', () => {
-  it('applies the panel-surface background (completionBg) to a user message row, keeping its normal text color', () => {
-    // Same fill the completion menu / status bar already use — a calmer
-    // treatment than the earlier reversed-video swap, still zero new colors.
-    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.completionBg)
+  it('applies the accent color as a user message row background', () => {
+    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.accent)
     expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
   })
 
-  it('renders user message text in the theme\'s normal text color, not the brand label color', () => {
-    expect(DEFAULT_THEME.color.text).not.toBe(DEFAULT_THEME.color.label)
-    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.text)
+  it('renders user message text in the canvas background color, to read against the accent-colored bubble', () => {
+    expect(DEFAULT_THEME.color.canvasBg).not.toBe(DEFAULT_THEME.color.accent)
+    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.canvasBg)
   })
 
   it('preserves a separator after compound user prompt glyphs in transcript rows', () => {
