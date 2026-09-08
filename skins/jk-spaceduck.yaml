@@ -7,8 +7,14 @@
 #   bg0     #000000  base background
 #   bg1     #0f111b  raised surface (status bar, menus, response box bg)
 #   bg2     #25294a  selected/active row
-#   purple  #b3a1e6  PRIMARY ACCENT (tmux "variable") — brand color
-#   purple2 #7a5ccc  secondary accent / title emphasis
+#   purple  #7a5ccc  PRIMARY ACCENT (tmux "variable"/color4) — brand color.
+#                    Verified against a live kitty+tmux screenshot: `eza`
+#                    directory names render as color4 #7a5ccc, NOT the
+#                    brighter #b3a1e6 (that one is bright-purple/color12,
+#                    used sparingly e.g. tmux status-left highlight — it was
+#                    mistakenly promoted to the *primary* accent in an
+#                    earlier pass of this skin).
+#   purple_bright #b3a1e6  secondary/highlight accent (tmux color12)
 #   fg      #ecf0c1  primary text
 #   muted   #686f9a  secondary/dim text, borders
 #   dark    #30365f  faint borders, comments
@@ -29,8 +35,8 @@ colors:
   # Brand accent + primary (ui_accent/banner_accent drive tool markers,
   # headings, links, chevrons, session title text, shell $, everything
   # that means "this is the theme color")
-  ui_accent: "#b3a1e6"
-  banner_accent: "#b3a1e6"
+  ui_accent: "#7a5ccc"
+  banner_accent: "#7a5ccc"
   ui_primary: "#ecf0c1"
   banner_title: "#ecf0c1"
 
@@ -47,10 +53,10 @@ colors:
   ui_ok: "#5ccc96"
   ui_warn: "#f2ce00"
   ui_error: "#e33400"
-  ui_label: "#b3a1e6"
+  ui_label: "#7a5ccc"
 
   # Element-specific
-  ui_tool: "#b3a1e6"
+  ui_tool: "#7a5ccc"
   ui_thinking: "#686f9a"
   # diff_added / diff_removed 是「行背景色」，*_word 是「行文字色」
   # (ui-tui/src/components/markdown.tsx:839)。两者必须有对比度，
@@ -66,17 +72,17 @@ colors:
 
   # CLI / TUI chrome
   prompt: "#ecf0c1"
-  input_rule: "#b3a1e6"
-  response_border: "#b3a1e6"
-  shell_dollar: "#b3a1e6"
+  input_rule: "#7a5ccc"
+  response_border: "#7a5ccc"
+  shell_dollar: "#7a5ccc"
   selection_bg: "#25294a"
-  session_label: "#b3a1e6"
+  session_label: "#7a5ccc"
   session_border: "#686f9a"
 
   # Status bar — model name / session title / context bar all live here
   status_bar_bg: "#0f111b"
   status_bar_text: "#ecf0c1"
-  status_bar_strong: "#b3a1e6"
+  status_bar_strong: "#7a5ccc"
   status_bar_dim: "#686f9a"
   status_bar_good: "#5ccc96"
   status_bar_warn: "#f2ce00"
