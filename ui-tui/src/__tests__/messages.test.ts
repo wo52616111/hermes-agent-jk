@@ -4,7 +4,7 @@ import { renderSync } from '@hermes/ink'
 import React from 'react'
 import { describe, expect, it } from 'vitest'
 
-import { fmtMsgTimestamp, MessageLine, userBubbleColors } from '../components/messageLine.js'
+import { fmtMsgTimestamp, MessageLine, userBubbleBackground } from '../components/messageLine.js'
 import { MAX_HISTORY } from '../config/limits.js'
 import { toTranscriptMessages } from '../domain/messages.js'
 import { appendTranscriptMessage, capTranscriptHistory, upsert } from '../lib/messages.js'
@@ -87,17 +87,13 @@ describe('toTranscriptMessages', () => {
 })
 
 describe('MessageLine', () => {
-  it('reverses the user role\'s own label/bg tokens for the bubble — background becomes the text color, text becomes the chat canvas color', () => {
-    // Not a synthesized color and not a different skin color: literally the
-    // same two existing theme tokens (color.label, color.bg) with their
-    // roles swapped for user rows only.
-    expect(userBubbleColors('user', DEFAULT_THEME)).toEqual({
-      background: DEFAULT_THEME.color.label,
-      text: DEFAULT_THEME.color.completionBg
-    })
-    expect(userBubbleColors('assistant', DEFAULT_THEME)).toBe(undefined)
-    expect(userBubbleColors('system', DEFAULT_THEME)).toBe(undefined)
-    expect(userBubbleColors('tool', DEFAULT_THEME)).toBe(undefined)
+  it('applies the panel-surface background (completionBg) to a user message row, keeping its normal text color', () => {
+    // Same fill the completion menu / status bar already use — a calmer
+    // treatment than the earlier reversed-video swap, still zero new colors.
+    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.completionBg)
+    expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
+    expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
+    expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
   })
 
   it('preserves a separator after compound user prompt glyphs in transcript rows', () => {
