@@ -151,6 +151,17 @@ function getEmojiWidth(grapheme: string): number {
     return count === 1 ? 1 : 2
   }
 
+  // VS15 (U+FE0E) explicitly requests TEXT presentation, not emoji — the
+  // opposite of VS16. Terminals render base+VS15 as the narrow glyph (the
+  // selector itself renders zero-width), so this must NOT take the emoji
+  // width-2 path. Without this check, base characters that emoji-regex still
+  // matches while a VS15 is present (e.g. ▶︎ U+25B6+U+FE0E) get miscounted
+  // as width 2, desyncing Ink's layout from the terminal by one column —
+  // symptom: a stray uneditable cell next to the composer prompt glyph.
+  if (grapheme.length === 2 && grapheme.codePointAt(1) === 0xfe0e) {
+    return eastAsianWidth(first, { ambiguousAsWide: false })
+  }
+
   // Incomplete keycap: digit/symbol + VS16 without U+20E3
   if (grapheme.length === 2) {
     const second = grapheme.codePointAt(1)
