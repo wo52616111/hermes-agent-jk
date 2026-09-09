@@ -87,8 +87,8 @@ describe('toTranscriptMessages', () => {
 })
 
 describe('MessageLine', () => {
-  it('applies a dark panel-surface background (completionBg) to a user message row, distinct from the chat canvas', () => {
-    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.completionBg)
+  it('applies the lighter active-row surface (completionCurrentBg) to a user message row', () => {
+    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.completionCurrentBg)
     expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
