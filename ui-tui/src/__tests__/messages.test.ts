@@ -87,16 +87,15 @@ describe('toTranscriptMessages', () => {
 })
 
 describe('MessageLine', () => {
-  it('uses the restrained dark diff surface for user message rows', () => {
-    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.diffRemoved)
+  it('uses the calm dark-green diff surface for user message rows', () => {
+    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.diffAdded)
     expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
   })
 
-  it('renders user message text in the theme\'s normal chat text color while the prefix remains purple', () => {
-    expect(DEFAULT_THEME.color.text).not.toBe(DEFAULT_THEME.color.accent)
-    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.text)
+  it('renders user message text in the theme\'s purple accent, matching the prefix', () => {
+    expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.accent)
   })
 
   it('preserves a separator after compound user prompt glyphs in transcript rows', () => {
