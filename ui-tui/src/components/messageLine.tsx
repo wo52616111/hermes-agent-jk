@@ -49,10 +49,10 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
 }
 
 export const userBubbleBackground = (role: Msg['role'], t: Theme): string | undefined =>
-  // Use the darker panel surface one level below the current active-row fill.
-  // This keeps the user row distinct from the black canvas without the
-  // brighter selected-row treatment.
-  role === 'user' ? t.color.completionBg : undefined
+  // Use the existing dark diff surface as a restrained, near-black bubble
+  // background. It is darker and less blue than the panel surfaces already
+  // tried, while remaining visibly distinct from the black chat canvas.
+  role === 'user' ? t.color.diffRemoved : undefined
 
 // Bubble body text: the theme's normal chat fg (light yellow). The leading
 // user prompt glyph keeps ROLE.user's label color (purple) below, so only the

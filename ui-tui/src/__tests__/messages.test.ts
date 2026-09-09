@@ -87,8 +87,8 @@ describe('toTranscriptMessages', () => {
 })
 
 describe('MessageLine', () => {
-  it('uses the darker completionBg surface for user message rows', () => {
-    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.completionBg)
+  it('uses the restrained dark diff surface for user message rows', () => {
+    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.diffRemoved)
     expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
