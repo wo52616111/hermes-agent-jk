@@ -49,11 +49,10 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
 }
 
 export const userBubbleBackground = (role: Msg['role'], t: Theme): string | undefined =>
-  // One level lighter than the dark completionBg panel, while staying in the
-  // skin's existing surface hierarchy: completionCurrentBg is the selected /
-  // active-row surface (bg2 in jk-spaceduck), so it remains cohesive with the
-  // rest of the TUI without introducing another blue.
-  role === 'user' ? t.color.completionCurrentBg : undefined
+  // Use the darker panel surface one level below the current active-row fill.
+  // This keeps the user row distinct from the black canvas without the
+  // brighter selected-row treatment.
+  role === 'user' ? t.color.completionBg : undefined
 
 // Bubble body text: the theme's normal chat fg (light yellow). The leading
 // user prompt glyph keeps ROLE.user's label color (purple) below, so only the
