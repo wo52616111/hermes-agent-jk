@@ -49,10 +49,9 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
 }
 
 export const userBubbleBackground = (role: Msg['role'], t: Theme): string | undefined =>
-  // The existing dark-green diff surface is the calmest unused dark fill in
-  // the skin: near-black like the chat canvas, but visibly separated from it
-  // without the red diff tone or the navy panel tones already tried.
-  role === 'user' ? t.color.diffAdded : undefined
+  // Use the existing dark panel surface: one level lighter than the black
+  // chat canvas, but less prominent than the active-row fill.
+  role === 'user' ? t.color.completionBg : undefined
 
 // User bubble body text uses the theme accent (purple), matching its prefix.
 export const userMessageTextColor = (t: Theme): string => t.color.accent
