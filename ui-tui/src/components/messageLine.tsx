@@ -55,9 +55,10 @@ export const userBubbleBackground = (role: Msg['role'], t: Theme): string | unde
   // rest of the TUI without introducing another blue.
   role === 'user' ? t.color.completionCurrentBg : undefined
 
-// Bubble text: the theme's brand accent (purple), against the dark
-// completionBg fill above.
-export const userMessageTextColor = (t: Theme): string => t.color.accent
+// Bubble body text: the theme's normal chat fg (light yellow). The leading
+// user prompt glyph keeps ROLE.user's label color (purple) below, so only the
+// message body changes color.
+export const userMessageTextColor = (t: Theme): string => t.color.text
 
 export const MessageLine = memo(function MessageLine({
   cols,
@@ -179,7 +180,7 @@ export const MessageLine = memo(function MessageLine({
   const roleStyle = ROLE[msg.role](t)
   const bubbleBg = userBubbleBackground(msg.role, t)
   const body = msg.role === 'user' ? userMessageTextColor(t) : roleStyle.body
-  const prefix = msg.role === 'user' ? userMessageTextColor(t) : roleStyle.prefix
+  const prefix = roleStyle.prefix
   const { glyph } = roleStyle
   const gutterWidth = transcriptGutterWidth(msg.role, t.brand.prompt)
 
