@@ -100,7 +100,15 @@ const baseProps = {
   statusColor: DEFAULT_THEME.color.ok,
   t: DEFAULT_THEME,
   turnStartedAt: null,
-  usage: { calls: 1, input: 1, output: 1, context_max: 200_000, context_percent: 25, context_used: 50_000, total: 50_000 },
+  usage: {
+    calls: 1,
+    input: 1,
+    output: 1,
+    context_max: 200_000,
+    context_percent: 25,
+    context_used: 50_000,
+    total: 50_000
+  },
   voiceLabel: ''
 }
 
@@ -325,7 +333,9 @@ describe('StatusRule credits notice render priority', () => {
     expect(rendered).not.toContain('ready')
     // … but model + context stay visible.
     expect(rendered).toContain('opus 4.8')
-    expect((React.Children.toArray(element.props.children)[1] as React.ReactElement<any>).props.ctxLabel).toBe('50k/200k')
+    expect((React.Children.toArray(element.props.children)[1] as React.ReactElement<any>).props.ctxLabel).toBe(
+      '50k/200k'
+    )
   })
 
   it('busy wins: the FaceTicker shows, the notice is hidden mid-turn', () => {

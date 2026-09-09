@@ -94,7 +94,7 @@ describe('MessageLine', () => {
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
   })
 
-  it('renders user message text in the theme\'s purple accent, matching the prefix', () => {
+  it("renders user message text in the theme's purple accent, matching the prefix", () => {
     expect(userMessageTextColor(DEFAULT_THEME)).toBe(DEFAULT_THEME.color.accent)
   })
 
