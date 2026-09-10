@@ -2670,10 +2670,84 @@ def cmd_chat(args):
     _guard_noninteractive_user_config(args)
     use_tui = _resolve_use_tui(args)
 
-    # --in DIR: run in DIR. Must happen before any session resolution so the
-    # workspace-scoped "latest"/-c lookups key off DIR, and it pins the
-    # session there — an explicit --in wins over a resumed session's
-    # recorded cwd (so the restore step below is skipped).
+    _resolve_chat_session_args(args, use_tui)
+
+    _warn_retired_xai_models()
+
+    # First-run guard: check if any provider is configured before launching
+    if not _has_any_provider_configured():
+        _first_run_setup_guard(args)
+        return
+
+    _start_chat_background_prefetch()
+
+    # --yolo: bypass all dangerous command approvals. main() also sets this
+    # before _prepare_agent_startup() — the authoritative site, since it runs
+    # before tool imports freeze _YOLO_MODE_FROZEN. This is a safety net for
+    # callers that invoke cmd_chat directly (e.g. subcommand dispatch).
+    if getattr(args, "yolo", False):
+        os.environ["HERMES_YOLO_MODE"] = "1"
+    # --ignore-rules: skip AGENTS.md/SOUL.md/.cursorrules injection, memory
+    # entries and preloaded skills (AIAgent(skip_context_files, skip_memory)).
+    if getattr(args, "ignore_rules", False):
+        os.environ["HERMES_IGNORE_RULES"] = "1"
+    # --source: tag session source for filtering (e.g. 'tool' for integrations)
+    if getattr(args, "source", None):
+        os.environ["HERMES_SESSION_SOURCE"] = args.source
+
+    _pin_kanban_board_env()
+    _confirm_startup_expensive_model_override(args)
+
+    passthrough = {k: getattr(args, k, d) for k, d in _CHAT_PASSTHROUGH}
+    if use_tui:
+        _launch_tui(
+            passthrough.pop("resume"),
+            tui_dev=getattr(args, "tui_dev", False),
+            model=getattr(args, "model", None),
+            accept_hooks=getattr(args, "accept_hooks", False),
+            **passthrough,
+        )
+
+    _read_query_file(args)
+
+    safe_mode = getattr(args, "safe_mode", False)
+    kwargs = {
+        "model": args.model,
+        "reasoning": getattr(args, "reasoning", None),
+        "toolsets": args.toolsets,
+        "query": args.query,
+        "oneshot": bool(getattr(args, "oneshot_exit", False)),
+        "run_budget": getattr(args, "run_budget", None),
+        "ignore_rules": getattr(args, "ignore_rules", False) or safe_mode,
+        "ignore_user_config": getattr(args, "ignore_user_config", False) or safe_mode,
+        "compact": getattr(args, "compact", False),
+        **{k: getattr(args, k, d) for k, d in _CHAT_PASSTHROUGH},
+    }
+    kwargs = {k: v for k, v in kwargs.items() if v is not None}
+
+    try:
+        from cli import main as cli_main
+
+        cli_main(**kwargs)
+    except ValueError as e:
+        print(f"Error: {e}")
+        sys.exit(1)
+    except ImportError as e:
+        # Mixed-version installs (new cli.py, older hermes_cli.config) crash
+        # here — e.g. missing resolve_turn_limit / split_model_config_default
+        # (#96900). The agent-setup mixin prints this hint too late: HermesCLI
+        # construction already failed. Fast-chat launch also goes through
+        # cmd_chat, so this one catch covers `hermes` / `hermes chat`.
+        from hermes_constants import emit_partial_update_hint
+
+        if emit_partial_update_hint(e):
+            sys.exit(1)
+        raise
+
+
+
+def _apply_in_dir(args) -> None:
+    """--in DIR: chdir first so workspace-scoped lookups key off DIR; pins the session there."""
     in_dir = getattr(args, "in_dir", None)
     if not in_dir:
         return
@@ -2700,6 +2774,7 @@ def cmd_chat(args):
     if os.environ.get("TERMINAL_CWD", "").strip():
         os.environ["TERMINAL_CWD"] = _target_dir
     args.no_restore_cwd = True
+
 
 
 def _import_foreign_resume(args) -> None:
