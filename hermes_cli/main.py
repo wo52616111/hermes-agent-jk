@@ -1553,6 +1553,7 @@ def _apply_in_dir(args) -> None:
     args.no_restore_cwd = True
 
 
+
 def _import_foreign_resume(args) -> None:
     """--resume @claude / @codex: import a foreign session and resume it."""
     _resume_foreign = getattr(args, "resume", None)
