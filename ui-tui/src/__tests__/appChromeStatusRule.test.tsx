@@ -149,6 +149,23 @@ describe('StatusRule capacity row', () => {
 })
 
 describe('StatusRule session title', () => {
+  it('marks only estimated context occupancy at every visible width', () => {
+    for (const cols of [80, 120, 200]) {
+      for (const estimated of [true, false]) {
+        const element = StatusRule({
+          ...baseProps,
+          cols,
+          statusBarFields: new Set(['context_detail']),
+          usage: { ...baseProps.usage, context_estimated: estimated }
+        })
+        const rows = React.Children.toArray(element.props.children)
+        const capacity = rows[1] as React.ReactElement<any>
+
+        expect(capacity.props.ctxLabel).toBe(`${estimated ? '~' : ''}50k/200k`)
+      }
+    }
+  })
+
   it('pins the named session at the far-right edge instead of the cwd label', () => {
     const element = StatusRule({
       ...baseProps,

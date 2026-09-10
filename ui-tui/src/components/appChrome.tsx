@@ -613,6 +613,7 @@ export function StatusRule({
   t
 }: StatusRuleProps) {
   const pct = usage.context_percent
+  const contextMark = usage.context_estimated ? '~' : ''
   const barColor = ctxBarColor(pct, t)
   const segs = statusBarSegments(cols)
 
@@ -626,8 +627,8 @@ export function StatusRule({
     ok('context_detail') || ok('context_pct')
       ? usage.context_max
         ? segs.compactCtx
-          ? `${fmtK(usage.context_used ?? 0)} tok`
-          : `${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`
+          ? `${contextMark}${fmtK(usage.context_used ?? 0)} tok`
+          : `${contextMark}${fmtK(usage.context_used ?? 0)}/${fmtK(usage.context_max)}`
         : usage.total > 0
           ? `${fmtK(usage.total)} tok`
           : ''
