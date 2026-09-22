@@ -1,11 +1,11 @@
 import { PassThrough } from 'stream'
 
+import { stripAnsi } from '@hermes/shared/ansi'
 import { renderSync } from '@hermes/ink'
 import React from 'react'
 import { describe, expect, it } from 'vitest'
 
 import { Banner } from '../components/branding.js'
-import { stripAnsi } from '../lib/text.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
