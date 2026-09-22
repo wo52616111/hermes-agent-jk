@@ -1001,8 +1001,9 @@ def _run_prompt_submit(
                 sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
             _emit("message.complete", sid, payload)
-            # Downstream capacity row: refresh the provider quota snapshot on the live
-            # turn path so the completed turn's usage readout carries fresh windows.
+            # Downstream capacity row: refresh the provider quota snapshot on the live turn
+            # path — server.py's copy of this turn is shadowed by this split, so the hook has
+            # to sit here — so the completed turn's usage readout carries fresh windows.
             _refresh_account_usage_async(sid, session)
             goal_followup = _goal_followup_after_turn(sid, session, st.result, status, raw)
             if status == "complete":

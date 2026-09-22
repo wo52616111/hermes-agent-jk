@@ -288,3 +288,56 @@ def test_account_usage_refresh_failure_keeps_last_success(monkeypatch):
     thread.join(timeout=1)
 
     assert session["_account_usage_snapshot"] is previous
+
+
+def test_completed_turn_schedules_provider_quota_refresh():
+    """A finished TUI turn must schedule the quota refresh from the LIVE turn path.
+
+    The hook once sat in server.py's copy of ``_run_prompt_submit``, which upstream's
+    ``prompt_turn`` split shadows at import: the refresh then never ran and the capacity row
+    silently kept only ``─ ctx …``, losing every provider window.
+    """
+    import contextlib
+    import threading
+
+    from tui_gateway import prompt_turn
+    from tui_gateway.method_ctx import rebind
+
+    refreshed, emitted = [], []
+    agent = SimpleNamespace(session_id="agent-1", interim_assistant_callback=None)
+    noop = lambda *_args, **_kwargs: None
+
+    namespace = dict(vars(server))
+    namespace.update({
+        "_admit_prompt_turn": lambda *_a, **_k: ([], agent),
+        "_prepare_turn_input": lambda *_a, **_k: ("prompt", "message", 80, None),
+        "_invoke_agent": noop,
+        "_absorb_turn_result": lambda *_a, **_k: "",
+        "_complete_turn_payload": lambda *_a, **_k: ({}, "done", "complete"),
+        "_emit": lambda event, *_a, **_k: emitted.append(event),
+        "_refresh_account_usage_async": lambda sid, _session: refreshed.append(sid),
+        "_goal_followup_after_turn": lambda *_a, **_k: None,
+        "_after_complete_turn": noop,
+        "_publish_session_control_snapshot": noop,
+        "_finish_turn": noop,
+        "_record_turn_marker": lambda *_a, **_k: "marker",
+        "_retire_turn_marker": noop,
+        "_clear_inflight_turn": noop,
+        "_emit_settled_session_info": noop,
+        "_run_post_turn_followups": noop,
+        "_reopen_routed_session_row": noop,
+        "_routing_provenance_db": lambda _session: contextlib.nullcontext(None),
+        "_sessions": {},
+        "bind_transport": noop,
+        "reset_transport": noop,
+    })
+
+    submit = rebind(prompt_turn._run_prompt_submit, namespace)
+    session = {
+        "agent": agent, "history_lock": threading.RLock(), "running": False, "session_key": "key-1"}
+
+    assert submit("rid", "sid-1", session, "hello") is True
+    session["_run_thread"].join(timeout=10)
+
+    assert refreshed == ["sid-1"]
+    assert "message.complete" in emitted
