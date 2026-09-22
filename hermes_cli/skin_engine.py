@@ -491,17 +491,20 @@ def get_active_skin_name() -> str:
 
 
 def _default_home_skin_name() -> str:
-    """Return the root/default profile's configured skin, if any."""
-    config_path = get_default_hermes_root() / "config.yaml"
+    """Return the root/default profile's configured skin, if any.
+
+    Reads through the sanctioned presence-sensitive loader (never a raw YAML parse):
+    the root home's file is a *different* profile's config, so it is loaded by path.
+    """
     try:
-        import yaml
-        with open(config_path, "r", encoding="utf-8") as f:
-            config = yaml.safe_load(f) or {}
+        from hermes_cli.config_effective import load_user_config_effective
+
+        config = load_user_config_effective(get_default_hermes_root() / "config.yaml")
         display = config.get("display") or {}
         skin_name = display.get("skin") if isinstance(display, dict) else None
         if isinstance(skin_name, str) and skin_name.strip():
             return skin_name.strip()
-    except (OSError, ValueError, TypeError):
+    except Exception:
         pass
     return "default"
 
@@ -594,9 +597,7 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     for name, key, fallback in _STYLE_PALETTE:
         palette[name] = skin.get_color(key, palette[fallback[1:]] if fallback.startswith("@") else fallback)
     # This badge paints both sides; foreground-only light remapping destroys its contrast.
-    # A skin that declares its own `session_label` hue paints the badge with it (the
-    # status-bar default is the fallback).
     palette["badge_bg"] = skin.colors.get(
-        "session_label", skin.colors.get("status_bar_strong", skin.colors.get("banner_title", "#FFD700")))
+        "status_bar_strong", skin.colors.get("banner_title", "#FFD700"))
     palette["badge_fg"] = skin.colors.get("status_bar_bg", "#1a1a2e")
     return {cls: tpl.format(**palette) for cls, tpl in _STYLE_TEMPLATES.items()}
