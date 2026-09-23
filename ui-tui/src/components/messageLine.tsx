@@ -43,9 +43,10 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
 }
 
 export const userBubbleBackground = (role: Msg['role'], t: Theme): string | undefined =>
-  // Use the existing dark panel surface: one level lighter than the black
-  // chat canvas, but less prominent than the active-row fill.
-  role === 'user' ? t.color.completionBg : undefined
+  // The "me" row wears the skin's normal body-text tone as its fill
+  // (jk-spaceduck: ui_text #ecf0c1 light yellow), so the bubble reads as the
+  // theme's own text color rather than a generic panel surface.
+  role === 'user' ? t.color.text : undefined
 
 // User bubble body text uses the theme accent (purple), matching its prefix.
 export const userMessageTextColor = (t: Theme): string => t.color.accent
