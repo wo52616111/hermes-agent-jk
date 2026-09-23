@@ -1,5 +1,6 @@
 import { Ansi, Box, NoSelect, Text } from '@hermes/ink'
 import { hasAnsi, sanitizeAnsiForRender, stripAnsi } from '@hermes/shared/ansi'
+import { mix } from '@hermes/shared/color'
 import { memo, useState } from 'react'
 
 import { TERMUX_TUI_MODE } from '../config/env.js'
@@ -42,11 +43,18 @@ export const fmtMsgTimestamp = (createdAt: number | undefined): null | string =>
   return `[${hh}:${mm}]`
 }
 
+// How far the bubble fill is pushed from the theme's canvas toward its accent.
+// A tinted canvas (not a fixed token) is what keeps this legible on every
+// polarity: the fill always moves toward the color drawn on top of it, so the
+// contrast floor holds for jk-spaceduck, the skinless default and light themes
+// alike — a raw `t.color.text` fill instead measured 1.55:1 on the default.
+const BUBBLE_TINT = 0.22
+
 export const userBubbleBackground = (role: Msg['role'], t: Theme): string | undefined =>
-  // The "me" row wears the skin's normal body-text tone as its fill
-  // (jk-spaceduck: ui_text #ecf0c1 light yellow), so the bubble reads as the
-  // theme's own text color rather than a generic panel surface.
-  role === 'user' ? t.color.text : undefined
+  // The "me" row is the chat canvas mixed 22% toward the theme accent: a deep
+  // purple-cast near-black, visibly a bubble on the black canvas while staying
+  // in the same hue family as the accent text and the purple UI chrome.
+  role === 'user' ? mix(t.color.canvasBg, t.color.accent, BUBBLE_TINT) : undefined
 
 // User bubble body text uses the theme accent (purple), matching its prefix.
 export const userMessageTextColor = (t: Theme): string => t.color.accent

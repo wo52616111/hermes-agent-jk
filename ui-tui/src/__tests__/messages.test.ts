@@ -2,6 +2,7 @@ import { PassThrough } from 'stream'
 
 import { renderSync } from '@hermes/ink'
 import { stripAnsi } from '@hermes/shared/ansi'
+import { contrastRatio, mix } from '@hermes/shared/color'
 import React from 'react'
 import { describe, expect, it } from 'vitest'
 
@@ -9,7 +10,7 @@ import { fmtMsgTimestamp, MessageLine, userBubbleBackground, userMessageTextColo
 import { MAX_HISTORY } from '../config/limits.js'
 import { toTranscriptMessages } from '../domain/messages.js'
 import { appendTranscriptMessage, capTranscriptHistory, upsert } from '../lib/messages.js'
-import { DEFAULT_THEME } from '../theme.js'
+import { DARK_THEME, DEFAULT_THEME, LIGHT_THEME } from '../theme.js'
 
 describe('toTranscriptMessages', () => {
   it('preserves assistant tool-call rows so resume does not drop prior turns', () => {
@@ -99,11 +100,23 @@ describe('toTranscriptMessages', () => {
 })
 
 describe('MessageLine', () => {
-  it('fills user message rows with the theme text color', () => {
-    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(DEFAULT_THEME.color.text)
+  it('tints the user message row from the canvas toward the accent', () => {
+    expect(userBubbleBackground('user', DEFAULT_THEME)).toBe(
+      mix(DEFAULT_THEME.color.canvasBg, DEFAULT_THEME.color.accent, 0.22)
+    )
     expect(userBubbleBackground('assistant', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('system', DEFAULT_THEME)).toBe(undefined)
     expect(userBubbleBackground('tool', DEFAULT_THEME)).toBe(undefined)
+  })
+
+  it('keeps the user bubble fill legible on every theme polarity', () => {
+    for (const t of [DARK_THEME, DEFAULT_THEME, LIGHT_THEME]) {
+      const bg = userBubbleBackground('user', t) as string
+
+      // A fill that only works on the dark default is the bug this guards: the
+      // tint has to clear WCAG AA large-text contrast wherever it lands.
+      expect(contrastRatio(userMessageTextColor(t), bg)).toBeGreaterThanOrEqual(3)
+    }
   })
 
   it('renders user message text in the theme\'s purple accent, matching the prefix', () => {
