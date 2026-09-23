@@ -689,8 +689,7 @@ export function StatusRule({
         ? stringWidth(status)
         : 0
 
-  const essentialWidth =
-    stringWidth('─ ') + batteryWidth + slotWidth + stringWidth(' │ ') + stringWidth(modelText)
+  const essentialWidth = stringWidth('─ ') + batteryWidth + slotWidth + stringWidth(' │ ') + stringWidth(modelText)
 
   const rightLabel = sessionTitle && ok('title') ? ` ${sessionTitle} ` : cwdLabel
   const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, rightLabel, essentialWidth)
