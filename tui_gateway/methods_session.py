@@ -1448,8 +1448,8 @@ def _(rid, params: dict) -> dict:
 @_session_method("session.usage")
 def _(rid, params: dict, session: dict) -> dict:
     usage: dict = _session_usage_snapshot(session)
-    if session.get("agent") is None and not usage:
-        usage = {"calls": 0, "input": 0, "output": 0, "total": 0}
+    if session.get("agent") is None and not _has_token_usage(usage):
+        usage = {"calls": 0, "input": 0, "output": 0, "total": 0, **usage}
     # Nous credits are agent-independent (portal fetch); fail-open when absent.
     with contextlib.suppress(Exception):
         from agent.account_usage import nous_credits_lines

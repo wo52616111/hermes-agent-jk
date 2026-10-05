@@ -54,6 +54,13 @@ def record_aux_usage(
     *provider*/*base_url* reflect the originally-resolved route.
     """
     try:
+        # Quota dirtiness is about the subscription being billed, not about token accounting:
+        # mark before every early return (no ambient session, no usage on the response).
+        from agent.quota_state import mark_called
+        mark_called(provider, base_url=base_url)
+    except Exception:
+        pass
+    try:
         if not task or task in _EXCLUDED_TASKS:
             return
         ctx = _accounting.get()
