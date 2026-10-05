@@ -58,7 +58,29 @@ class _Batch:
 
     def run_child(self, i: int, task: Dict[str, Any], child: Any) -> Dict[str, Any]:
         from tools.delegate_tool import _run_single_child
-        return _run_single_child(task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
+        from tools.delegate_tool_routing import finish_routed_child
+        try:
+            entry = _run_single_child(
+                task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
+        except BaseException:
+            finish_routed_child(child, {"status": "error"})  # delegation.provider: auto outcome; never raises
+            _refresh_child_quota(child)
+            raise
+        finish_routed_child(child, entry)
+        _refresh_child_quota(child)
+        return entry
+
+
+def _refresh_child_quota(child: Any) -> None:
+    """Post-child quota refresh for the subscription the child billed, off the result path."""
+    with _quiet("child quota refresh failed", exc_info=True):
+        from agent import quota_state
+        provider = getattr(child, "provider", None)
+        base_url = getattr(child, "base_url", None)
+        if isinstance(provider, str):
+            quota_state.refresh_in_background(
+                [quota_state.quota_provider(provider, base_url if isinstance(base_url, str) else None)],
+                name="delegate-quota-refresh")
 
 
 def _announce_batch(parent_agent, n_tasks: int, live_deleg_id: Optional[str]) -> None:

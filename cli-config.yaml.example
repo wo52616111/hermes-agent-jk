@@ -1772,6 +1772,17 @@ delegation:
   # fallback_providers:                       # Fallback chain for delegated children (same entry format as the
   #   - provider: "openrouter"                # top-level list). Pinned children use only a declared child chain;
   #     model: "deepseek/deepseek-chat"       # unpinned children inherit when unset. [] disables fallback (#65038).
+  # provider: auto                            # Quota-aware routing: each child runs
+  #                                           #   <router_command> <role> [--author-vendor V] --task-id <subagent_id>
+  #                                           # (15 s timeout, no shell) and is pinned to the JSON answer's
+  #                                           # provider/model; its fallback chain is exactly the router's
+  #                                           # `fallback` list (delegation.fallback_providers is ignored).
+  #                                           # role = per-task delegate_task `route_role` (code-core |
+  #                                           # code-routine | screen | ideate | review; default code-core). Router
+  #                                           # failure → the child inherits the parent, unless the parent runs on
+  #                                           # aftership-codex-proxy (then the delegation fails). Outcomes go via
+  #                                           # the same command with `route --json` → `record`.
+  # router_command: "python3 ~/mygit/eva-mind/clients/claude-code/eva-model.py route --json"  # (default)
 
 # =============================================================================
 # Honcho Integration (Cross-Session User Modeling)

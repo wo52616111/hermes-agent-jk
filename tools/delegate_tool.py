@@ -35,6 +35,9 @@ from tools.delegate_tool_config import (  # noqa: F401
     _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import _Batch, _announce_batch, _capture_origin, _run_batch
+from tools.delegate_tool_routing import (
+    ROUTER_ROLES, inherited_routing_cfg, is_auto, is_blocked_provider, routed_child_route, without_auto,
+)
 from tools.delegate_tool_progress import (  # noqa: F401
     DelegateEvent, SUBAGENT_FAILURE_STATUSES, _batch_prefix, _build_child_progress_callback,
     _build_child_system_prompt, _clean_error_text, _emit_parent_console, _quiet, _resolve_workspace_hint,
@@ -178,6 +181,8 @@ def _build_child_agent(
     routing_cfg: Optional[Dict[str, Any]] = None,
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
+    # Pre-allocated id (delegation.provider: auto routes the child before it is built).
+    subagent_id: Optional[str] = None,
 ):
     """Build (don't run) a child AIAgent on the main thread. override_* (from delegation config) replace parent
     inheritance so children can run on a different provider:model pair."""
@@ -192,7 +197,7 @@ def _build_child_agent(
 
     # One subagent_id shared by the progress callback, spawn_requested event and
     # the live registry; parent_id is set when THIS parent is itself a subagent.
-    subagent_id = f"sa-{task_index}-{_uuid.uuid4().hex[:8]}"
+    subagent_id = subagent_id or f"sa-{task_index}-{_uuid.uuid4().hex[:8]}"
     parent_subagent_id = getattr(parent_agent, "_subagent_id", None)
 
     # General delegation behavior (reasoning, compression, capabilities) stays
@@ -369,31 +374,56 @@ def _build_children(
 ) -> tuple[List[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe);
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
+    import uuid as _uuid
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
-    overrides = {
-        "override_provider": creds["provider"], "override_base_url": creds["base_url"],
-        "override_api_key": creds["api_key"], "override_api_mode": creds["api_mode"],
-        "override_request_overrides": creds.get("request_overrides"),
-        "override_acp_command": creds.get("command"),
-        "override_acp_args": creds.get("args"),
-        "routing_cfg": routing_cfg,
-    }
+
+    def _overrides(c: Dict[str, Any], rcfg: Dict[str, Any]) -> Dict[str, Any]:
+        return {
+            "override_provider": c["provider"], "override_base_url": c["base_url"],
+            "override_api_key": c["api_key"], "override_api_mode": c["api_mode"],
+            "override_request_overrides": c.get("request_overrides"),
+            "override_acp_command": c.get("command"),
+            "override_acp_args": c.get("args"),
+            "routing_cfg": rcfg,
+        }
+    auto = is_auto(routing_cfg)
+    base_routing_cfg = without_auto(routing_cfg) if auto else routing_cfg
     children = []
     for i, t in enumerate(task_list):
         _task_schema = task_schemas[i] if i < len(task_schemas) else None
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
+        subagent_id = f"sa-{i}-{_uuid.uuid4().hex[:8]}"
+        route = routed_child_route(routing_cfg, t, subagent_id) if auto else None
+        if auto and route is None:
+            parent_provider = creds.get("provider") or getattr(parent_agent, "provider", None)
+            if is_blocked_provider(parent_provider):
+                return [], (
+                    f"delegation.provider: auto could not route task {i} and the parent runs on {parent_provider!r}, "
+                    "which delegated children must never inherit. Fix the router (delegation.router_command) or "
+                    "pin delegation.provider/model explicitly."
+                )
+        if route:
+            child_creds, child_rcfg = route["creds"], route["routing_cfg"]
+        elif auto:
+            child_creds, child_rcfg = creds, inherited_routing_cfg(base_routing_cfg, parent_agent, creds)
+        else:
+            child_creds, child_rcfg = creds, base_routing_cfg
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
-                model=creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **overrides,
+                model=child_creds["model"], max_iterations=max_iterations, task_count=len(task_list),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
+                subagent_id=subagent_id, **_overrides(child_creds, child_rcfg),
             )
         except ValueError as exc:
             return [], str(exc)
+        if route:
+            child._delegate_routed = route["routed"]
+            child._delegate_router_cfg = routing_cfg
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
                 child._delegate_output_schema = _task_schema
@@ -492,7 +522,7 @@ def delegate_task(
     # the route and its fallback policy together through child construction.
     routing_cfg = credentials_cfg if credentials_cfg is not None else cfg
     try:
-        creds = _resolve_delegation_credentials(routing_cfg, parent_agent)
+        creds = _resolve_delegation_credentials(without_auto(routing_cfg) if is_auto(routing_cfg) else routing_cfg, parent_agent)
     except ValueError as exc:
         # Explicit-pin preflight failures (e.g. pinned delegation.command missing from PATH) refuse the
         # spawn loudly (#80450).
@@ -677,6 +707,15 @@ DELEGATE_TASK_SCHEMA = {
                             "pixels on their first turn; non-vision children get path hints for vision_analyze. Text "
                             "files do NOT belong here — put paths in 'context' instead.",
                             items={"type": "string"},
+                        ),
+                        "route_role": _p(
+                            "string",
+                            "Optional quota-routing lane that picks this child's model when delegation.provider is "
+                            "auto (default code-core); ignored otherwise.",
+                            enum=list(ROUTER_ROLES),
+                        ),
+                        "author_vendor": _p(
+                            "string", "Optional vendor that authored the work under review (routing hint).",
                         ),
                         "group": _p(
                             "string",
