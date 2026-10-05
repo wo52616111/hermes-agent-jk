@@ -688,6 +688,8 @@ export const sessionCommands: SlashCommand[] = [
             ...state,
             usage: mergeUsageStable(state.usage, {
               account_usage: r.account_usage,
+              account_usage_all: r.account_usage_all,
+              account_usage_active: r.account_usage_active,
               active_subagents: r.active_subagents,
               calls: r.calls ?? 0,
               compressions: r.compressions,

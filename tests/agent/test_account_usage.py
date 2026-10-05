@@ -398,3 +398,31 @@ def test_codex_usage_401_retry_refreshes_the_explicit_credential_not_another_acc
     assert snapshot is not None
     assert refresh_hints == ["pool-B-revoked"]
     assert request_calls == ["Bearer pool-B-revoked", "Bearer pool-B-fresh"]
+
+
+def test_provider_quota_multi_account_counts_distinct_live_accounts(monkeypatch):
+    import agent.credential_pool as cp
+
+    def pool(*entries):
+        return SimpleNamespace(entries=lambda: [SimpleNamespace(access_token=t, last_status=st, refresh_token="r") for t, st in entries])
+
+    pools = {
+        "anthropic": pool(("tok-a", "ok"), ("tok-b", "exhausted")),
+        "opencode-go": pool(("tok-a", "ok"), ("tok-b", cp.STATUS_DEAD)),
+        "openai-codex": pool(("tok-a", "ok")),
+    }
+    monkeypatch.setattr(cp, "load_pool", lambda name: pools[name])
+    assert account_usage.provider_quota_multi_account("anthropic") is True
+    assert account_usage.provider_quota_multi_account("opencode-go") is False
+    assert account_usage.provider_quota_multi_account("openai-codex") is False
+
+
+def test_anthropic_inference_only_setup_token_is_not_a_second_account(monkeypatch):
+    import agent.credential_pool as cp
+
+    entries = [SimpleNamespace(access_token="sk-ant-oat01-login", last_status="ok", refresh_token="r", source="manual:hermes_pkce"),
+               SimpleNamespace(access_token="sk-ant-oat01-setup", last_status="ok", refresh_token=None, source="env:ANTHROPIC_TOKEN")]
+    monkeypatch.setattr(cp, "load_pool", lambda name: SimpleNamespace(entries=lambda: entries))
+    assert account_usage.provider_quota_multi_account("anthropic") is False
+    entries.append(SimpleNamespace(access_token="sk-ant-oat01-other", last_status="ok", refresh_token="r2", source="manual:hermes_pkce"))
+    assert account_usage.provider_quota_multi_account("anthropic") is True

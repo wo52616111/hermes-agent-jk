@@ -77,6 +77,27 @@ describe('/usage slash command', () => {
     expect(getUiState().usage.context_used).toBe(50_000)
   })
 
+  it('copies account_usage_all from the session usage RPC', async () => {
+    patchUiState({ usage: { calls: 1, input: 1, output: 1, total: 2 } })
+
+    const all = [
+      {
+        age_s: 12,
+        backoff_until: null,
+        error: null,
+        fetched_at: '2026-08-28T10:00:00Z',
+        provider: 'anthropic',
+        windows: [{ period: '5h', used_percent: 17, reset_at: null }]
+      }
+    ]
+
+    const { run } = buildCtx({ 'session.usage': baseUsage({ account_usage_all: all, calls: 2 }) })
+
+    await run('')
+
+    expect(getUiState().usage.account_usage_all).toEqual(all)
+  })
+
   it('always shows the CTA; "no API calls yet" only when there is no balance', async () => {
     const empty = buildCtx({ 'session.usage': baseUsage({ calls: 0, credits_lines: [] }) })
     await empty.run('')

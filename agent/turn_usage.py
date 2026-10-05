@@ -70,6 +70,15 @@ def _fold_moa_usage(agent, canonical_usage):
     return _moa_client, canonical_usage, _moa_ref_cost
 
 
+def _mark_quota_dirty(agent: Any) -> None:
+    """Tell the shared quota state this subscription was just billed (agent.quota_state)."""
+    try:
+        from agent.quota_state import mark_called
+        mark_called(getattr(agent, "provider", None), base_url=getattr(agent, "base_url", None))
+    except Exception:
+        logger.debug("quota dirty mark failed", exc_info=True)
+
+
 def record_response_usage(
     agent: Any, response: Any, *, messages: List[Dict[str, Any]], api_call_count: int,
     api_duration: float, compression_attempts: int, max_compression_attempts: int,
@@ -83,6 +92,7 @@ def record_response_usage(
     # Token/cost accounting below stays gated on real usage, but the request itself
     # must remain observable.
     agent.session_api_calls += 1
+    _mark_quota_dirty(agent)
     if not (hasattr(response, 'usage') and response.usage):
         if getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage -> cannot adjudicate the prior compaction; consume the

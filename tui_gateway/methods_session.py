@@ -1224,8 +1224,8 @@ def _(rid, params: dict) -> dict:
 @_session_method("session.usage")
 def _(rid, params: dict, session: dict) -> dict:
     usage: dict = _session_usage_snapshot(session)
-    if session.get("agent") is None and not usage:
-        usage = {"calls": 0, "input": 0, "output": 0, "total": 0}
+    if session.get("agent") is None and not _has_token_usage(usage):
+        usage = {"calls": 0, "input": 0, "output": 0, "total": 0, **usage}
     # Nous credits are agent-independent (portal fetch); fail-open when absent.
     with contextlib.suppress(Exception):
         from agent.account_usage import nous_credits_lines
@@ -1241,14 +1241,20 @@ def _(rid, params: dict, session: dict) -> dict:
 
 def _account_usage_lines(session: dict) -> list[str]:
     """Rendered account-limit lines for the session's route: the live agent's provider/endpoint when
-    built, else the configured ``model.provider`` (on-disk credentials suffice, e.g. Codex OAuth)."""
+    built, else the configured ``model.provider`` (on-disk credentials suffice, e.g. Codex OAuth).
+    Subscription providers are served from the shared quota state so every surface shares one fetch
+    and its 429 backoff; other providers fetch directly."""
+    from agent import quota_state
     from agent.account_usage import fetch_account_usage, render_account_usage_lines
     agent = session.get("agent")
     provider = getattr(agent, "provider", None) or _config_model_target()[1]
     if not provider:
         return []
-    snapshot = fetch_account_usage(
-        provider, base_url=getattr(agent, "base_url", None), api_key=getattr(agent, "api_key", None))
+    base_url = getattr(agent, "base_url", None)
+    subscription = quota_state.quota_provider(provider, base_url)
+    if subscription in quota_state.SUPPORTED:
+        return render_account_usage_lines(quota_state.account_snapshot(subscription))
+    snapshot = fetch_account_usage(provider, base_url=base_url, api_key=getattr(agent, "api_key", None))
     return render_account_usage_lines(snapshot)
 
 

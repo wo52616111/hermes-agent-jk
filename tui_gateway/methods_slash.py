@@ -58,7 +58,7 @@ def _format_live_review_output(sid: str, session: Optional[dict], arg: str) -> s
 def _format_live_usage_output(sid: str, session: dict, arg: str) -> str:
     agent = session.get("agent")
     usage = _session_usage_snapshot(session)
-    if agent is None and not usage:
+    if agent is None and not _has_token_usage(usage):
         return _NO_AGENT_USAGE
     if session.get("_metadata_message_count") is not None:
         message_count = int(session.get("_metadata_message_count") or 0)

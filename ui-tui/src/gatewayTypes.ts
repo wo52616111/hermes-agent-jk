@@ -242,8 +242,13 @@ export interface SessionUndoResponse {
   removed?: number
 }
 
+// Multi-provider quota groups (`account_usage_all`) — generated wire types.
+export type { AccountUsageGroup, AccountUsageGroupWindow } from '@hermes/shared/gateway-events'
+
 export interface SessionUsageResponse {
   account_usage?: Usage['account_usage']
+  account_usage_all?: Usage['account_usage_all']
+  account_usage_active?: Usage['account_usage_active']
   active_subagents?: number
   avg_latency_s?: number
   avg_tps?: number

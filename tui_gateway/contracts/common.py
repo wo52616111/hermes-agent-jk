@@ -34,6 +34,31 @@ class AccountUsage(Result):
     windows: list[AccountUsageWindow]
 
 
+class AccountUsageGroupWindow(Result):
+    period: str
+    used_percent: float
+    reset_at: str | None = None
+    rolled: bool | None = None
+
+
+class AccountUsageError(Result):
+    status: int
+    message: str = ""
+
+
+class AccountUsageGroup(Result):
+    """One subscription's quota from the shared cross-process state (``agent/quota_state.py``)."""
+
+    provider: str
+    fetched_at: str | None = None
+    age_s: int | None = None
+    error: AccountUsageError | None = None
+    backoff_until: str | None = None
+    windows: list[AccountUsageGroupWindow]
+    hint: str | None = None
+    multi_account: bool | None = None
+
+
 class Usage(OpenModel):
     """``tui_gateway/server.py::_get_usage`` + ``agent/context_breakdown.py::context_usage_fields``."""
 
@@ -61,6 +86,8 @@ class Usage(OpenModel):
     cost_usd: float | None = None
     cost_status: str | None = None
     account_usage: AccountUsage | None = None
+    account_usage_all: list[AccountUsageGroup] | None = None
+    account_usage_active: str | None = None
 
 
 class ProjectRef(Result):
@@ -277,7 +304,8 @@ class EmptyPayload(Payload):
 
 
 __all__ = [
-    "TERMINAL_SUBAGENT_STATUSES", "AccountOwner", "AccountUsage", "AccountUsageWindow", "ConnectorOwner",
+    "TERMINAL_SUBAGENT_STATUSES", "AccountOwner", "AccountUsage", "AccountUsageError", "AccountUsageGroup",
+    "AccountUsageGroupWindow", "AccountUsageWindow", "ConnectorOwner",
     "EmptyPayload", "EmptyResult", "McpServerStatus",
     "MessageReaction", "OkResult", "OpenModel", "PendingApproval",
     "ProfileParams", "ProjectRef", "SessionLiveInfo", "SessionOwner", "SessionParams", "StatusResult", "StoredSessionRow",

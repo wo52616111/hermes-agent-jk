@@ -588,6 +588,28 @@ def redeem_codex_reset_credit(
     return _codex_reset_outcome(body, available)
 
 
+def _anthropic_profile_scoped_token(*, exclude: str) -> Optional[str]:
+    """An OAuth access token other than *exclude* that may carry ``user:profile``: Hermes's own
+    pooled Anthropic login first, then the Claude Code interactive login. Read-only: no refresh,
+    no pool mutation."""
+    candidates: list[str] = []
+    try:
+        from agent.anthropic_credentials import _resolve_anthropic_pool_token
+        candidates.append(str(_resolve_anthropic_pool_token(skip_borrowed=True) or "").strip())
+    except Exception:
+        logger.debug("anthropic ▸ pool token read failed", exc_info=True)
+    try:
+        from agent.anthropic_credentials import read_claude_code_credentials
+        creds = read_claude_code_credentials() or {}
+        candidates.append(str(creds.get("accessToken") or creds.get("access_token") or "").strip())
+    except Exception:
+        logger.debug("anthropic ▸ Claude Code credential read failed", exc_info=True)
+    for token in candidates:
+        if token and token != exclude and _is_oauth_token(token):
+            return token
+    return None
+
+
 def _fetch_anthropic_account_usage(
     base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> Optional[AccountUsageSnapshot]:
@@ -599,7 +621,17 @@ def _fetch_anthropic_account_usage(
                          unavailable_reason="Anthropic account limits are only available for OAuth-backed Claude accounts.")
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json", "Content-Type": "application/json",
                "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"}
-    payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
+    try:
+        payload = _get_json("https://api.anthropic.com/api/oauth/usage", headers, timeout=15.0)
+    except httpx.HTTPStatusError as exc:
+        # A `claude setup-token` long-lived token (the usual ANTHROPIC_TOKEN in .env) carries only
+        # `user:inference`; /api/oauth/usage needs `user:profile` and answers 403 permission_error.
+        # The interactive Claude Code login has that scope — use it for the read-only usage call.
+        alt = _anthropic_profile_scoped_token(exclude=token) if exc.response.status_code == 403 else None
+        if not alt:
+            raise
+        payload = _get_json("https://api.anthropic.com/api/oauth/usage",
+                            {**headers, "Authorization": f"Bearer {alt}"}, timeout=15.0)
     windows = _usage_windows(
         payload, (("five_hour", "Current session"), ("seven_day", "Current week"), ("seven_day_opus", "Opus week"),
                   ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at", fraction=True,
@@ -682,14 +714,66 @@ def fetch_account_usage(
     # An opencode.ai/zen/go endpoint IS the Go subscription, whatever the entry is named
     # (``opencode-go-bridge``, #85589): the Go profile owns the /zen/go usage hook, while a
     # custom entry only carries the base no-op.
-    normalized = "opencode-go" if _is_opencode_go_base_url(base_url) else str(provider or "").strip().lower()
-    fetcher = _USAGE_FETCHERS.get(normalized)
     try:
-        if fetcher:
-            return fetcher(base_url, api_key)
-        from providers import get_provider_profile
-
-        profile = get_provider_profile(normalized)
-        return _call_plugin_usage_hook(profile, base_url, api_key) if profile else None
+        return fetch_account_usage_checked(provider, base_url=base_url, api_key=api_key)
     except Exception:
         return None
+
+
+def fetch_account_usage_checked(
+    provider: Optional[str], *, base_url: Optional[str] = None, api_key: Optional[str] = None,
+) -> Optional[AccountUsageSnapshot]:
+    """``fetch_account_usage`` that raises instead of returning None on failure, so the shared quota
+    state (``agent.quota_state``) can honour 429 Retry-After instead of retrying blindly."""
+    normalized = "opencode-go" if _is_opencode_go_base_url(base_url) else str(provider or "").strip().lower()
+    fetcher = _USAGE_FETCHERS.get(normalized)
+    if fetcher:
+        return fetcher(base_url, api_key)
+    from providers import get_provider_profile
+
+    profile = get_provider_profile(normalized)
+    return _call_plugin_usage_hook(profile, base_url, api_key) if profile else None
+
+
+def provider_quota_connected(provider: str) -> bool:
+    """True when a subscription credential for ``provider`` is configured locally (no network)."""
+    name = str(provider or "").strip().lower()
+    try:
+        if name == "anthropic":
+            token = (resolve_anthropic_token() or "").strip()
+            return bool(token) and _is_oauth_token(token)
+        if name == "openai-codex":
+            try:
+                if str((_read_codex_tokens().get("tokens") or {}).get("access_token") or "").strip():
+                    return True
+            except AuthError:
+                pass
+            from agent.credential_pool import load_pool
+            return load_pool("openai-codex").has_credentials()
+        if name == "opencode-go":
+            runtime = resolve_runtime_provider(requested="opencode-go")
+            return bool(str(runtime.get("api_key", "") or "").strip())
+    except Exception:
+        logger.debug("quota connected check failed for %s", name, exc_info=True)
+    return False
+
+
+def provider_quota_multi_account(provider: str) -> bool:
+    """True when the credential pool for ``provider`` holds more than one live account: its usage
+    endpoint would report one account's quota, not the subscription's (PD-4)."""
+    name = str(provider or "").strip().lower()
+    try:
+        from agent.credential_pool import STATUS_DEAD, _codex_principal_identity, load_pool
+        identities = set()
+        for entry in load_pool(name).entries():
+            if entry.last_status == STATUS_DEAD or not entry.access_token:
+                continue
+            # An Anthropic setup-token (no refresh token) is inference-only on the same Max login.
+            if name == "anthropic" and not getattr(entry, "refresh_token", None):
+                continue
+            principal = _codex_principal_identity(entry.access_token) if name == "openai-codex" else None
+            identities.add(principal or entry.access_token)
+        return len(identities) > 1
+    except Exception:
+        logger.debug("quota multi-account check failed for %s", name, exc_info=True)
+    return False

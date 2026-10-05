@@ -161,133 +161,120 @@ def test_session_usage_clears_quota_from_previous_provider():
     assert usage["account_usage"] is None
 
 
-def test_account_usage_refresh_fetches_in_background_and_pushes_status(monkeypatch):
+def _isolated_quota(monkeypatch, tmp_path):
+    from agent import quota_state
+    monkeypatch.setattr(quota_state, "quota_dir", lambda: tmp_path / "quota")
+    monkeypatch.setattr(quota_state, "default_connected", lambda provider: True)
+    monkeypatch.setattr(quota_state, "default_multi_account", lambda provider: False)
+    quota_state._last_touch.clear()
+    quota_state._connected_cache.clear()
+    return quota_state
+
+
+def test_account_usage_refresh_uses_shared_state_and_pushes_status(monkeypatch, tmp_path):
+    qs = _isolated_quota(monkeypatch, tmp_path)
     snapshot = AccountUsageSnapshot(
-        provider="openai-codex",
-        source="usage_api",
-        fetched_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
-        windows=(AccountUsageWindow(label="Session", used_percent=34),),
+        provider="openai-codex", source="usage_api", fetched_at=datetime.now(timezone.utc),
+        windows=(AccountUsageWindow(label="Session", used_percent=34),
+                 AccountUsageWindow(label="Weekly", used_percent=7)),
     )
-    agent = _agent()
-    agent.base_url = "https://chatgpt.com/backend-api/codex"
-    agent.api_key = "token"
-    session = {"agent": agent}
+    fetched = []
+    monkeypatch.setattr(qs, "default_fetcher", lambda p: fetched.append(p) or (snapshot if p == "openai-codex" else None))
     emitted = []
-
-    monkeypatch.setattr("agent.account_usage.fetch_account_usage", lambda *a, **kw: snapshot)
     monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
-
-    thread = server._refresh_account_usage_async("sid", session)
-    thread.join(timeout=1)
-
-    assert session["_account_usage_snapshot"] is snapshot
-    assert emitted[-1][0:2] == ("session.usage", "sid")
-    assert emitted[-1][2]["usage"]["account_usage"]["windows"][0]["period"] == "5h"
-
-
-def test_account_usage_refresh_coalesces_turn_while_request_is_running(monkeypatch):
-    import threading
-
-    first_started = threading.Event()
-    release_first = threading.Event()
-    second_done = threading.Event()
-    calls = 0
-    snapshot = AccountUsageSnapshot(
-        provider="openai-codex",
-        source="usage_api",
-        fetched_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
-        windows=(AccountUsageWindow(label="Session", used_percent=34),),
-    )
-
-    def fetch(*_args, **_kwargs):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            first_started.set()
-            release_first.wait(timeout=1)
-        else:
-            second_done.set()
-        return snapshot
-
     session = {"agent": _agent()}
-    monkeypatch.setattr("agent.account_usage.fetch_account_usage", fetch)
-    monkeypatch.setattr(server, "_emit", lambda *_args: None)
-
-    first = server._refresh_account_usage_async("sid", session)
-    assert first_started.wait(timeout=1)
-    server._refresh_account_usage_async("sid", session)
-    release_first.set()
-
-    assert second_done.wait(timeout=1)
-    assert calls == 2
-
-
-def test_account_usage_refresh_claim_is_atomic(monkeypatch):
-    import threading
-    import time
-
-    class SlowSession(dict):
-        def get(self, key, default=None):
-            value = super().get(key, default)
-            if key == "_account_usage_refreshing" and not value:
-                time.sleep(0.02)
-            return value
-
-    active = 0
-    max_active = 0
-    active_lock = threading.Lock()
-    release = threading.Event()
-    snapshot = AccountUsageSnapshot(
-        provider="openai-codex",
-        source="usage_api",
-        fetched_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
-        windows=(AccountUsageWindow(label="Session", used_percent=34),),
-    )
-
-    def fetch(*_args, **_kwargs):
-        nonlocal active, max_active
-        with active_lock:
-            active += 1
-            max_active = max(max_active, active)
-        release.wait(timeout=1)
-        with active_lock:
-            active -= 1
-        return snapshot
-
-    session = SlowSession(agent=_agent())
-    monkeypatch.setattr("agent.account_usage.fetch_account_usage", fetch)
-    monkeypatch.setattr(server, "_emit", lambda *_args: None)
-
-    callers = [threading.Thread(target=server._refresh_account_usage_async, args=("sid", session)) for _ in range(8)]
-    for caller in callers:
-        caller.start()
-    for caller in callers:
-        caller.join(timeout=1)
-    time.sleep(0.05)
-    release.set()
-
-    assert max_active == 1
-
-
-def test_account_usage_refresh_failure_keeps_last_success(monkeypatch):
-    previous = AccountUsageSnapshot(
-        provider="anthropic",
-        source="oauth_usage_api",
-        fetched_at=datetime(2026, 8, 28, 10, 0, tzinfo=timezone.utc),
-        windows=(AccountUsageWindow(label="Current week", used_percent=20),),
-    )
-    session = {"agent": _agent("anthropic"), "_account_usage_snapshot": previous}
-
-    def fail(*_args, **_kwargs):
-        raise RuntimeError("offline")
-
-    monkeypatch.setattr("agent.account_usage.fetch_account_usage", fail)
-    monkeypatch.setattr(server, "_emit", lambda *_args: None)
 
     thread = server._refresh_account_usage_async("sid", session)
-    thread.join(timeout=1)
+    thread.join(timeout=2)
 
-    assert session["_account_usage_snapshot"] is previous
+    # Bootstrap: every supported provider without a snapshot is fetched once.
+    assert sorted(fetched) == ["anthropic", "openai-codex", "opencode-go"]
+    usage = emitted[-1][2]["usage"]
+    assert emitted[-1][0:2] == ("session.usage", "sid")
+    groups = {g["provider"]: g for g in usage["account_usage_all"]}
+    assert [w["period"] for w in groups["openai-codex"]["windows"]] == ["5h", "7d"]
+    assert usage["account_usage"]["provider"] == "openai-codex"
+
+    # Next turn: nothing was billed since, so nothing is fetched again.
+    fetched.clear()
+    server._refresh_account_usage_async("sid", session).join(timeout=2)
+    assert fetched == []
+
+
+def test_account_usage_refresh_only_fetches_billed_provider(monkeypatch, tmp_path):
+    qs = _isolated_quota(monkeypatch, tmp_path)
+    snap = lambda p: AccountUsageSnapshot(provider=p, source="t", fetched_at=datetime.now(timezone.utc),
+                                          windows=(AccountUsageWindow(label="Weekly", used_percent=1),))
+    fetched = []
+    monkeypatch.setattr(qs, "default_fetcher", lambda p: fetched.append(p) or snap(p))
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+    session = {"agent": _agent()}
+    server._refresh_account_usage_async("sid", session).join(timeout=2)
+    fetched.clear()
+
+    from datetime import timedelta
+    for p in qs.SUPPORTED:  # make the stored fetches older than the 60 s floor
+        path = qs._path("snapshot", p, ".json")
+        import json as _json
+        data = _json.loads(path.read_text())
+        old = (datetime.now(timezone.utc) - timedelta(seconds=120)).isoformat()
+        data["fetched_at"] = data["attempted_at"] = old
+        path.write_text(_json.dumps(data))
+    qs.mark_called("openai-codex")
+    server._refresh_account_usage_async("sid", session).join(timeout=2)
+    assert fetched == ["openai-codex"]
+
+
+def test_account_usage_refresh_429_keeps_last_windows(monkeypatch, tmp_path):
+    qs = _isolated_quota(monkeypatch, tmp_path)
+    good = AccountUsageSnapshot(provider="anthropic", source="t", fetched_at=datetime.now(timezone.utc),
+                                windows=(AccountUsageWindow(label="Current week", used_percent=20),))
+    monkeypatch.setattr(qs, "default_fetcher", lambda p: good if p == "anthropic" else None)
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+    session = {"agent": _agent("anthropic")}
+    server._refresh_account_usage_async("sid", session).join(timeout=2)
+
+    from datetime import timedelta
+    later = datetime.now(timezone.utc) + timedelta(minutes=5)
+    qs.mark_called("anthropic", now=later - timedelta(minutes=1))
+
+    def fail(_p):
+        raise qs.QuotaFetchError("anthropic", 429, 260, "rate limited")
+    assert qs.refresh("anthropic", fetcher=fail, now=later) == "error"
+
+    groups = {g["provider"]: g for g in server._account_usage_all_wire()}
+    assert groups["anthropic"]["windows"][0]["used_percent"] == 20.0
+    assert groups["anthropic"]["error"]["status"] == 429
+
+
+def test_account_usage_refresh_coalesces_turn_while_request_is_running(monkeypatch, tmp_path):
+    import threading
+
+    qs = _isolated_quota(monkeypatch, tmp_path)
+    started, release = threading.Event(), threading.Event()
+    runs = []
+
+    def slow_refresh(provider, **_kw):
+        if provider == "anthropic":
+            runs.append(1)
+            if len(runs) == 1:
+                started.set()
+                release.wait(timeout=2)
+        return "fresh"
+
+    monkeypatch.setattr(qs, "refresh", slow_refresh)
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+    session = {"agent": _agent()}
+    first = server._refresh_account_usage_async("sid", session)
+    assert started.wait(timeout=2)
+    assert server._refresh_account_usage_async("sid", session) is None  # coalesced
+    release.set()
+    first.join(timeout=2)
+    import time as _time
+    deadline = _time.monotonic() + 2
+    while len(runs) < 2 and _time.monotonic() < deadline:
+        _time.sleep(0.01)
+    assert len(runs) == 2
 
 
 def test_completed_turn_schedules_provider_quota_refresh():
@@ -341,3 +328,53 @@ def test_completed_turn_schedules_provider_quota_refresh():
 
     assert refreshed == ["sid-1"]
     assert "message.complete" in emitted
+
+
+def test_session_usage_names_the_active_quota_provider(monkeypatch):
+    monkeypatch.setattr(server, "_account_usage_all_wire", lambda: [])
+    usage = server._session_usage_snapshot({"agent": _agent("Anthropic")})
+    assert usage["account_usage_active"] == "anthropic"
+
+    go = SimpleNamespace(**{**vars(_agent("custom")), "base_url": "https://opencode.ai/zen/go/v1"})
+    assert server._session_usage_snapshot({"agent": go})["account_usage_active"] == "opencode-go"
+
+
+def test_gateway_startup_bootstraps_connected_quota_off_thread(monkeypatch):
+    import threading
+    from agent import quota_state
+    from tui_gateway import entry
+
+    ran = threading.Event()
+    monkeypatch.setattr(quota_state, "bootstrap_connected", lambda *a, **k: ran.set() or {})
+    thread = entry._start_quota_bootstrap()
+    thread.join(5)
+    assert ran.is_set() and thread.daemon
+
+
+def test_pre_agent_usage_snapshot_carries_subscription_groups(monkeypatch):
+    groups = [{"provider": "anthropic", "windows": [{"period": "7d", "used_percent": 40.0}]}]
+    monkeypatch.setattr(server, "_account_usage_all_wire", lambda: groups)
+    usage = server._session_usage_snapshot({"agent": None})
+    assert usage["account_usage_all"] == groups
+    assert usage["account_usage_active"] is None
+
+    assert server._format_live_usage_output("sid", {"agent": None}, "") == server._NO_AGENT_USAGE
+
+
+def test_quota_bootstrap_publishes_usage_to_live_sessions(monkeypatch):
+    from agent import quota_state
+    from tui_gateway import entry
+
+    groups = [{"provider": "openai-codex", "windows": [{"period": "5h", "used_percent": 3.0}]}]
+    monkeypatch.setattr(quota_state, "bootstrap_connected", lambda *a, **k: {"openai-codex": "fetched"})
+    monkeypatch.setattr(server, "_account_usage_all_wire", lambda: groups)
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {"sid-a": {"agent": None}, "sid-b": {"agent": _agent()}})
+
+    entry._start_quota_bootstrap().join(5)
+
+    by_sid = {sid: payload["usage"] for event, sid, payload in emitted if event == "session.usage"}
+    assert set(by_sid) == {"sid-a", "sid-b"}
+    assert by_sid["sid-a"]["account_usage_all"] == groups
+    assert by_sid["sid-b"]["account_usage_all"] == groups

@@ -4102,6 +4102,162 @@
         "title": "AccountUsage",
         "type": "object"
       },
+      "AccountUsageError": {
+        "additionalProperties": false,
+        "properties": {
+          "status": {
+            "title": "Status",
+            "type": "integer"
+          },
+          "message": {
+            "default": "",
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status"
+        ],
+        "title": "AccountUsageError",
+        "type": "object"
+      },
+      "AccountUsageGroup": {
+        "additionalProperties": false,
+        "description": "One subscription's quota from the shared cross-process state (``agent/quota_state.py``).",
+        "properties": {
+          "provider": {
+            "title": "Provider",
+            "type": "string"
+          },
+          "fetched_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fetched At"
+          },
+          "age_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Age S"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountUsageError"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "backoff_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Backoff Until"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/AccountUsageGroupWindow"
+            },
+            "title": "Windows",
+            "type": "array"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Hint"
+          },
+          "multi_account": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Multi Account"
+          }
+        },
+        "required": [
+          "provider",
+          "windows"
+        ],
+        "title": "AccountUsageGroup",
+        "type": "object"
+      },
+      "AccountUsageGroupWindow": {
+        "additionalProperties": false,
+        "properties": {
+          "period": {
+            "title": "Period",
+            "type": "string"
+          },
+          "used_percent": {
+            "title": "Used Percent",
+            "type": "number"
+          },
+          "reset_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Reset At"
+          },
+          "rolled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Rolled"
+          }
+        },
+        "required": [
+          "period",
+          "used_percent"
+        ],
+        "title": "AccountUsageGroupWindow",
+        "type": "object"
+      },
       "AccountUsageWindow": {
         "additionalProperties": false,
         "description": "One provider quota window (``tui_gateway/server.py::_account_usage_wire``).",
@@ -29044,6 +29200,33 @@
             ],
             "default": null
           },
+          "account_usage_all": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AccountUsageGroup"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage All"
+          },
+          "account_usage_active": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active"
+          },
           "credits_lines": {
             "anyOf": [
               {
@@ -33398,6 +33581,33 @@
               }
             ],
             "default": null
+          },
+          "account_usage_all": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AccountUsageGroup"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage All"
+          },
+          "account_usage_active": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active"
           }
         },
         "title": "Usage",

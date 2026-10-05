@@ -313,6 +313,8 @@ def run_oneshot(
             # silently past the redirect — the worst failure mode in cron / SSH / subprocess use.
             failure = exc
 
+    _refresh_called_quota()
+
     if failure is not None:
         # Control-flow exceptions (Ctrl-C / sys.exit inside the agent) re-raise to the parent.
         if isinstance(failure, (KeyboardInterrupt, SystemExit)):
@@ -342,6 +344,21 @@ def run_oneshot(
         real_stderr.write("hermes -z: no final response was produced; treating the run as failed.\n")
         real_stderr.flush()
     return exit_code
+
+
+QUOTA_REFRESH_EXIT_BOUND_S = 10
+
+
+def _refresh_called_quota() -> None:
+    """Refresh the shared quota of every subscription this run billed before the process exits
+    (a one-shot has no later turn to do it), bounded so a slow usage endpoint cannot hold the exit."""
+    try:
+        from agent import quota_state
+        thread = quota_state.refresh_in_background(quota_state.called_providers(), name="oneshot-quota-refresh")
+        if thread is not None:
+            thread.join(timeout=QUOTA_REFRESH_EXIT_BOUND_S)
+    except Exception:
+        logging.debug("oneshot: quota refresh failed", exc_info=True)
 
 
 def _create_session_db_for_oneshot():

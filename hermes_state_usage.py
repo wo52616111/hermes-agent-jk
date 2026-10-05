@@ -357,6 +357,13 @@ class SessionUsageMixin:
             "SELECT model, billing_provider, billing_base_url, billing_mode FROM sessions WHERE id = ?", (session_id,),
         ).fetchone()
         sess = dict(row) if (row is not None and not task) else {}
+        try:
+            # Single boundary every persisted billed call reaches (incl. background-review forks).
+            from agent.quota_state import mark_called
+            mark_called(billing_provider or sess.get("billing_provider"),
+                        base_url=billing_base_url or sess.get("billing_base_url"))
+        except Exception:
+            pass
         counts = [v or 0 for v in (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)]
         now = time.time()
         conn.execute(_MODEL_USAGE_UPSERT_SQL, (

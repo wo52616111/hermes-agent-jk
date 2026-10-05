@@ -580,6 +580,8 @@ export interface Usage {
   cost_usd?: number | null
   cost_status?: string | null
   account_usage?: AccountUsage | null
+  account_usage_all?: AccountUsageGroup[] | null
+  account_usage_active?: string | null
   [key: string]: unknown
 }
 /** The active provider's quota snapshot as the TUI capacity row renders it. */
@@ -593,6 +595,27 @@ export interface AccountUsageWindow {
   period: string
   used_percent: number
   reset_at?: string | null
+}
+/** One subscription's quota from the shared cross-process state (``agent/quota_state.py``). */
+export interface AccountUsageGroup {
+  provider: string
+  fetched_at?: string | null
+  age_s?: number | null
+  error?: AccountUsageError | null
+  backoff_until?: string | null
+  windows: AccountUsageGroupWindow[]
+  hint?: string | null
+  multi_account?: boolean | null
+}
+export interface AccountUsageError {
+  status: number
+  message?: string
+}
+export interface AccountUsageGroupWindow {
+  period: string
+  used_percent: number
+  reset_at?: string | null
+  rolled?: boolean | null
 }
 export interface McpServerStatus {
   name?: string
@@ -3001,6 +3024,8 @@ export interface SessionUsageResult {
   cost_usd?: number | null
   cost_status?: string | null
   account_usage?: AccountUsage | null
+  account_usage_all?: AccountUsageGroup[] | null
+  account_usage_active?: string | null
   credits_lines?: string[] | null
   [key: string]: unknown
 }

@@ -120,3 +120,32 @@ class TestAuxiliaryLedger:
         finally:
             db.close()
         assert result["auxiliary_usage"]["title_generation"]["api_calls"] == 1
+
+
+def test_oneshot_exit_refreshes_quota_for_called_providers(monkeypatch, tmp_path, request):
+    import logging
+    from unittest import mock
+
+    import hermes_cli.oneshot as oneshot
+    from agent import quota_state
+
+    request.addfinalizer(lambda: logging.disable(logging.NOTSET))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for var in ("HERMES_YOLO_MODE", "HERMES_ACCEPT_HOOKS", "HERMES_SINGLE_QUERY_SESSION"):
+        monkeypatch.setenv(var, "")
+    refreshed = []
+    monkeypatch.setattr(quota_state, "refresh", lambda provider, **_k: refreshed.append(provider) or "fetched")
+    monkeypatch.setattr(quota_state, "_last_touch", {})
+
+    def _agent_run(*_a, **_k):
+        quota_state._last_touch["openai-codex"] = 1.0
+        return "done", {"final_response": "done", "completed": True, "failed": False}
+
+    with mock.patch.object(oneshot, "_run_agent", side_effect=_agent_run):
+        assert oneshot.run_oneshot("q") == 0
+    assert refreshed == ["openai-codex"]
+
+    refreshed.clear()
+    with mock.patch.object(oneshot, "_run_agent", side_effect=RuntimeError("boom")):
+        assert oneshot.run_oneshot("q") == 1
+    assert refreshed == ["openai-codex"]

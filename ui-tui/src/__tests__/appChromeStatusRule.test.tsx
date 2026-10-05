@@ -1,7 +1,14 @@
 import React from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { formatResetRemaining, StatusRule } from '../components/appChrome.js'
+import {
+  formatResetRemaining,
+  layoutQuotaGroups,
+  type QuotaSegment,
+  quotaStaleMarker,
+  StatusRule
+} from '../components/appChrome.js'
+import type { AccountUsageGroup } from '../gatewayTypes.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 type ReactNodeLike = React.ReactNode
@@ -100,7 +107,15 @@ const baseProps = {
   statusColor: DEFAULT_THEME.color.ok,
   t: DEFAULT_THEME,
   turnStartedAt: null,
-  usage: { calls: 1, input: 1, output: 1, context_max: 200_000, context_percent: 25, context_used: 50_000, total: 50_000 },
+  usage: {
+    calls: 1,
+    input: 1,
+    output: 1,
+    context_max: 200_000,
+    context_percent: 25,
+    context_used: 50_000,
+    total: 50_000
+  },
   voiceLabel: ''
 }
 
@@ -160,6 +175,240 @@ describe('StatusRule capacity row', () => {
     expect(rows).toHaveLength(2)
     expect(textContent(rows[0])).not.toContain('50k/200k')
     expect((rows[1] as React.ReactElement<any>).props.ctxLabel).toBe('50k/200k')
+  })
+})
+
+const NOW = Date.parse('2026-08-28T10:00:00Z')
+
+const group = (overrides: Partial<AccountUsageGroup> & Pick<AccountUsageGroup, 'provider'>): AccountUsageGroup => ({
+  age_s: 30,
+  backoff_until: null,
+  error: null,
+  fetched_at: '2026-08-28T09:59:30Z',
+  windows: [],
+  ...overrides
+})
+
+const ALL_GROUPS: AccountUsageGroup[] = [
+  group({
+    provider: 'anthropic',
+    windows: [
+      { period: '5h', used_percent: 17, reset_at: '2026-08-28T13:00:00Z' },
+      { period: '7d', used_percent: 66, reset_at: '2026-08-31T10:00:00Z' },
+      { period: 'opus 7d', used_percent: 91, reset_at: null },
+      { period: 'sonnet 7d', used_percent: 12, reset_at: null }
+    ]
+  }),
+  group({
+    provider: 'openai-codex',
+    windows: [
+      { period: '5h', used_percent: 5, reset_at: '2026-08-28T12:00:00Z' },
+      { period: '7d', used_percent: 7, reset_at: '2026-09-01T10:00:00Z' }
+    ]
+  }),
+  group({
+    provider: 'opencode-go',
+    windows: [
+      { period: '5h', used_percent: 0, reset_at: null },
+      { period: 'monthly', used_percent: 36, reset_at: '2026-09-10T10:00:00Z' }
+    ]
+  })
+]
+
+const joined = (segments: QuotaSegment[]) => segments.map(s => s.text).join('')
+
+// Render the CapacityRow element (second StatusRule child) to its flat text.
+const capacityText = (row: React.ReactElement<any>) =>
+  textContent((row.type as (p: unknown) => ReactNodeLike)(row.props))
+
+describe('StatusRule multi-provider quota (account_usage_all)', () => {
+  it('highlights the active provider label in accent bold', () => {
+    const segs = layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW, 'openai-codex')
+    const labels = segs.filter(s => /│ (A\\|codex|go)$/.test(s.text))
+
+    expect(labels.map(s => s.text.trim())).toEqual(['│ A\\', '│ codex', '│ go'])
+    expect(labels.map(s => !!s.bold)).toEqual([false, true, false])
+    expect(labels[1]!.color).toBe(DEFAULT_THEME.color.accent)
+    expect(labels[0]!.color).toBe(DEFAULT_THEME.color.muted)
+  })
+
+  it('keeps the active provider when narrow widths drop trailing groups', () => {
+    const text = joined(layoutQuotaGroups(ALL_GROUPS, 12, DEFAULT_THEME, NOW, 'opencode-go'))
+
+    expect(text).toBe(' │ go mo 36%')
+    const two = joined(layoutQuotaGroups(ALL_GROUPS, 24, DEFAULT_THEME, NOW, 'opencode-go'))
+
+    expect(two).toBe(' │ go 5h 0% mo 36%')
+  })
+
+  it('keeps the active provider 5h window when the other 5h windows drop', () => {
+    const no5h = joined(layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW, 'openai-codex'))
+    const budget = ' │ A\\ 7d 66% │ codex 5h 5% 7d 7% │ go mo 36%'.length
+
+    expect(no5h).toContain('codex 5h 5%')
+    expect(joined(layoutQuotaGroups(ALL_GROUPS, budget, DEFAULT_THEME, NOW, 'openai-codex'))).toBe(
+      ' │ A\\ 7d 66% │ codex 5h 5% 7d 7% │ go mo 36%'
+    )
+  })
+
+  it('highlights the active provider even when it is the only group shown', () => {
+    const segs = layoutQuotaGroups(ALL_GROUPS.slice(0, 1), 9999, DEFAULT_THEME, NOW, 'anthropic')
+    const label = segs.find(s => s.text === ' │ A\\')
+
+    expect(label?.bold).toBe(true)
+    expect(label?.color).toBe(DEFAULT_THEME.color.accent)
+  })
+
+  it('renders one labelled group per provider, skipping opus/sonnet sub-windows', () => {
+    const text = joined(layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW))
+
+    expect(text).toBe(' │ A\\ 5h 17% 7d 66% ↻ 3d │ codex 5h 5% 7d 7% ↻ 4d │ go 5h 0% mo 36% ↻ 13d')
+    expect(text).not.toContain('opus')
+    expect(text).not.toContain('91%')
+  })
+
+  it('colours each percentage with the quota thresholds', () => {
+    const segs = layoutQuotaGroups(
+      [
+        group({
+          provider: 'anthropic',
+          windows: [
+            { period: '5h', used_percent: 95, reset_at: null },
+            { period: '7d', used_percent: 75, reset_at: null }
+          ]
+        }),
+        group({ provider: 'openai-codex', windows: [{ period: '5h', used_percent: 10, reset_at: null }] })
+      ],
+      9999,
+      DEFAULT_THEME,
+      NOW
+    )
+
+    expect(segs.find(s => s.text === ' 5h 95%')?.color).toBe(DEFAULT_THEME.color.error)
+    expect(segs.find(s => s.text === ' 7d 75%')?.color).toBe(DEFAULT_THEME.color.warn)
+    expect(segs.find(s => s.text === ' 5h 10%')?.color).toBe(DEFAULT_THEME.color.statusGood)
+    expect(segs.find(s => s.text === ' │ A\\')?.color).toBe(DEFAULT_THEME.color.muted)
+  })
+
+  it('degrades on narrow widths: resets first, then 5h windows, then trailing groups', () => {
+    const noResets = ' │ A\\ 5h 17% 7d 66% │ codex 5h 5% 7d 7% │ go 5h 0% mo 36%'
+    const no5h = ' │ A\\ 7d 66% │ codex 7d 7% │ go mo 36%'
+
+    expect(joined(layoutQuotaGroups(ALL_GROUPS, noResets.length, DEFAULT_THEME, NOW))).toBe(noResets)
+    expect(joined(layoutQuotaGroups(ALL_GROUPS, noResets.length - 1, DEFAULT_THEME, NOW))).toBe(no5h)
+    expect(joined(layoutQuotaGroups(ALL_GROUPS, no5h.length - 1, DEFAULT_THEME, NOW))).toBe(' │ A\\ 7d 66% │ codex 7d 7%')
+    expect(joined(layoutQuotaGroups(ALL_GROUPS, 12, DEFAULT_THEME, NOW))).toBe(' │ A\\ 7d 66%')
+    expect(layoutQuotaGroups(ALL_GROUPS, 5, DEFAULT_THEME, NOW)).toEqual([])
+  })
+
+  it('marks stale or rate-limited groups with a dim muted age / 429 marker', () => {
+    expect(quotaStaleMarker({ age_s: 60, error: null })).toBe('')
+    expect(quotaStaleMarker({ age_s: 45 * 60, error: null })).toBe('·45m')
+    expect(quotaStaleMarker({ age_s: 2 * 3600 + 120, error: null })).toBe('·2h')
+    expect(quotaStaleMarker({ age_s: 300, error: { message: 'rate limited', status: 429 } })).toBe('·429')
+    expect(quotaStaleMarker({ age_s: 3 * 3600, error: { message: 'rate limited', status: 429 } })).toBe('·3h')
+    expect(quotaStaleMarker({ age_s: 600, error: { message: 'boom', status: 500 } })).toBe('·10m')
+
+    const segs = layoutQuotaGroups(
+      [
+        group({
+          age_s: 120,
+          error: { message: 'rate limited', status: 429 },
+          provider: 'anthropic',
+          windows: [{ period: '5h', used_percent: 40, reset_at: null }]
+        }),
+        group({
+          age_s: 50 * 60,
+          provider: 'openai-codex',
+          windows: [{ period: '5h', used_percent: 1, reset_at: null }]
+        })
+      ],
+      9999,
+      DEFAULT_THEME,
+      NOW
+    )
+
+    expect(joined(segs)).toBe(' │ A\\ 5h 40%·429 │ codex 5h 1%·50m')
+    const marker = segs.find(s => s.text === '·429')!
+
+    expect(marker.color).toBe(DEFAULT_THEME.color.muted)
+    expect(marker.dim).toBe(true)
+  })
+
+  it('renders a route hint after its group in warn colour', () => {
+    const segs = layoutQuotaGroups(
+      [
+        group({ hint: '→ sol', provider: 'anthropic', windows: [{ period: '5h', used_percent: 92, reset_at: null }] }),
+        group({ provider: 'openai-codex', windows: [{ period: '5h', used_percent: 3, reset_at: null }] })
+      ],
+      9999,
+      DEFAULT_THEME,
+      NOW
+    )
+
+    expect(joined(segs)).toBe(' │ A\\ 5h 92% → sol │ codex 5h 3%')
+    expect(segs.find(s => s.text === ' → sol')?.color).toBe(DEFAULT_THEME.color.warn)
+  })
+
+  it('prefers account_usage_all over account_usage and shows the row without a context label', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const element = StatusRule({
+      ...baseProps,
+      cols: 200,
+      usage: {
+        calls: 0,
+        input: 0,
+        output: 0,
+        total: 0,
+        account_usage: {
+          provider: 'openai-codex',
+          fetched_at: '2026-08-28T10:00:00Z',
+          windows: [{ period: '5h', used_percent: 99, reset_at: null }]
+        },
+        account_usage_all: ALL_GROUPS,
+        account_usage_active: 'anthropic'
+      }
+    })
+
+    const rows = React.Children.toArray(element.props.children)
+    const capacity = rows[1] as React.ReactElement<any>
+
+    expect(rows).toHaveLength(2)
+    expect(capacity.props.quotaGroups).toHaveLength(3)
+    expect(capacity.props.activeProvider).toBe('anthropic')
+    expect(capacity.props.quotaWindows).toEqual([])
+    const text = capacityText(capacity)
+
+    expect(text.startsWith('─ usage │ A\\ 5h 17%')).toBe(true)
+    expect(text).toContain('│ codex 5h 5% 7d 7%')
+    expect(text).toContain('│ go 5h 0% mo 36%')
+    expect(text).not.toContain('99%')
+
+    vi.useRealTimers()
+  })
+
+  it('falls back to the single-provider account_usage when account_usage_all is missing or empty', () => {
+    for (const all of [undefined, []]) {
+      const element = StatusRule({
+        ...baseProps,
+        usage: {
+          ...baseProps.usage,
+          account_usage: {
+            provider: 'openai-codex',
+            fetched_at: '2026-08-28T10:00:00Z',
+            windows: [{ period: '5h', used_percent: 34, reset_at: null }]
+          },
+          ...(all ? { account_usage_all: all } : {})
+        }
+      })
+
+      const capacity = React.Children.toArray(element.props.children)[1] as React.ReactElement<any>
+
+      expect(capacity.props.quotaGroups).toEqual([])
+      expect(capacityText(capacity)).toContain('│ 5h 34%')
+    }
   })
 })
 
@@ -361,7 +610,9 @@ describe('StatusRule credits notice render priority', () => {
     expect(rendered).not.toContain('ready')
     // … but model + context stay visible.
     expect(rendered).toContain('opus 4.8')
-    expect((React.Children.toArray(element.props.children)[1] as React.ReactElement<any>).props.ctxLabel).toBe('50k/200k')
+    expect((React.Children.toArray(element.props.children)[1] as React.ReactElement<any>).props.ctxLabel).toBe(
+      '50k/200k'
+    )
   })
 
   it('busy wins: the FaceTicker shows, the notice is hidden mid-turn', () => {

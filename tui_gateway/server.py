@@ -2090,15 +2090,9 @@ def _account_usage_wire(snapshot, provider: str) -> dict | None:
 
 
 def _refresh_account_usage_async(sid: str, session: dict):
-    """Refresh provider quota once without blocking the completed turn."""
-    agent = session.get("agent")
-    if agent is None:
-        return None
-    provider = str(getattr(agent, "provider", "") or "").strip().lower()
-    base_url = str(getattr(agent, "base_url", "") or "").lower()
-    is_opencode_go = "opencode.ai" in base_url and "/zen/go" in base_url
-    if provider not in {"openai-codex", "anthropic", "opencode-go"} and not is_opencode_go:
-        return None
+    """Post-turn quota refresh through the shared cross-process state (agent.quota_state): only
+    providers billed since their last fetch (or never fetched) are fetched, once across every
+    process, honouring 429 Retry-After. Never blocks the completed turn."""
     refresh_lock = session.setdefault("_account_usage_refresh_lock", threading.Lock())
     with refresh_lock:
         if session.get("_account_usage_refreshing"):
@@ -2108,16 +2102,14 @@ def _refresh_account_usage_async(sid: str, session: dict):
 
     def _refresh() -> None:
         try:
-            from agent.account_usage import fetch_account_usage
+            from agent import quota_state
 
-            snapshot = fetch_account_usage(
-                getattr(agent, "provider", None),
-                base_url=getattr(agent, "base_url", None),
-                api_key=getattr(agent, "api_key", None),
-            )
-            if snapshot is not None:
-                session["_account_usage_snapshot"] = snapshot
-                _emit("session.usage", sid, {"usage": _session_usage_snapshot(session)})
+            for provider in quota_state.SUPPORTED:
+                try:
+                    quota_state.refresh(provider)
+                except Exception:
+                    logger.debug("quota refresh failed for %s", provider, exc_info=True)
+            _emit("session.usage", sid, {"usage": _session_usage_snapshot(session)})
         except Exception:
             logger.debug("account usage refresh failed", exc_info=True)
         finally:
@@ -2132,6 +2124,26 @@ def _refresh_account_usage_async(sid: str, session: dict):
     return thread
 
 
+def _account_usage_all_wire() -> list[dict]:
+    """Every provider with stored quota windows, for the capacity row (status bar)."""
+    try:
+        from agent import quota_state
+        groups = quota_state.status_groups()
+    except Exception:
+        logger.debug("quota status read failed", exc_info=True)
+        return []
+    return groups
+
+
+def _legacy_account_usage_wire(provider: str, groups: list[dict]) -> dict | None:
+    for group in groups:
+        if group.get("provider") == provider and group.get("windows"):
+            return {"provider": provider, "fetched_at": group.get("fetched_at"),
+                    "windows": [{k: w.get(k) for k in ("period", "used_percent", "reset_at")}
+                                for w in group["windows"]]}
+    return None
+
+
 def _session_usage_snapshot(session: dict | None) -> dict:
     sess = session or {}
     mirror_usage = _metadata_mirror(session).get("usage")
@@ -2141,12 +2153,24 @@ def _session_usage_snapshot(session: dict | None) -> dict:
         provider = str(getattr(agent, "provider", "") or "").strip().lower()
         base_url = str(getattr(agent, "base_url", "") or "").lower()
         wire_provider = "opencode-go" if "opencode.ai" in base_url and "/zen/go" in base_url else provider
-        usage["account_usage"] = _account_usage_wire(
+        groups = _account_usage_all_wire()
+        usage["account_usage_all"] = groups
+        usage["account_usage_active"] = wire_provider or None
+        usage["account_usage"] = _legacy_account_usage_wire(wire_provider, groups) or _account_usage_wire(
             sess.get("_account_usage_snapshot"),
             wire_provider,
         )
         return usage
-    return dict(mirror_usage) if isinstance(mirror_usage, dict) else {}
+    usage = dict(mirror_usage) if isinstance(mirror_usage, dict) else {}
+    if "account_usage_all" not in usage:
+        usage["account_usage_all"] = _account_usage_all_wire()
+    usage.setdefault("account_usage_active", None)
+    return usage
+
+
+def _has_token_usage(usage: dict) -> bool:
+    """Whether a usage snapshot carries session token counters, not only subscription quota."""
+    return any(not key.startswith("account_usage") for key in usage)
 
 
 def _project_info_for_cwd(cwd: str) -> dict | None:

@@ -1,6 +1,6 @@
 import { Box, type ScrollBoxHandle, stringWidth, Text } from '@hermes/ink'
 import { compactNumber } from '@hermes/shared/format'
-import type { Usage } from '@hermes/shared/gateway-events'
+import type { AccountUsageGroup, Usage } from '@hermes/shared/gateway-events'
 import { useStore } from '@nanostores/react'
 import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
@@ -324,26 +324,200 @@ function quotaColor(pct: number, t: Theme) {
   return pct >= 90 ? t.color.error : pct >= 70 ? t.color.warn : t.color.statusGood
 }
 
+const QUOTA_PROVIDER_LABELS: Record<string, string> = {
+  anthropic: 'A\\',
+  'opencode-go': 'go',
+  'openai-codex': 'codex'
+}
+
+const QUOTA_PERIOD_LABELS: Record<string, string> = { '5h': '5h', '7d': '7d', monthly: 'mo' }
+// Per-model weekly sub-windows are too noisy for a one-line row.
+const QUOTA_SKIPPED_PERIODS = new Set(['opus 7d', 'sonnet 7d'])
+const QUOTA_STALE_AGE_S = 1800
+
+/** Compact age read-out for the staleness marker: `45m`, `2h`, `3d`. */
+export function formatAgeCompact(ageS: number) {
+  const minutes = Math.max(0, Math.floor(ageS / 60))
+
+  if (minutes < 60) {
+    return `${minutes}m`
+  }
+
+  const hours = Math.floor(minutes / 60)
+
+  return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`
+}
+
+/** Dim staleness marker for a quota group (`·45m`, `·429`), or '' when fresh. */
+export function quotaStaleMarker(group: Pick<AccountUsageGroup, 'age_s' | 'error'>) {
+  const age = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
+  const stale = age !== null && age > QUOTA_STALE_AGE_S
+
+  if (!group.error && !stale) {
+    return ''
+  }
+
+  if (group.error?.status === 429 && !stale) {
+    return '·429'
+  }
+
+  if (age !== null) {
+    return `·${formatAgeCompact(age)}`
+  }
+
+  return `·${group.error?.status || 'err'}`
+}
+
+/** `account_usage_all` from a usage payload, or [] when absent / malformed. */
+export function accountUsageGroups(usage: Usage): AccountUsageGroup[] {
+  const raw: unknown = usage.account_usage_all
+
+  if (!Array.isArray(raw)) {
+    return []
+  }
+
+  return raw.filter(
+    (group): group is AccountUsageGroup =>
+      !!group && typeof group === 'object' && typeof group.provider === 'string' && Array.isArray(group.windows)
+  )
+}
+
+export interface QuotaSegment {
+  bold?: boolean
+  color: string
+  dim?: boolean
+  key: string
+  text: string
+}
+
+type QuotaColorRole = 'active' | 'hint' | 'muted' | 'quota'
+
+interface QuotaPiece {
+  pct?: number
+  role: QuotaColorRole
+  text: string
+}
+
+/**
+ * Lay out the multi-provider quota groups into `budget` columns, degrading
+ * progressively until it fits: drop reset countdowns, then the 5h windows,
+ * then whole groups from the end.
+ */
+export function layoutQuotaGroups(
+  groups: AccountUsageGroup[],
+  budget: number,
+  t: Theme,
+  now = Date.now(),
+  activeProvider?: string | null
+) {
+  const activeIndex = groups.findIndex(group => group.provider === activeProvider)
+
+  const keep = (count: number) =>
+    groups
+      .map((group, gi) => ({ gi, group }))
+      .filter(({ gi }) => gi < count - (activeIndex >= count ? 1 : 0) || gi === activeIndex)
+
+  type FiveHour = 'all' | 'active' | 'none'
+
+  const build = (count: number, resets: boolean, fiveHour: FiveHour) =>
+    keep(count).map(({ gi, group }) => {
+      const label = QUOTA_PROVIDER_LABELS[group.provider] ?? group.provider
+      const pieces: QuotaPiece[] = [{ role: gi === activeIndex ? 'active' : 'muted', text: ` │ ${label}` }]
+
+      for (const window of group.windows) {
+        if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
+          continue
+        }
+
+        if (window.period === '5h' && (fiveHour === 'none' || (fiveHour === 'active' && gi !== activeIndex))) {
+          continue
+        }
+
+        const used = Math.max(0, Math.min(100, Math.round(Number(window.used_percent) || 0)))
+        const periodLabel = QUOTA_PERIOD_LABELS[window.period] ?? window.period
+        const showReset = resets && (window.period === '7d' || window.period === 'monthly')
+        const reset = showReset ? formatResetRemaining(window.reset_at, now) : ''
+
+        pieces.push({ pct: used, role: 'quota', text: ` ${periodLabel} ${used}%${reset ? ` ↻ ${reset}` : ''}` })
+      }
+
+      const marker = quotaStaleMarker(group)
+
+      if (marker) {
+        pieces.push({ role: 'muted', text: marker })
+      }
+
+      if (group.hint) {
+        pieces.push({ role: 'hint', text: ` ${group.hint}` })
+      }
+
+      return { gi, pieces }
+    })
+
+  const width = (layout: ReturnType<typeof build>) =>
+    layout.reduce((sum, g) => sum + g.pieces.reduce((acc, p) => acc + stringWidth(p.text), 0), 0)
+
+  const candidates: ReturnType<typeof build>[] = [build(groups.length, true, 'all'), build(groups.length, false, 'all')]
+
+  for (let count = groups.length; count >= 1; count--) {
+    candidates.push(build(count, false, 'active'))
+  }
+
+  for (let count = groups.length; count >= 1; count--) {
+    candidates.push(build(count, false, 'none'))
+  }
+
+  const chosen = candidates.find(layout => width(layout) <= budget) ?? []
+
+  return chosen.flatMap(({ gi, pieces }) =>
+    pieces.map((piece, pi): QuotaSegment => ({
+      bold: piece.role === 'active' ? true : undefined,
+      color:
+        piece.role === 'quota'
+          ? quotaColor(piece.pct ?? 0, t)
+          : piece.role === 'hint'
+            ? t.color.warn
+            : piece.role === 'active'
+              ? t.color.accent
+              : t.color.muted,
+      dim: piece.role === 'muted' && pi > 0 ? true : undefined,
+      key: `${gi}-${pi}`,
+      text: piece.text
+    }))
+  )
+}
+
 function CapacityRow({
   bar,
   barColor,
+  cols,
   contextMark,
+  activeProvider,
   ctxLabel,
+  quotaGroups = [],
   quotaWindows,
   t,
   pct
 }: {
+  /** Provider of the running session; its group label is highlighted and never dropped. */
+  activeProvider?: string | null
   bar?: string
   barColor: string
+  /** Terminal width; the quota segments degrade to fit. Unbounded when omitted. */
+  cols?: number
   /** `~` when the context occupancy is estimated, not measured (upstream's mark). */
   contextMark?: string
   ctxLabel: string
   pct?: number
+  /** Every connected subscription provider (`account_usage_all`). Wins over `quotaWindows`. */
+  quotaGroups?: AccountUsageGroup[]
   quotaWindows: NonNullable<Usage['account_usage']>['windows']
   t: Theme
 }) {
-  const prefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaWindows.length ? '─ usage' : ''
-  let budget = Math.max(0, 9999 - stringWidth(prefix))
+  const hasQuota = quotaGroups.length > 0 || quotaWindows.length > 0
+  const prefix = ctxLabel ? `─ ctx ${ctxLabel}` : hasQuota ? '─ usage' : ''
+  const width = cols && cols > 0 ? Math.floor(cols) : 9999
+  let budget = Math.max(0, width - stringWidth(prefix))
   const barText = bar && pct != null ? ` [${bar}] ${contextMark ?? ''}${pct}%` : ''
   const showBar = !!barText && budget >= stringWidth(barText)
 
@@ -351,28 +525,30 @@ function CapacityRow({
     budget -= stringWidth(barText)
   }
 
-  const quota = quotaWindows.flatMap(window => {
-    const used = Math.max(0, Math.min(100, Math.round(window.used_percent)))
-    const reset = formatResetRemaining(window.reset_at)
-    const compact = ` │ ${window.period} ${used}%`
-    const full = reset ? `${compact} ↻ ${reset}` : compact
-    const chosen = budget >= stringWidth(full) ? full : budget >= stringWidth(compact) ? compact : ''
+  const quota: QuotaSegment[] = quotaGroups.length
+    ? layoutQuotaGroups(quotaGroups, budget, t, Date.now(), activeProvider)
+    : quotaWindows.flatMap(window => {
+        const used = Math.max(0, Math.min(100, Math.round(window.used_percent)))
+        const reset = formatResetRemaining(window.reset_at)
+        const compact = ` │ ${window.period} ${used}%`
+        const full = reset ? `${compact} ↻ ${reset}` : compact
+        const chosen = budget >= stringWidth(full) ? full : budget >= stringWidth(compact) ? compact : ''
 
-    if (!chosen) {
-      return []
-    }
+        if (!chosen) {
+          return []
+        }
 
-    budget -= stringWidth(chosen)
+        budget -= stringWidth(chosen)
 
-    return [{ color: quotaColor(used, t), key: window.period, text: chosen }]
-  })
+        return [{ color: quotaColor(used, t), key: window.period, text: chosen }]
+      })
 
   return (
     <Box flexDirection="row" height={1} overflow="hidden">
       <Text color={t.color.muted}>{prefix}</Text>
       {showBar ? <Text color={barColor}> {barText}</Text> : null}
       {quota.map(item => (
-        <Text color={item.color} key={item.key}>
+        <Text bold={item.bold} color={item.color} dim={item.dim} key={item.key}>
           {item.text}
         </Text>
       ))}
@@ -689,8 +865,7 @@ export function StatusRule({
         ? stringWidth(status)
         : 0
 
-  const essentialWidth =
-    stringWidth('─ ') + batteryWidth + slotWidth + stringWidth(' │ ') + stringWidth(modelText)
+  const essentialWidth = stringWidth('─ ') + batteryWidth + slotWidth + stringWidth(' │ ') + stringWidth(modelText)
 
   const rightLabel = sessionTitle && ok('title') ? ` ${sessionTitle} ` : cwdLabel
   const { leftWidth, rightWidth, separatorWidth } = statusRuleWidths(cols, rightLabel, essentialWidth)
@@ -779,8 +954,9 @@ export function StatusRule({
   // seeing it, so it must not drop off a narrow terminal.
   const showFocus = !!focusView
 
-  const quotaWindows = usage.account_usage?.windows ?? []
-  const capacityPrefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaWindows.length ? '─ usage' : ''
+  const quotaGroups = accountUsageGroups(usage)
+  const quotaWindows = quotaGroups.length ? [] : (usage.account_usage?.windows ?? [])
+  const capacityPrefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaGroups.length || quotaWindows.length ? '─ usage' : ''
   const showCapacityRow = !!capacityPrefix
 
   const handleSessionCountClick = (event: { stopImmediatePropagation?: () => void }) => {
@@ -956,11 +1132,14 @@ export function StatusRule({
 
   const capacityRow = showCapacityRow ? (
     <CapacityRow
+      activeProvider={usage.account_usage_active}
       bar={bar}
       barColor={barColor}
+      cols={cols}
       contextMark={contextMark}
       ctxLabel={ctxLabel}
       pct={pct}
+      quotaGroups={quotaGroups}
       quotaWindows={quotaWindows}
       t={t}
     />

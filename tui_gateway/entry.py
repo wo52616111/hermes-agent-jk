@@ -257,6 +257,31 @@ def _write_or_exit(payload: dict, reason: str) -> None:
         sys.exit(0)
 
 
+def _start_quota_bootstrap():
+    """One fetch per connected subscription that has no stored quota yet, so the status bar has
+    data before the first turn, then pushed to every live session. Off the startup path; the
+    shared state dedupes across processes."""
+    def _run():
+        try:
+            from agent import quota_state
+            quota_state.bootstrap_connected()
+        except Exception:
+            logger.debug("quota bootstrap failed", exc_info=True)
+        _publish_quota_usage()
+
+    thread = threading.Thread(target=_run, name="quota-bootstrap", daemon=True)
+    thread.start()
+    return thread
+
+
+def _publish_quota_usage() -> None:
+    for sid, session in list(server._sessions.items()):
+        try:
+            server._emit("session.usage", sid, {"usage": server._session_usage_snapshot(session)})
+        except Exception:
+            logger.debug("quota usage publish failed for %s", sid, exc_info=True)
+
+
 def main():
     _close_rpc_stdin_on_exec()
     _install_sidecar_publisher()
@@ -283,6 +308,7 @@ def main():
 
     # Live-apply skins Hermes activates mid-conversation.
     server._ensure_skin_watcher()
+    _start_quota_bootstrap()
 
     # Warm the /model picker's provider-models cache in this idle window (fire-and-forget).
     try:
