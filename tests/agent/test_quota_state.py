@@ -243,7 +243,7 @@ def test_anthropic_usage_403_retries_with_profile_scoped_token(monkeypatch):
 
     monkeypatch.setattr(au, "resolve_anthropic_token", lambda: "sk-ant-oat01-setup")
     monkeypatch.setattr(au, "_is_oauth_token", lambda t: True)
-    monkeypatch.setattr(au, "_anthropic_profile_scoped_token", lambda exclude: "sk-ant-oat01-pool")
+    monkeypatch.setattr(au, "_anthropic_usage_fallback_tokens", lambda exclude: ["sk-ant-oat01-pool"])
     seen = []
 
     def fake_get(url, headers, timeout):
@@ -259,12 +259,50 @@ def test_anthropic_usage_403_retries_with_profile_scoped_token(monkeypatch):
     assert seen == ["Bearer sk-ant-oat01-setup", "Bearer sk-ant-oat01-pool"]
 
 
+def test_anthropic_usage_fallback_uses_rate_limited_login_and_skips_dead(monkeypatch):
+    """Inference rate limiting (pool status `exhausted`) does not stop a usage read, so such a login is a
+    fallback candidate; `dead` logins are not. Candidates are tried in order past a 401."""
+    import agent.account_usage as au
+    from types import SimpleNamespace
+    import agent.credential_pool as cp
+
+    entries = [
+        SimpleNamespace(access_token="dead-login", refresh_token="r", last_status="dead", auth_type="oauth",
+                        source="manual"),
+        SimpleNamespace(access_token="limited-login", refresh_token="r", last_status="exhausted",
+                        auth_type="oauth", source="manual"),
+        SimpleNamespace(access_token="setup", refresh_token=None, last_status="ok", auth_type="oauth",
+                        source="env:ANTHROPIC_TOKEN"),
+    ]
+    monkeypatch.setattr(cp, "load_pool", lambda provider: SimpleNamespace(entries=lambda: entries))
+    monkeypatch.setattr(au, "_claude_code_access_token", lambda: "stale-cc")
+    monkeypatch.setattr(au, "_is_oauth_token", lambda t: True)
+    assert au._anthropic_usage_fallback_tokens(exclude="setup") == ["limited-login", "stale-cc"]
+
+    monkeypatch.setattr(au, "resolve_anthropic_token", lambda: "setup")
+    monkeypatch.setattr(au, "_anthropic_usage_fallback_tokens", lambda exclude: ["revoked", "good"])
+    seen = []
+
+    def fake_get(url, headers, timeout):
+        tok = headers["Authorization"].split()[-1]
+        seen.append(tok)
+        if tok == "setup":
+            raise _http_error(403)
+        if tok == "revoked":
+            raise _http_error(401)
+        return {"five_hour": {"utilization": 10.0, "resets_at": "2026-10-05T06:20:00+00:00"}}
+
+    monkeypatch.setattr(au, "_get_json", fake_get)
+    assert [w.used_percent for w in au._fetch_anthropic_account_usage().windows] == [10.0]
+    assert seen == ["setup", "revoked", "good"]
+
+
 def test_anthropic_usage_429_is_not_retried_with_other_token(monkeypatch):
     import agent.account_usage as au
 
     monkeypatch.setattr(au, "resolve_anthropic_token", lambda: "sk-ant-oat01-setup")
     monkeypatch.setattr(au, "_is_oauth_token", lambda t: True)
-    monkeypatch.setattr(au, "_anthropic_profile_scoped_token", lambda exclude: pytest.fail("no retry on 429"))
+    monkeypatch.setattr(au, "_anthropic_usage_fallback_tokens", lambda exclude: pytest.fail("no retry on 429"))
     monkeypatch.setattr(au, "_get_json", lambda *a, **k: (_ for _ in ()).throw(_http_error(429, 260)))
     with pytest.raises(httpx.HTTPStatusError):
         au._fetch_anthropic_account_usage()

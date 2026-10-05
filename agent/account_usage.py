@@ -588,26 +588,37 @@ def redeem_codex_reset_credit(
     return _codex_reset_outcome(body, available)
 
 
-def _anthropic_profile_scoped_token(*, exclude: str) -> Optional[str]:
-    """An OAuth access token other than *exclude* that may carry ``user:profile``: Hermes's own
-    pooled Anthropic login first, then the Claude Code interactive login. Read-only: no refresh,
-    no pool mutation."""
-    candidates: list[str] = []
-    try:
-        from agent.anthropic_credentials import _resolve_anthropic_pool_token
-        candidates.append(str(_resolve_anthropic_pool_token(skip_borrowed=True) or "").strip())
-    except Exception:
-        logger.debug("anthropic ▸ pool token read failed", exc_info=True)
+def _claude_code_access_token() -> str:
     try:
         from agent.anthropic_credentials import read_claude_code_credentials
         creds = read_claude_code_credentials() or {}
-        candidates.append(str(creds.get("accessToken") or creds.get("access_token") or "").strip())
+        return str(creds.get("accessToken") or creds.get("access_token") or "").strip()
     except Exception:
         logger.debug("anthropic ▸ Claude Code credential read failed", exc_info=True)
+        return ""
+
+
+def _anthropic_usage_fallback_tokens(*, exclude: str) -> list[str]:
+    """OAuth logins other than *exclude* that may carry ``user:profile``, for the read-only usage call:
+    Hermes's pooled logins (refreshable, not ``dead`` — an inference rate limit does not block a usage
+    read), then the Claude Code login. No refresh, no pool mutation."""
+    candidates: list[str] = []
+    try:
+        from agent.credential_pool import load_pool
+        for entry in load_pool("anthropic").entries():
+            if entry.last_status == "dead" or not getattr(entry, "refresh_token", None):
+                continue
+            if getattr(entry, "source", None) == "claude_code":
+                continue
+            candidates.append(str(getattr(entry, "access_token", None) or "").strip())
+    except Exception:
+        logger.debug("anthropic ▸ pool token read failed", exc_info=True)
+    candidates.append(_claude_code_access_token())
+    out: list[str] = []
     for token in candidates:
-        if token and token != exclude and _is_oauth_token(token):
-            return token
-    return None
+        if token and token != exclude and token not in out and _is_oauth_token(token):
+            out.append(token)
+    return out
 
 
 def _fetch_anthropic_account_usage(
@@ -627,11 +638,19 @@ def _fetch_anthropic_account_usage(
         # A `claude setup-token` long-lived token (the usual ANTHROPIC_TOKEN in .env) carries only
         # `user:inference`; /api/oauth/usage needs `user:profile` and answers 403 permission_error.
         # The interactive Claude Code login has that scope — use it for the read-only usage call.
-        alt = _anthropic_profile_scoped_token(exclude=token) if exc.response.status_code == 403 else None
-        if not alt:
+        if exc.response.status_code != 403:
             raise
-        payload = _get_json("https://api.anthropic.com/api/oauth/usage",
-                            {**headers, "Authorization": f"Bearer {alt}"}, timeout=15.0)
+        payload = None
+        for alt in _anthropic_usage_fallback_tokens(exclude=token):
+            try:
+                payload = _get_json("https://api.anthropic.com/api/oauth/usage",
+                                    {**headers, "Authorization": f"Bearer {alt}"}, timeout=15.0)
+                break
+            except httpx.HTTPStatusError as alt_exc:
+                if alt_exc.response.status_code not in (401, 403):
+                    raise
+        if payload is None:
+            raise
     windows = _usage_windows(
         payload, (("five_hour", "Current session"), ("seven_day", "Current week"), ("seven_day_opus", "Opus week"),
                   ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at", fraction=True,
