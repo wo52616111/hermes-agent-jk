@@ -301,12 +301,12 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(layoutQuotaGroups(ALL_GROUPS, 5, DEFAULT_THEME, NOW)).toEqual([])
   })
 
-  it('marks stale or rate-limited groups with a dim muted age / 429 marker', () => {
+  it('puts stale age before its provider label and keeps a 429 marker after the group', () => {
     expect(quotaStaleMarker({ age_s: 60, error: null })).toBe('')
-    expect(quotaStaleMarker({ age_s: 45 * 60, error: null })).toBe('·45m')
-    expect(quotaStaleMarker({ age_s: 2 * 3600 + 120, error: null })).toBe('·2h')
+    expect(quotaStaleMarker({ age_s: 45 * 60, error: null })).toBe('◷ 45m')
+    expect(quotaStaleMarker({ age_s: 2 * 3600 + 120, error: null })).toBe('◷ 2h')
     expect(quotaStaleMarker({ age_s: 300, error: { message: 'rate limited', status: 429 } })).toBe('·429')
-    expect(quotaStaleMarker({ age_s: 3 * 3600, error: { message: 'rate limited', status: 429 } })).toBe('·3h')
+    expect(quotaStaleMarker({ age_s: 3 * 3600, error: { message: 'rate limited', status: 429 } })).toBe('◷ 3h')
     expect(quotaStaleMarker({ age_s: 600, error: { message: 'boom', status: 500 } })).toBe('·10m')
 
     const segs = layoutQuotaGroups(
@@ -328,7 +328,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
       NOW
     )
 
-    expect(joined(segs)).toBe(' │ A\\ 5h 40%·429 │ codex 5h 1%·50m')
+    expect(joined(segs)).toBe(' │ A\\ 5h 40%·429 │ ◷ 50m codex 5h 1%')
     const marker = segs.find(s => s.text === '·429')!
 
     expect(marker.color).toBe(DEFAULT_THEME.color.muted)
@@ -350,7 +350,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(segs.find(s => s.text === ' → sol')?.color).toBe(DEFAULT_THEME.color.warn)
   })
 
-  it('prefers account_usage_all over account_usage and shows the row without a context label', () => {
+  it('keeps the active provider on the capacity row and moves other subscriptions below it', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(NOW))
 
@@ -373,18 +373,22 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     })
 
     const rows = React.Children.toArray(element.props.children)
-    const capacity = rows[1] as React.ReactElement<any>
+    const activeCapacity = rows[1] as React.ReactElement<any>
+    const otherCapacity = rows[2] as React.ReactElement<any>
 
-    expect(rows).toHaveLength(2)
-    expect(capacity.props.quotaGroups).toHaveLength(3)
-    expect(capacity.props.activeProvider).toBe('anthropic')
-    expect(capacity.props.quotaWindows).toEqual([])
-    const text = capacityText(capacity)
+    expect(rows).toHaveLength(3)
+    expect(activeCapacity.props.quotaGroups.map((group: AccountUsageGroup) => group.provider)).toEqual(['anthropic'])
+    expect(activeCapacity.props.activeProvider).toBe('anthropic')
+    expect(activeCapacity.props.quotaWindows).toEqual([])
+    expect(capacityText(activeCapacity)).toBe('─ usage │ A\\ 5h 17% 7d 66% ↻ 3d')
 
-    expect(text.startsWith('─ usage │ A\\ 5h 17%')).toBe(true)
-    expect(text).toContain('│ codex 5h 5% 7d 7%')
-    expect(text).toContain('│ go 5h 0% mo 36%')
-    expect(text).not.toContain('99%')
+    expect(otherCapacity.props.quotaGroups.map((group: AccountUsageGroup) => group.provider)).toEqual([
+      'openai-codex',
+      'opencode-go'
+    ])
+    expect(otherCapacity.props.activeProvider).toBeNull()
+    expect(capacityText(otherCapacity)).toBe('─ usage │ codex 5h 5% 7d 7% ↻ 4d │ go 5h 0% mo 36% ↻ 13d')
+    expect(`${capacityText(activeCapacity)}${capacityText(otherCapacity)}`).not.toContain('99%')
 
     vi.useRealTimers()
   })

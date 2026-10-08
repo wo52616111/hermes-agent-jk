@@ -348,7 +348,7 @@ export function formatAgeCompact(ageS: number) {
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`
 }
 
-/** Dim staleness marker for a quota group (`·45m`, `·429`), or '' when fresh. */
+/** Dim per-provider freshness marker (`◷ 45m`) or error marker (`·429`), or '' when fresh. */
 export function quotaStaleMarker(group: Pick<AccountUsageGroup, 'age_s' | 'error'>) {
   const age = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
   const stale = age !== null && age > QUOTA_STALE_AGE_S
@@ -362,7 +362,7 @@ export function quotaStaleMarker(group: Pick<AccountUsageGroup, 'age_s' | 'error
   }
 
   if (age !== null) {
-    return `·${formatAgeCompact(age)}`
+    return stale ? `◷ ${formatAgeCompact(age)}` : `·${formatAgeCompact(age)}`
   }
 
   return `·${group.error?.status || 'err'}`
@@ -393,6 +393,7 @@ export interface QuotaSegment {
 type QuotaColorRole = 'active' | 'hint' | 'muted' | 'quota'
 
 interface QuotaPiece {
+  dim?: boolean
   pct?: number
   role: QuotaColorRole
   text: string
@@ -422,7 +423,13 @@ export function layoutQuotaGroups(
   const build = (count: number, resets: boolean, fiveHour: FiveHour) =>
     keep(count).map(({ gi, group }) => {
       const label = QUOTA_PROVIDER_LABELS[group.provider] ?? group.provider
-      const pieces: QuotaPiece[] = [{ role: gi === activeIndex ? 'active' : 'muted', text: ` │ ${label}` }]
+      const marker = quotaStaleMarker(group)
+      const hasStaleAge = marker.startsWith('◷ ')
+
+      const pieces: QuotaPiece[] = [
+        ...(hasStaleAge ? [{ dim: true, role: 'muted' as const, text: ` │ ${marker}` }] : []),
+        { role: gi === activeIndex ? 'active' : 'muted', text: hasStaleAge ? ` ${label}` : ` │ ${label}` }
+      ]
 
       for (const window of group.windows) {
         if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
@@ -441,9 +448,7 @@ export function layoutQuotaGroups(
         pieces.push({ pct: used, role: 'quota', text: ` ${periodLabel} ${used}%${reset ? ` ↻ ${reset}` : ''}` })
       }
 
-      const marker = quotaStaleMarker(group)
-
-      if (marker) {
+      if (marker && !hasStaleAge) {
         pieces.push({ role: 'muted', text: marker })
       }
 
@@ -480,7 +485,7 @@ export function layoutQuotaGroups(
             : piece.role === 'active'
               ? t.color.accent
               : t.color.muted,
-      dim: piece.role === 'muted' && pi > 0 ? true : undefined,
+      dim: piece.dim ?? (piece.role === 'muted' && pi > 0),
       key: `${gi}-${pi}`,
       text: piece.text
     }))
@@ -955,9 +960,17 @@ export function StatusRule({
   const showFocus = !!focusView
 
   const quotaGroups = accountUsageGroups(usage)
+
+  const activeQuotaGroup = usage.account_usage_active
+    ? quotaGroups.find(group => group.provider === usage.account_usage_active) ?? null
+    : null
+
+  const primaryQuotaGroups = activeQuotaGroup ? [activeQuotaGroup] : quotaGroups
+  const secondaryQuotaGroups = activeQuotaGroup ? quotaGroups.filter(group => group !== activeQuotaGroup) : []
   const quotaWindows = quotaGroups.length ? [] : (usage.account_usage?.windows ?? [])
   const capacityPrefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaGroups.length || quotaWindows.length ? '─ usage' : ''
   const showCapacityRow = !!capacityPrefix
+  const showSecondaryCapacityRow = secondaryQuotaGroups.length > 0
 
   const handleSessionCountClick = (event: { stopImmediatePropagation?: () => void }) => {
     event.stopImmediatePropagation?.()
@@ -1139,8 +1152,20 @@ export function StatusRule({
       contextMark={contextMark}
       ctxLabel={ctxLabel}
       pct={pct}
-      quotaGroups={quotaGroups}
+      quotaGroups={primaryQuotaGroups}
       quotaWindows={quotaWindows}
+      t={t}
+    />
+  ) : null
+
+  const secondaryCapacityRow = showSecondaryCapacityRow ? (
+    <CapacityRow
+      activeProvider={null}
+      barColor={barColor}
+      cols={cols}
+      ctxLabel=""
+      quotaGroups={secondaryQuotaGroups}
+      quotaWindows={[]}
       t={t}
     />
   ) : null
@@ -1149,6 +1174,7 @@ export function StatusRule({
     <>
       {statusRow}
       {capacityRow}
+      {secondaryCapacityRow}
     </>
   )
 }
