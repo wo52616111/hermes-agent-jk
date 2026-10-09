@@ -348,24 +348,15 @@ export function formatAgeCompact(ageS: number) {
   return hours < 24 ? `${hours}h` : `${Math.floor(hours / 24)}d`
 }
 
-/** Dim per-provider freshness marker (`◷ 45m`) or error marker (`·429`), or '' when fresh. */
+/** Per-provider freshness marker (`◷ 45m`) or an error marker when no age is available. */
 export function quotaStaleMarker(group: Pick<AccountUsageGroup, 'age_s' | 'error'>) {
   const age = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
-  const stale = age !== null && age > QUOTA_STALE_AGE_S
-
-  if (!group.error && !stale) {
-    return ''
-  }
-
-  if (group.error?.status === 429 && !stale) {
-    return '·429'
-  }
 
   if (age !== null) {
-    return stale ? `◷ ${formatAgeCompact(age)}` : `·${formatAgeCompact(age)}`
+    return `◷ ${formatAgeCompact(age)}`
   }
 
-  return `·${group.error?.status || 'err'}`
+  return group.error ? `·${group.error.status || 'err'}` : ''
 }
 
 /** `account_usage_all` from a usage payload, or [] when absent / malformed. */
