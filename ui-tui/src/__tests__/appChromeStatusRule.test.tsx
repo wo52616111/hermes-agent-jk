@@ -181,7 +181,7 @@ describe('StatusRule capacity row', () => {
 const NOW = Date.parse('2026-08-28T10:00:00Z')
 
 const group = (overrides: Partial<AccountUsageGroup> & Pick<AccountUsageGroup, 'provider'>): AccountUsageGroup => ({
-  age_s: 30,
+  age_s: null,
   backoff_until: null,
   error: null,
   fetched_at: '2026-08-28T09:59:30Z',
@@ -301,13 +301,15 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(layoutQuotaGroups(ALL_GROUPS, 5, DEFAULT_THEME, NOW)).toEqual([])
   })
 
-  it('puts stale age before its provider label and keeps a 429 marker after the group', () => {
-    expect(quotaStaleMarker({ age_s: 60, error: null })).toBe('')
+  it('puts every provider age before its label and keeps a 429 marker after the group', () => {
+    expect(quotaStaleMarker({ age_s: 60, error: null })).toBe('◷ 1m')
     expect(quotaStaleMarker({ age_s: 45 * 60, error: null })).toBe('◷ 45m')
     expect(quotaStaleMarker({ age_s: 2 * 3600 + 120, error: null })).toBe('◷ 2h')
-    expect(quotaStaleMarker({ age_s: 300, error: { message: 'rate limited', status: 429 } })).toBe('·429')
+    expect(quotaStaleMarker({ age_s: null, error: null })).toBe('')
+    expect(quotaStaleMarker({ age_s: 300, error: { message: 'rate limited', status: 429 } })).toBe('◷ 5m')
     expect(quotaStaleMarker({ age_s: 3 * 3600, error: { message: 'rate limited', status: 429 } })).toBe('◷ 3h')
-    expect(quotaStaleMarker({ age_s: 600, error: { message: 'boom', status: 500 } })).toBe('·10m')
+    expect(quotaStaleMarker({ age_s: null, error: { message: 'rate limited', status: 429 } })).toBe('·429')
+    expect(quotaStaleMarker({ age_s: 600, error: { message: 'boom', status: 500 } })).toBe('◷ 10m')
 
     const segs = layoutQuotaGroups(
       [
@@ -328,8 +330,8 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
       NOW
     )
 
-    expect(joined(segs)).toBe(' │ A\\ 5h 40%·429 │ ◷ 50m codex 5h 1%')
-    const marker = segs.find(s => s.text === '·429')!
+    expect(joined(segs)).toBe(' │ ◷ 2m A\\ 5h 40% │ ◷ 50m codex 5h 1%')
+    const marker = segs.find(s => s.text === ' │ ◷ 2m')!
 
     expect(marker.color).toBe(DEFAULT_THEME.color.muted)
     expect(marker.dim).toBe(true)
