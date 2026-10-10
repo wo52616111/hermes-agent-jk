@@ -233,22 +233,54 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(labels[2]!.color).toBe(DEFAULT_THEME.color.text)
   })
 
+  it('shows a reset countdown on every window that has one and splits windows with a middle dot', () => {
+    const text = joined(
+      layoutQuotaGroups(
+        [
+          group({
+            provider: 'anthropic',
+            windows: [
+              { period: '5h', used_percent: 17, reset_at: '2026-08-28T13:00:00Z' },
+              { period: '7d', used_percent: 66, reset_at: '2026-08-31T10:00:00Z' },
+              { period: 'monthly', used_percent: 3, reset_at: '2026-09-10T10:00:00Z' }
+            ]
+          }),
+          // No reset_at → no invented countdown, and the dot still only sits *between* windows.
+          group({
+            provider: 'openai-codex',
+            windows: [
+              { period: '5h', used_percent: 5, reset_at: null },
+              { period: '7d', used_percent: 7, reset_at: '2026-09-01T10:00:00Z' }
+            ]
+          })
+        ],
+        9999,
+        DEFAULT_THEME,
+        NOW
+      )
+    )
+
+    expect(text).toBe(' │ A\\ 5h 17% ↻ 3h·7d 66% ↻ 3d·mo 3% ↻ 13d │ codex 5h 5%·7d 7% ↻ 4d')
+    // Dots separate windows inside a provider; the provider divider stays `│`.
+    expect(text.split('│').every(cell => !cell.trimEnd().endsWith('·') && !cell.trimStart().startsWith('·'))).toBe(true)
+  })
+
   it('keeps the active provider when narrow widths drop trailing groups', () => {
     const text = joined(layoutQuotaGroups(ALL_GROUPS, 12, DEFAULT_THEME, NOW, 'opencode-go'))
 
     expect(text).toBe(' │ go mo 36%')
     const two = joined(layoutQuotaGroups(ALL_GROUPS, 24, DEFAULT_THEME, NOW, 'opencode-go'))
 
-    expect(two).toBe(' │ go 5h 0% mo 36%')
+    expect(two).toBe(' │ go 5h 0%·mo 36%')
   })
 
   it('keeps the active provider 5h window when the other 5h windows drop', () => {
     const no5h = joined(layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW, 'openai-codex'))
-    const budget = ' │ A\\ 7d 66% │ codex 5h 5% 7d 7% │ go mo 36%'.length
+    const budget = ' │ A\\ 7d 66% │ codex 5h 5%·7d 7% │ go mo 36%'.length
 
     expect(no5h).toContain('codex 5h 5%')
     expect(joined(layoutQuotaGroups(ALL_GROUPS, budget, DEFAULT_THEME, NOW, 'openai-codex'))).toBe(
-      ' │ A\\ 7d 66% │ codex 5h 5% 7d 7% │ go mo 36%'
+      ' │ A\\ 7d 66% │ codex 5h 5%·7d 7% │ go mo 36%'
     )
   })
 
@@ -263,7 +295,9 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
   it('renders one labelled group per provider, skipping opus/sonnet sub-windows', () => {
     const text = joined(layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW))
 
-    expect(text).toBe(' │ A\\ 5h 17% 7d 66% ↻ 3d │ codex 5h 5% 7d 7% ↻ 4d │ go 5h 0% mo 36% ↻ 13d')
+    expect(text).toBe(
+      ' │ A\\ 5h 17% ↻ 3h·7d 66% ↻ 3d │ codex 5h 5% ↻ 2h·7d 7% ↻ 4d │ go 5h 0%·mo 36% ↻ 13d'
+    )
     expect(text).not.toContain('opus')
     expect(text).not.toContain('91%')
   })
@@ -286,13 +320,13 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     )
 
     expect(segs.find(s => s.text === ' 5h 95%')?.color).toBe(DEFAULT_THEME.color.error)
-    expect(segs.find(s => s.text === ' 7d 75%')?.color).toBe(DEFAULT_THEME.color.warn)
+    expect(segs.find(s => s.text === '7d 75%')?.color).toBe(DEFAULT_THEME.color.warn)
     expect(segs.find(s => s.text === ' 5h 10%')?.color).toBe(DEFAULT_THEME.color.statusGood)
     expect(segs.find(s => s.text === ' A\\')?.color).toBe(DEFAULT_THEME.color.text)
   })
 
   it('degrades on narrow widths: resets first, then 5h windows, then trailing groups', () => {
-    const noResets = ' │ A\\ 5h 17% 7d 66% │ codex 5h 5% 7d 7% │ go 5h 0% mo 36%'
+    const noResets = ' │ A\\ 5h 17%·7d 66% │ codex 5h 5%·7d 7% │ go 5h 0%·mo 36%'
     const no5h = ' │ A\\ 7d 66% │ codex 7d 7% │ go mo 36%'
 
     expect(joined(layoutQuotaGroups(ALL_GROUPS, noResets.length, DEFAULT_THEME, NOW))).toBe(noResets)
@@ -403,14 +437,14 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(activeCapacity.props.quotaGroups.map((group: AccountUsageGroup) => group.provider)).toEqual(['anthropic'])
     expect(activeCapacity.props.activeProvider).toBe('anthropic')
     expect(activeCapacity.props.quotaWindows).toEqual([])
-    expect(capacityText(activeCapacity)).toBe('─ usage │ A\\ 5h 17% 7d 66% ↻ 3d')
+    expect(capacityText(activeCapacity)).toBe('─ usage │ A\\ 5h 17% ↻ 3h·7d 66% ↻ 3d')
 
     expect(otherCapacity.props.quotaGroups.map((group: AccountUsageGroup) => group.provider)).toEqual([
       'openai-codex',
       'opencode-go'
     ])
     expect(otherCapacity.props.activeProvider).toBeNull()
-    expect(capacityText(otherCapacity)).toBe('─ usage │ codex 5h 5% 7d 7% ↻ 4d │ go 5h 0% mo 36% ↻ 13d')
+    expect(capacityText(otherCapacity)).toBe('─ usage │ codex 5h 5% ↻ 2h·7d 7% ↻ 4d │ go 5h 0%·mo 36% ↻ 13d')
     expect(`${capacityText(activeCapacity)}${capacityText(otherCapacity)}`).not.toContain('99%')
 
     vi.useRealTimers()
@@ -434,8 +468,8 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     const primary = capacityText(rows[1] as React.ReactElement<any>)
     const secondary = capacityText(rows[2] as React.ReactElement<any>)
 
-    expect(primary).toMatch(/^─ ctx {3}50k\/200k {2}\[.+\] 25% +│ A\\ 5h 17%/)
-    expect(secondary).toMatch(/^─ other codex 5h 5% 7d 7% ↻ 4d +│ go 5h 0%/)
+    expect(primary).toMatch(/^─ ctx {3}50k\/200k {2}■+·+ 25% +│ A\\ 5h 17% ↻ 3h·7d 66% ↻ 3d$/)
+    expect(secondary).toMatch(/^─ other codex 5h 5% ↻ 2h·7d 7% ↻ 4d +│ go 5h 0%·mo 36% ↻ 13d$/)
     expect(secondary).not.toMatch(/^─ other {2}/)
     expect(primary.indexOf('│')).toBe(secondary.indexOf('│'))
     expect(primary.indexOf('50k/200k')).toBe(secondary.indexOf('codex'))
