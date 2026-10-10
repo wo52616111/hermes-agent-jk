@@ -24,6 +24,11 @@ from tui_gateway.server import _CRASH_LOG, _err, dispatch, resolve_skin, write_j
 from tui_gateway.transport import TeeTransport
 
 logger = logging.getLogger(__name__)
+_QUOTA_USAGE_TICK_S = 60.0
+_quota_usage_service_lock = threading.Lock()
+_quota_usage_service_started = False
+_quota_bootstrap_lock = threading.Lock()
+_quota_bootstrap_started_profiles: set[str | None] = set()
 
 # Discovery thread spawned by THIS module; None when delegated to the shared owner in
 # hermes_cli.mcp_startup (current path). The wait/in-flight/join helpers consult both.
@@ -257,29 +262,141 @@ def _write_or_exit(payload: dict, reason: str) -> None:
         sys.exit(0)
 
 
-def _start_quota_bootstrap():
+def _start_quota_bootstrap(session: dict | None = None):
     """One fetch per connected subscription that has no stored quota yet, so the status bar has
     data before the first turn, then pushed to every live session. Off the startup path; the
     shared state dedupes across processes."""
     def _run():
-        try:
-            from agent import quota_state
-            quota_state.bootstrap_connected()
-        except Exception:
-            logger.debug("quota bootstrap failed", exc_info=True)
-        _publish_quota_usage()
+        sessions: list[dict | None]
+        if session is not None:
+            sessions = [session]
+        else:
+            seen_profiles: set[str | None] = set()
+            sessions = []
+            for live_session in list(server._sessions.values()):
+                profile_home = live_session.get("profile_home") or None
+                if profile_home not in seen_profiles:
+                    seen_profiles.add(profile_home)
+                    sessions.append(live_session)
+            if not sessions:
+                sessions = [None]
+        from agent import quota_state
+        for profile_session in sessions:
+            try:
+                if profile_session is None:
+                    quota_state.bootstrap_connected()
+                else:
+                    with getattr(server, "_session_profile_runtime_scope")(profile_session):
+                        quota_state.bootstrap_connected()
+            except Exception:
+                logger.debug("quota bootstrap failed", exc_info=True)
+        _publish_quota_usage(seed=True)
 
     thread = threading.Thread(target=_run, name="quota-bootstrap", daemon=True)
     thread.start()
     return thread
 
 
-def _publish_quota_usage() -> None:
-    for sid, session in list(server._sessions.items()):
+def ensure_quota_bootstrap_for_session(session: dict | None = None) -> None:
+    """Schedule one profile-scoped initial quota fetch for a live session's credentials."""
+    profile_home = (session or {}).get("profile_home") or None
+    with _quota_bootstrap_lock:
+        if profile_home in _quota_bootstrap_started_profiles:
+            return
+        _quota_bootstrap_started_profiles.add(profile_home)
+    try:
+        _start_quota_bootstrap(session)
+    except Exception:
+        with _quota_bootstrap_lock:
+            _quota_bootstrap_started_profiles.discard(profile_home)
+        raise
+
+
+def _publish_quota_usage(*, seed: bool = False) -> None:
+    """Notify live sessions of snapshot ages; only bootstrap reads provider state."""
+    live_sessions = list(server._sessions.items())
+    groups_by_profile: dict[str | None, list[dict]] = {}
+    seed_generation_by_session: dict[str, int] = {}
+
+    if seed:
+        # Credential/config resolution can invoke an external secret source. Do
+        # it outside each session's refresh lock: a completed turn must never
+        # wait on bootstrap just to mark its asynchronous refresh as in flight.
+        for sid, session in live_sessions:
+            profile_home = session.get("profile_home") or None
+            seed_generation_by_session[sid] = int(session.get("_account_usage_generation") or 0)
+            if profile_home in groups_by_profile:
+                continue
+            try:
+                with getattr(server, "_session_profile_runtime_scope")(session):
+                    groups_by_profile[profile_home] = server._account_usage_all_wire()
+            except Exception:
+                logger.debug("quota usage seed read failed for profile %s", profile_home, exc_info=True)
+
+    for sid, session in live_sessions:
+        profile_home = session.get("profile_home") or None
         try:
-            server._emit("session.usage", sid, {"usage": server._session_usage_snapshot(session)})
+            refresh_lock = session.setdefault("_account_usage_refresh_lock", threading.Lock())
+            with refresh_lock:
+                if not seed and session.get("_account_usage_refreshing"):
+                    continue
+                if seed:
+                    groups = groups_by_profile.get(profile_home)
+                    if groups is None:
+                        continue
+                    # Do not replace a snapshot a post-turn refresh completed
+                    # while this seed was resolving profile credentials.
+                    if int(session.get("_account_usage_generation") or 0) != seed_generation_by_session.get(sid):
+                        cached_groups = session.get("_account_usage_all")
+                        if isinstance(cached_groups, list):
+                            groups = cached_groups
+                else:
+                    groups = session.get("_account_usage_all")
+                    if not isinstance(groups, list):
+                        continue
+                groups = server._age_account_usage_groups(groups)
+                usage = server._session_usage_snapshot(session, account_usage_groups=groups)
+                generation = int(session.get("_account_usage_generation") or 0) + 1
+                session["_account_usage_generation"] = generation
+            # WebSocket writes can wait on a stalled loop. Serialize only the
+            # write itself, not quota-refresh admission; a later refresh either
+            # publishes after this cached age or advances the generation first.
+            publish_lock = session.setdefault("_account_usage_publish_lock", threading.Lock())
+            with publish_lock:
+                with refresh_lock:
+                    if session.get("_account_usage_refreshing") or session.get("_account_usage_generation") != generation:
+                        continue
+                server._emit("session.usage", sid, {"usage": usage})
         except Exception:
             logger.debug("quota usage publish failed for %s", sid, exc_info=True)
+
+
+def _start_quota_usage_clock(interval: float = _QUOTA_USAGE_TICK_S) -> tuple[threading.Event, threading.Thread]:
+    """Advance status-bar snapshot ages from one gateway timer, without provider refreshes."""
+    stop = threading.Event()
+
+    def _run() -> None:
+        while not stop.wait(interval):
+            _publish_quota_usage()
+
+    thread = threading.Thread(target=_run, name="quota-usage-clock", daemon=True)
+    thread.start()
+    return stop, thread
+
+
+def _ensure_quota_usage_service() -> None:
+    """Start the shared quota bootstrap and display-only clock once per gateway process."""
+    global _quota_usage_service_started
+    with _quota_usage_service_lock:
+        if _quota_usage_service_started:
+            return
+        try:
+            ensure_quota_bootstrap_for_session()
+            _start_quota_usage_clock()
+        except Exception:
+            logger.warning("quota usage service failed to start", exc_info=True)
+            return
+        _quota_usage_service_started = True
 
 
 def main():
@@ -308,7 +425,7 @@ def main():
 
     # Live-apply skins Hermes activates mid-conversation.
     server._ensure_skin_watcher()
-    _start_quota_bootstrap()
+    _ensure_quota_usage_service()
 
     # Warm the /model picker's provider-models cache in this idle window (fire-and-forget).
     try:

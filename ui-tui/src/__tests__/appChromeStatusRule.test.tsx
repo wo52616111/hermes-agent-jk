@@ -333,8 +333,28 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(joined(segs)).toBe(' │ ◷ 2m A\\ 5h 40% │ ◷ 50m codex 5h 1%')
     const marker = segs.find(s => s.text === ' │ ◷ 2m')!
 
-    expect(marker.color).toBe(DEFAULT_THEME.color.muted)
-    expect(marker.dim).toBe(true)
+    expect(marker.color).toBe(DEFAULT_THEME.color.statusGood)
+    expect(marker.dim).toBe(false)
+  })
+
+  it('colours the freshness text by age without colouring the provider label', () => {
+    const segs = layoutQuotaGroups(
+      [
+        group({ age_s: 30 * 60, provider: 'anthropic', windows: [] }),
+        group({ age_s: 5 * 3600, provider: 'openai-codex', windows: [] }),
+        group({ age_s: 10 * 3600, provider: 'opencode-go', windows: [] }),
+        group({ age_s: 2 * 86400, provider: 'other', windows: [] })
+      ],
+      9999,
+      DEFAULT_THEME,
+      NOW
+    )
+
+    expect(segs.find(s => s.text === ' │ ◷ 30m')?.color).toBe(DEFAULT_THEME.color.statusGood)
+    expect(segs.find(s => s.text === ' │ ◷ 5h')?.color).toBe(DEFAULT_THEME.color.muted)
+    expect(segs.find(s => s.text === ' │ ◷ 10h')?.color).toBe(DEFAULT_THEME.color.statusWarn)
+    expect(segs.find(s => s.text === ' │ ◷ 2d')?.color).toBe(DEFAULT_THEME.color.statusBad)
+    expect(segs.find(s => s.text === ' A\\')?.color).toBe(DEFAULT_THEME.color.muted)
   })
 
   it('renders a route hint after its group in warn colour', () => {

@@ -1,3 +1,4 @@
+import threading
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -277,6 +278,32 @@ def test_account_usage_refresh_coalesces_turn_while_request_is_running(monkeypat
     assert len(runs) == 2
 
 
+def test_account_usage_refresh_uses_the_session_profile_scope(monkeypatch, tmp_path):
+    import contextlib
+
+    qs = _isolated_quota(monkeypatch, tmp_path)
+    active_profile = []
+    refreshed = []
+
+    @contextlib.contextmanager
+    def scope(session):
+        active_profile.append(session.get("profile_home"))
+        try:
+            yield
+        finally:
+            active_profile.pop()
+
+    monkeypatch.setattr(server, "_session_profile_runtime_scope", scope)
+    monkeypatch.setattr(qs, "refresh", lambda provider: refreshed.append((provider, active_profile[-1])) or "fresh")
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+
+    thread = server._refresh_account_usage_async("sid", {"agent": None, "profile_home": "/profiles/secondary"})
+    assert thread is not None
+    thread.join(timeout=2)
+
+    assert refreshed == [(provider, "/profiles/secondary") for provider in qs.SUPPORTED]
+
+
 def test_completed_turn_schedules_provider_quota_refresh():
     """A finished TUI turn must schedule the quota refresh from the LIVE turn path.
 
@@ -351,6 +378,118 @@ def test_gateway_startup_bootstraps_connected_quota_off_thread(monkeypatch):
     assert ran.is_set() and thread.daemon
 
 
+def test_quota_bootstrap_uses_the_requested_session_profile_scope(monkeypatch):
+    import contextlib
+
+    from agent import quota_state
+    from tui_gateway import entry
+
+    active_profile = []
+
+    @contextlib.contextmanager
+    def scope(session):
+        active_profile.append(session.get("profile_home"))
+        try:
+            yield
+        finally:
+            active_profile.pop()
+
+    seen = []
+    monkeypatch.setattr(server, "_session_profile_runtime_scope", scope)
+    monkeypatch.setattr(quota_state, "bootstrap_connected", lambda: seen.append(active_profile[-1] if active_profile else "unscoped"))
+    monkeypatch.setattr(entry, "_publish_quota_usage", lambda **_kw: None)
+    monkeypatch.setattr(server, "_sessions", {"sid": {"profile_home": "/profiles/secondary"}})
+
+    thread = entry._start_quota_bootstrap()
+    thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert seen == ["/profiles/secondary"]
+
+
+def test_quota_usage_tick_does_not_hold_refresh_lock_during_a_slow_emit(monkeypatch):
+    import contextlib
+
+    from tui_gateway import entry
+
+    emit_started = threading.Event()
+    release_emit = threading.Event()
+    emitted = []
+    session = {
+        "agent": None,
+        "_account_usage_all": [{"provider": "openai-codex", "fetched_at": datetime.now(timezone.utc).isoformat(), "windows": []}],
+    }
+
+    def slow_emit(*args):
+        emitted.append(args)
+        emit_started.set()
+        release_emit.wait(timeout=2)
+
+    monkeypatch.setattr(server, "_emit", slow_emit)
+    monkeypatch.setattr(server, "_sessions", {"sid": session})
+    monkeypatch.setattr(server, "_session_profile_runtime_scope", lambda _session: contextlib.nullcontext())
+    from agent import quota_state
+    monkeypatch.setattr(quota_state, "refresh", lambda _provider: "fresh")
+
+    tick = threading.Thread(target=entry._publish_quota_usage)
+    tick.start()
+    assert emit_started.wait(timeout=1)
+
+    started = []
+    caller = threading.Thread(target=lambda: started.append(server._refresh_account_usage_async("sid", session)))
+    caller.start()
+    caller.join(timeout=0.2)
+
+    assert not caller.is_alive()
+
+    release_emit.set()
+    tick.join(timeout=2)
+    caller.join(timeout=2)
+    if started and started[0] is not None:
+        started[0].join(timeout=2)
+        assert not started[0].is_alive()
+
+    assert not caller.is_alive()
+    assert started and started[0] is not None
+
+
+def test_quota_usage_seed_does_not_hold_refresh_lock_while_reading_profile_state(monkeypatch):
+    import contextlib
+
+    from tui_gateway import entry
+
+    entered = threading.Event()
+    release = threading.Event()
+    session = {
+        "agent": None,
+        "profile_home": "/profiles/secondary",
+        "_account_usage_refresh_lock": threading.Lock(),
+    }
+
+    @contextlib.contextmanager
+    def slow_scope(_session):
+        entered.set()
+        release.wait(timeout=2)
+        yield
+
+    monkeypatch.setattr(server, "_session_profile_runtime_scope", slow_scope)
+    monkeypatch.setattr(server, "_account_usage_all_wire", lambda: [])
+    monkeypatch.setattr(server, "_emit", lambda *_a: None)
+    monkeypatch.setattr(server, "_sessions", {"sid": session})
+
+    seed = threading.Thread(target=lambda: entry._publish_quota_usage(seed=True))
+    seed.start()
+    assert entered.wait(timeout=1)
+
+    refresh_lock = session["_account_usage_refresh_lock"]
+    assert refresh_lock.acquire(blocking=False)
+    refresh_lock.release()
+
+    release.set()
+    seed.join(timeout=2)
+    assert not seed.is_alive()
+
+
 def test_pre_agent_usage_snapshot_carries_subscription_groups(monkeypatch):
     groups = [{"provider": "anthropic", "windows": [{"period": "7d", "used_percent": 40.0}]}]
     monkeypatch.setattr(server, "_account_usage_all_wire", lambda: groups)
@@ -378,3 +517,194 @@ def test_quota_bootstrap_publishes_usage_to_live_sessions(monkeypatch):
     assert set(by_sid) == {"sid-a", "sid-b"}
     assert by_sid["sid-a"]["account_usage_all"] == groups
     assert by_sid["sid-b"]["account_usage_all"] == groups
+
+
+def test_quota_usage_seed_reads_provider_groups_once_for_all_live_sessions(monkeypatch):
+    from tui_gateway import entry
+
+    groups = [{"provider": "openai-codex", "windows": [{"period": "5h", "used_percent": 3.0}]}]
+    reads = []
+    emitted = []
+    monkeypatch.setattr(server, "_account_usage_all_wire", lambda: reads.append(1) or groups)
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {"sid-a": {"agent": None}, "sid-b": {"agent": _agent()}})
+
+    entry._publish_quota_usage(seed=True)
+
+    assert reads == [1]
+    by_sid = {sid: payload["usage"] for event, sid, payload in emitted if event == "session.usage"}
+    assert set(by_sid) == {"sid-a", "sid-b"}
+    assert all(usage["account_usage_all"] == groups for usage in by_sid.values())
+
+
+def test_quota_usage_clock_notifies_live_sessions_from_one_daemon_timer(monkeypatch):
+    import threading
+
+    from tui_gateway import entry
+
+    published = threading.Event()
+    calls = []
+    monkeypatch.setattr(entry, "_publish_quota_usage", lambda: calls.append(1) or published.set())
+
+    stop, thread = entry._start_quota_usage_clock(interval=0.01)
+    assert published.wait(timeout=1)
+    stop.set()
+    thread.join(timeout=1)
+
+    assert calls
+    assert thread.daemon
+    assert not thread.is_alive()
+
+
+def test_quota_usage_seed_reads_once_per_profile_under_session_scope(monkeypatch):
+    from contextlib import contextmanager
+
+    from tui_gateway import entry
+
+    active_home = ["unscoped"]
+    reads = []
+    emitted = []
+
+    @contextmanager
+    def scope(session):
+        previous = active_home[0]
+        active_home[0] = session.get("profile_home") or None
+        try:
+            yield
+        finally:
+            active_home[0] = previous
+
+    def groups():
+        home = active_home[0]
+        reads.append(home)
+        return [{"provider": f"provider-{home or 'launch'}", "windows": []}]
+
+    monkeypatch.setattr(server, "_session_profile_runtime_scope", scope)
+    monkeypatch.setattr(server, "_account_usage_all_wire", groups)
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {
+        "sid-a": {"agent": None},
+        "sid-b": {"agent": None, "profile_home": "/profiles/b"},
+        "sid-c": {"agent": None, "profile_home": "/profiles/b"},
+    })
+
+    entry._publish_quota_usage(seed=True)
+
+    assert reads == [None, "/profiles/b"]
+    by_sid = {sid: payload["usage"] for event, sid, payload in emitted if event == "session.usage"}
+    assert by_sid["sid-a"]["account_usage_all"][0]["provider"] == "provider-launch"
+    assert by_sid["sid-b"]["account_usage_all"][0]["provider"] == "provider-/profiles/b"
+    assert by_sid["sid-c"]["account_usage_all"][0]["provider"] == "provider-/profiles/b"
+
+
+def test_quota_usage_tick_reages_a_session_cache_without_reading_provider_state(monkeypatch):
+    from datetime import timedelta
+
+    from tui_gateway import entry
+
+    fetched_at = datetime.now(timezone.utc) - timedelta(minutes=2)
+    cached_groups = [{
+        "provider": "openai-codex",
+        "fetched_at": fetched_at.isoformat(),
+        "age_s": 0,
+        "windows": [{"period": "5h", "used_percent": 3.0}],
+    }]
+    emitted = []
+
+    def unexpected_provider_read():
+        raise AssertionError("idle tick must not read provider state")
+
+    monkeypatch.setattr(server, "_account_usage_all_wire", unexpected_provider_read)
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {"sid": {"agent": None, "_account_usage_all": cached_groups}})
+
+    entry._publish_quota_usage()
+
+    usage = emitted[0][2]["usage"]
+    assert usage["account_usage_all"][0]["fetched_at"] == fetched_at.isoformat()
+    assert usage["account_usage_all"][0]["age_s"] >= 120
+
+
+def test_quota_usage_seed_replaces_an_empty_prebootstrap_session_cache(monkeypatch):
+    from tui_gateway import entry
+
+    groups = [{"provider": "openai-codex", "windows": [{"period": "5h", "used_percent": 3.0}]}]
+    emitted = []
+    monkeypatch.setattr(server, "_account_usage_all_wire", lambda: groups)
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {"sid": {"agent": None, "_account_usage_all": []}})
+
+    entry._publish_quota_usage(seed=True)
+
+    assert emitted[0][2]["usage"]["account_usage_all"] == groups
+
+
+def test_quota_usage_tick_skips_a_session_while_post_turn_refresh_is_active(monkeypatch):
+    from tui_gateway import entry
+
+    cached_groups = [{"provider": "openai-codex", "fetched_at": datetime.now(timezone.utc).isoformat(), "windows": []}]
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {
+        "sid": {
+            "agent": None,
+            "_account_usage_all": cached_groups,
+            "_account_usage_refreshing": True,
+        }
+    })
+
+    entry._publish_quota_usage()
+
+    assert emitted == []
+
+
+def test_quota_usage_tick_waits_for_a_newer_post_turn_snapshot(monkeypatch):
+    from tui_gateway import entry
+
+    old_groups = [{"provider": "old", "fetched_at": "2026-01-01T00:00:00+00:00", "windows": []}]
+    new_groups = [{"provider": "new", "fetched_at": "2026-01-01T00:01:00+00:00", "windows": []}]
+    refresh_lock = threading.Lock()
+    session = {"agent": None, "_account_usage_all": old_groups, "_account_usage_refresh_lock": refresh_lock}
+    emitted = []
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {"sid": session})
+
+    refresh_lock.acquire()
+    tick = threading.Thread(target=entry._publish_quota_usage)
+    tick.start()
+    session["_account_usage_all"] = new_groups
+    refresh_lock.release()
+    tick.join(timeout=1)
+
+    assert not tick.is_alive()
+    assert emitted[0][2]["usage"]["account_usage_all"][0]["provider"] == "new"
+
+
+def test_quota_usage_service_starts_bootstrap_and_clock_once(monkeypatch):
+    from tui_gateway import entry
+
+    started = []
+    monkeypatch.setattr(entry, "_quota_usage_service_started", False)
+    monkeypatch.setattr(entry, "ensure_quota_bootstrap_for_session", lambda: started.append("bootstrap"))
+    monkeypatch.setattr(entry, "_start_quota_usage_clock", lambda: started.append("clock"))
+
+    entry._ensure_quota_usage_service()
+    entry._ensure_quota_usage_service()
+
+    assert started == ["bootstrap", "clock"]
+
+
+def test_explicit_quota_groups_override_compute_host_mirror_usage():
+    mirrored_groups = [{"provider": "old", "age_s": 99, "windows": []}]
+    fresh_groups = [{"provider": "openai-codex", "fetched_at": "2026-01-01T00:00:00+00:00", "age_s": 2, "windows": []}]
+    session = {
+        "agent": None,
+        "_compute_host_active": True,
+        "_metadata_mirror": {"usage": {"total": 42, "account_usage_all": mirrored_groups}},
+    }
+
+    usage = server._session_usage_snapshot(session, account_usage_groups=fresh_groups)
+
+    assert usage["total"] == 42
+    assert usage["account_usage_all"] == fresh_groups
+    assert session["_account_usage_all"] == fresh_groups

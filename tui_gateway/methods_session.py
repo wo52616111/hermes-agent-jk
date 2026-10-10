@@ -366,6 +366,16 @@ def _(rid, params: dict) -> dict:
             "transport": current_transport() or _stdio_transport,
             "auth_user_id": _transport_auth_user_id(current_transport())}
         _register_session_cwd(_sessions[sid])
+    # Quota credentials are profile-scoped. Bootstrap this profile now (off
+    # the create path) so an idle secondary-profile session gets its first
+    # snapshot without waiting for a prompt turn.
+    try:
+        from tui_gateway import server as gateway_server
+        from tui_gateway.entry import ensure_quota_bootstrap_for_session
+        ensure_quota_bootstrap_for_session(gateway_server._sessions[sid])
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug("profile quota bootstrap failed to start", exc_info=True)
     # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded sessions.
     # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop launch (and every "New agent" /
     # draft) opens a session here just to paint the composer, so eagerly creating a row left an "Untitled"

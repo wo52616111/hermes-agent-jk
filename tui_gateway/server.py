@@ -2104,12 +2104,19 @@ def _refresh_account_usage_async(sid: str, session: dict):
         try:
             from agent import quota_state
 
-            for provider in quota_state.SUPPORTED:
-                try:
-                    quota_state.refresh(provider)
-                except Exception:
-                    logger.debug("quota refresh failed for %s", provider, exc_info=True)
-            _emit("session.usage", sid, {"usage": _session_usage_snapshot(session)})
+            with getattr(sys.modules[__name__], "_session_profile_runtime_scope")(session):
+                for provider in quota_state.SUPPORTED:
+                    try:
+                        quota_state.refresh(provider)
+                    except Exception:
+                        logger.debug("quota refresh failed for %s", provider, exc_info=True)
+                with refresh_lock:
+                    usage = _session_usage_snapshot(session)
+                    session["_account_usage_generation"] = int(session.get("_account_usage_generation") or 0) + 1
+            # Avoid interleaving a post-turn refresh write with an idle-tick
+            # cached-age write, without delaying refresh admission on slow WS IO.
+            with session.setdefault("_account_usage_publish_lock", threading.Lock()):
+                _emit("session.usage", sid, {"usage": usage})
         except Exception:
             logger.debug("account usage refresh failed", exc_info=True)
         finally:
@@ -2144,7 +2151,24 @@ def _legacy_account_usage_wire(provider: str, groups: list[dict]) -> dict | None
     return None
 
 
-def _session_usage_snapshot(session: dict | None) -> dict:
+def _age_account_usage_groups(groups: list[dict], now: datetime | None = None) -> list[dict]:
+    """Recompute snapshot ages from stored fetch times without touching credentials or providers."""
+    now = now or datetime.now().astimezone()
+    aged = []
+    for group in groups:
+        next_group = dict(group)
+        try:
+            fetched_at = datetime.fromisoformat(str(group.get("fetched_at") or "").replace("Z", "+00:00"))
+            if fetched_at.tzinfo is None:
+                fetched_at = fetched_at.astimezone()
+            next_group["age_s"] = max(0, int((now - fetched_at).total_seconds()))
+        except (TypeError, ValueError):
+            pass
+        aged.append(next_group)
+    return aged
+
+
+def _session_usage_snapshot(session: dict | None, *, account_usage_groups: list[dict] | None = None) -> dict:
     sess = session or {}
     mirror_usage = _metadata_mirror(session).get("usage")
     if sess.get("agent") is not None and not (sess.get("_compute_host_active") and isinstance(mirror_usage, dict)):
@@ -2153,7 +2177,8 @@ def _session_usage_snapshot(session: dict | None) -> dict:
         provider = str(getattr(agent, "provider", "") or "").strip().lower()
         base_url = str(getattr(agent, "base_url", "") or "").lower()
         wire_provider = "opencode-go" if "opencode.ai" in base_url and "/zen/go" in base_url else provider
-        groups = _account_usage_all_wire()
+        groups = _account_usage_all_wire() if account_usage_groups is None else account_usage_groups
+        sess["_account_usage_all"] = groups
         usage["account_usage_all"] = groups
         usage["account_usage_active"] = wire_provider or None
         usage["account_usage"] = _legacy_account_usage_wire(wire_provider, groups) or _account_usage_wire(
@@ -2162,8 +2187,14 @@ def _session_usage_snapshot(session: dict | None) -> dict:
         )
         return usage
     usage = dict(mirror_usage) if isinstance(mirror_usage, dict) else {}
-    if "account_usage_all" not in usage:
+    if account_usage_groups is not None:
+        # The gateway's idle quota clock supplies re-aged cached groups.  They
+        # must win over a compute-host metadata mirror from an earlier turn.
+        usage["account_usage_all"] = account_usage_groups
+    elif "account_usage_all" not in usage:
         usage["account_usage_all"] = _account_usage_all_wire()
+    if isinstance(usage.get("account_usage_all"), list):
+        sess["_account_usage_all"] = usage["account_usage_all"]
     usage.setdefault("account_usage_active", None)
     return usage
 

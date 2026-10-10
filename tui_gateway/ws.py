@@ -318,6 +318,13 @@ async def handle_ws(ws: Any, *, auth_identity: dict | None = None, subprotocol: 
                 start()
             except Exception:
                 _log.warning("%s failed", what, exc_info=True)
+        # Dashboard/Desktop reaches this sidecar without entry.main(); start the
+        # same once-per-process bootstrap and display-only usage clock here.
+        try:
+            from tui_gateway.entry import _ensure_quota_usage_service
+            _ensure_quota_usage_service()
+        except Exception:
+            _log.warning("quota usage service start failed", exc_info=True)
         if not ready_ok:
             disconnect_reason = "ready_send_failed"
             send_failures += 1

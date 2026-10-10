@@ -333,7 +333,9 @@ const QUOTA_PROVIDER_LABELS: Record<string, string> = {
 const QUOTA_PERIOD_LABELS: Record<string, string> = { '5h': '5h', '7d': '7d', monthly: 'mo' }
 // Per-model weekly sub-windows are too noisy for a one-line row.
 const QUOTA_SKIPPED_PERIODS = new Set(['opus 7d', 'sonnet 7d'])
-const QUOTA_STALE_AGE_S = 1800
+const QUOTA_FRESH_AGE_S = 1 * 3600
+const QUOTA_NORMAL_AGE_S = 8 * 3600
+const QUOTA_WARN_AGE_S = 24 * 3600
 
 /** Compact age read-out for the staleness marker: `45m`, `2h`, `3d`. */
 export function formatAgeCompact(ageS: number) {
@@ -359,6 +361,22 @@ export function quotaStaleMarker(group: Pick<AccountUsageGroup, 'age_s' | 'error
   return group.error ? `·${group.error.status || 'err'}` : ''
 }
 
+function quotaFreshnessColor(ageS: number, t: Theme) {
+  if (ageS <= QUOTA_FRESH_AGE_S) {
+    return t.color.statusGood
+  }
+
+  if (ageS <= QUOTA_NORMAL_AGE_S) {
+    return t.color.muted
+  }
+
+  if (ageS <= QUOTA_WARN_AGE_S) {
+    return t.color.statusWarn
+  }
+
+  return t.color.statusBad
+}
+
 /** `account_usage_all` from a usage payload, or [] when absent / malformed. */
 export function accountUsageGroups(usage: Usage): AccountUsageGroup[] {
   const raw: unknown = usage.account_usage_all
@@ -381,10 +399,11 @@ export interface QuotaSegment {
   text: string
 }
 
-type QuotaColorRole = 'active' | 'hint' | 'muted' | 'quota'
+type QuotaColorRole = 'active' | 'freshness' | 'hint' | 'muted' | 'quota'
 
 interface QuotaPiece {
   dim?: boolean
+  freshnessAgeS?: number
   pct?: number
   role: QuotaColorRole
   text: string
@@ -415,11 +434,14 @@ export function layoutQuotaGroups(
     keep(count).map(({ gi, group }) => {
       const label = QUOTA_PROVIDER_LABELS[group.provider] ?? group.provider
       const marker = quotaStaleMarker(group)
-      const hasStaleAge = marker.startsWith('◷ ')
+      const freshnessAgeS = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
+      const hasFreshnessAge = freshnessAgeS !== null
 
       const pieces: QuotaPiece[] = [
-        ...(hasStaleAge ? [{ dim: true, role: 'muted' as const, text: ` │ ${marker}` }] : []),
-        { role: gi === activeIndex ? 'active' : 'muted', text: hasStaleAge ? ` ${label}` : ` │ ${label}` }
+        ...(hasFreshnessAge
+          ? [{ freshnessAgeS, role: 'freshness' as const, text: ` │ ${marker}` }]
+          : []),
+        { role: gi === activeIndex ? 'active' : 'muted', text: hasFreshnessAge ? ` ${label}` : ` │ ${label}` }
       ]
 
       for (const window of group.windows) {
@@ -439,7 +461,7 @@ export function layoutQuotaGroups(
         pieces.push({ pct: used, role: 'quota', text: ` ${periodLabel} ${used}%${reset ? ` ↻ ${reset}` : ''}` })
       }
 
-      if (marker && !hasStaleAge) {
+      if (marker && !hasFreshnessAge) {
         pieces.push({ role: 'muted', text: marker })
       }
 
@@ -471,6 +493,8 @@ export function layoutQuotaGroups(
       color:
         piece.role === 'quota'
           ? quotaColor(piece.pct ?? 0, t)
+          : piece.role === 'freshness'
+            ? quotaFreshnessColor(piece.freshnessAgeS ?? 0, t)
           : piece.role === 'hint'
             ? t.color.warn
             : piece.role === 'active'
