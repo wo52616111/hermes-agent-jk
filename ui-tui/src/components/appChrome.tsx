@@ -510,13 +510,13 @@ export function layoutQuotaGroups(
           ? quotaColor(piece.pct ?? 0, t)
           : piece.role === 'freshness'
             ? quotaFreshnessColor(piece.freshnessAgeS ?? 0, t)
-          : piece.role === 'body'
-            ? t.color.text
-            : piece.role === 'hint'
-              ? t.color.warn
-              : piece.role === 'active'
-                ? t.color.text
-                : t.color.muted,
+            : piece.role === 'body'
+              ? t.color.text
+              : piece.role === 'hint'
+                ? t.color.warn
+                : piece.role === 'active'
+                  ? t.color.text
+                  : t.color.muted,
       dim: piece.dim ?? (piece.role === 'muted' && pi > 0),
       key: `${gi}-${pi}`,
       text: piece.text
@@ -1026,7 +1026,7 @@ export function StatusRule({
   const quotaGroups = accountUsageGroups(usage)
 
   const activeQuotaGroup = usage.account_usage_active
-    ? quotaGroups.find(group => group.provider === usage.account_usage_active) ?? null
+    ? (quotaGroups.find(group => group.provider === usage.account_usage_active) ?? null)
     : null
 
   const primaryQuotaGroups = activeQuotaGroup ? [activeQuotaGroup] : quotaGroups
@@ -1056,7 +1056,10 @@ export function StatusRule({
       ).map((segment, index) => (index === 0 ? { ...segment, text: segment.text.trimStart() } : segment))
     : []
 
-  const otherCellWidth = otherLeadCell.reduce((sum, segment) => sum + stringWidth(segment.text), stringWidth(otherRowLabel))
+  const otherCellWidth = otherLeadCell.reduce(
+    (sum, segment) => sum + stringWidth(segment.text),
+    stringWidth(otherRowLabel)
+  )
   // One space of breathing room between the widest left cell and the divider.
   const tableLeftWidth = Math.max(ctxCellWidth, otherCellWidth) + 1
   const tableRightBudget = Math.max(0, capacityWidth - tableLeftWidth - stringWidth('│'))
@@ -1067,8 +1070,7 @@ export function StatusRule({
 
   const remainingOtherQuota = layoutQuotaGroups(secondaryQuotaGroups.slice(1), tableRightBudget, t, now, null, false)
 
-  const useCapacityTable =
-    !!ctxLabel && !!activeQuotaGroup && otherLeadCell.length > 0 && activeTableQuota.length > 0
+  const useCapacityTable = !!ctxLabel && !!activeQuotaGroup && otherLeadCell.length > 0 && activeTableQuota.length > 0
 
   const handleSessionCountClick = (event: { stopImmediatePropagation?: () => void }) => {
     event.stopImmediatePropagation?.()

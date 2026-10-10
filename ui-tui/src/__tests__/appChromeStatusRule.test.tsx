@@ -295,9 +295,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
   it('renders one labelled group per provider, skipping opus/sonnet sub-windows', () => {
     const text = joined(layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW))
 
-    expect(text).toBe(
-      ' │ A\\ 5h 17% ↻ 3h·7d 66% ↻ 3d │ codex 5h 5% ↻ 2h·7d 7% ↻ 4d │ go 5h 0%·mo 36% ↻ 13d'
-    )
+    expect(text).toBe(' │ A\\ 5h 17% ↻ 3h·7d 66% ↻ 3d │ codex 5h 5% ↻ 2h·7d 7% ↻ 4d │ go 5h 0%·mo 36% ↻ 13d')
     expect(text).not.toContain('opus')
     expect(text).not.toContain('91%')
   })
@@ -331,7 +329,9 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
 
     expect(joined(layoutQuotaGroups(ALL_GROUPS, noResets.length, DEFAULT_THEME, NOW))).toBe(noResets)
     expect(joined(layoutQuotaGroups(ALL_GROUPS, noResets.length - 1, DEFAULT_THEME, NOW))).toBe(no5h)
-    expect(joined(layoutQuotaGroups(ALL_GROUPS, no5h.length - 1, DEFAULT_THEME, NOW))).toBe(' │ A\\ 7d 66% │ codex 7d 7%')
+    expect(joined(layoutQuotaGroups(ALL_GROUPS, no5h.length - 1, DEFAULT_THEME, NOW))).toBe(
+      ' │ A\\ 7d 66% │ codex 7d 7%'
+    )
     expect(joined(layoutQuotaGroups(ALL_GROUPS, 12, DEFAULT_THEME, NOW))).toBe(' │ A\\ 7d 66%')
     expect(layoutQuotaGroups(ALL_GROUPS, 5, DEFAULT_THEME, NOW)).toEqual([])
   })
@@ -514,7 +514,9 @@ describe('StatusRule session title', () => {
         // Context occupancy renders on the dedicated capacity row (second child),
         // so read that row's `ctxLabel` instead of the flattened transcript text.
         const capacity = React.Children.toArray(element.props.children)[1] as React.ReactElement<any>
-        const context = String(capacity.props.ctxLabel).match(/(~?\d+(?:\.\d+)?k(?:\/\d+k| tok))/)?.at(0)
+        const context = String(capacity.props.ctxLabel)
+          .match(/(~?\d+(?:\.\d+)?k(?:\/\d+k| tok))/)
+          ?.at(0)
 
         expect(context, `context must render at ${cols} columns`).toBeTruthy()
         expect(context?.startsWith('~')).toBe(estimated)
