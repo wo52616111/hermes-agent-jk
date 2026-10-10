@@ -287,7 +287,7 @@ function ctxBar(pct: number | undefined, w = 10) {
   const p = Math.max(0, Math.min(100, pct ?? 0))
   const filled = Math.round((p / 100) * w)
 
-  return '█'.repeat(filled) + '░'.repeat(w - filled)
+  return '■'.repeat(filled) + '·'.repeat(w - filled)
 }
 
 export function formatResetRemaining(resetAt: null | string | undefined, now = Date.now()) {
@@ -449,6 +449,8 @@ export function layoutQuotaGroups(
         { role: gi === activeIndex ? 'active' : 'body', text: ` ${label}` }
       ]
 
+      let windowCount = 0
+
       for (const window of group.windows) {
         if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
           continue
@@ -460,10 +462,18 @@ export function layoutQuotaGroups(
 
         const used = Math.max(0, Math.min(100, Math.round(Number(window.used_percent) || 0)))
         const periodLabel = QUOTA_PERIOD_LABELS[window.period] ?? window.period
-        const showReset = resets && (window.period === '7d' || window.period === 'monthly')
-        const reset = showReset ? formatResetRemaining(window.reset_at, now) : ''
+        const reset = resets ? formatResetRemaining(window.reset_at, now) : ''
+        const first = windowCount++ === 0
 
-        pieces.push({ pct: used, role: 'quota', text: ` ${periodLabel} ${used}%${reset ? ` ↻ ${reset}` : ''}` })
+        if (!first) {
+          pieces.push({ role: 'muted', text: '·' })
+        }
+
+        pieces.push({
+          pct: used,
+          role: 'quota',
+          text: `${first ? ' ' : ''}${periodLabel} ${used}%${reset ? ` ↻ ${reset}` : ''}`
+        })
       }
 
       if (marker && !hasFreshnessAge) {
@@ -581,7 +591,7 @@ function CapacityRow({
   const prefix = ctxLabel ? `─ ctx ${ctxLabel}` : hasQuota ? '─ usage' : ''
   const width = cols && cols > 0 ? Math.floor(cols) : 9999
   let budget = Math.max(0, width - stringWidth(prefix))
-  const barText = bar && pct != null ? ` [${bar}] ${contextMark ?? ''}${pct}%` : ''
+  const barText = bar && pct != null ? ` ${bar} ${contextMark ?? ''}${pct}%` : ''
   const showBar = !!barText && budget >= stringWidth(barText)
 
   if (showBar) {
@@ -1031,7 +1041,7 @@ export function StatusRule({
   const capacityWidth = cols > 0 ? Math.floor(cols) : 9999
   const ctxRowLabel = `${'─ ctx'.padEnd(CAPACITY_LABEL_WIDTH)} `
   const otherRowLabel = `${'─ other'.padEnd(CAPACITY_LABEL_WIDTH)} `
-  const tableContextBar = bar && pct != null ? `  [${bar}] ${contextMark}${pct}%` : ''
+  const tableContextBar = bar && pct != null ? `  ${bar} ${contextMark}${pct}%` : ''
   const ctxCellWidth = stringWidth(`${ctxRowLabel}${ctxLabel}${tableContextBar}`)
   const now = Date.now()
 
