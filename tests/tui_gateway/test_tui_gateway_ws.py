@@ -124,6 +124,60 @@ def test_ws_disconnect_releases_wake_word_owner(monkeypatch):
 
 
 
+def test_ws_starts_quota_usage_service_once_before_ready(monkeypatch):
+    import tui_gateway.entry as entry
+
+    started = []
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    monkeypatch.setattr(entry, "_ensure_quota_usage_service", lambda: started.append(True))
+
+    class FakeWS:
+        async def accept(self):
+            pass
+
+        async def send_text(self, line):
+            pass
+
+        async def receive_text(self):
+            raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    asyncio.run(ws_mod.handle_ws(FakeWS()))
+
+    assert started == [True]
+
+
+def test_ws_starts_mcp_discovery_before_ready(monkeypatch):
+    import tui_gateway.entry as entry
+
+    calls = []
+    events = []
+
+    monkeypatch.setattr(server, "_WS_ORPHAN_REAP_GRACE_S", 0)
+    monkeypatch.setattr(entry, "ensure_mcp_discovery_started", lambda: calls.append("mcp"))
+
+    class FakeWS:
+        async def accept(self):
+            events.append("accept")
+
+        async def send_text(self, line):
+            if '"gateway.ready"' in line:
+                events.append(f"ready_after_{len(calls)}")
+
+        async def receive_text(self):
+            raise ws_mod._WebSocketDisconnect()
+
+        async def close(self):
+            pass
+
+    asyncio.run(ws_mod.handle_ws(FakeWS()))
+
+    # Discovery moved to profile-aware agent construction. WebSocket transport
+    # should not start MCP discovery before a profile has been bound.
+    assert calls == []
+    assert events == ["accept", "ready_after_0"]
 
 
 def test_ws_ready_advertises_heartbeat_and_ping_is_inline(monkeypatch):

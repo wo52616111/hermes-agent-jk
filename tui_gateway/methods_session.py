@@ -442,6 +442,17 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
         logger.info("session.create %s: model=%s provider=%s source=client override (profile default: %s)",
                     key, session_model_override["model"], session_model_override.get("provider") or "-",
                     _session_default_route(_sessions[sid])[0])
+
+    # Quota credentials are profile-scoped. Bootstrap this profile now (off
+    # the create path) so an idle secondary-profile session gets its first
+    # snapshot without waiting for a prompt turn.
+    try:
+        from tui_gateway import server as gateway_server
+        from tui_gateway.entry import ensure_quota_bootstrap_for_session
+        ensure_quota_bootstrap_for_session(gateway_server._sessions[sid])
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug("profile quota bootstrap failed to start", exc_info=True)
     # No DB row here (drafts left "Untitled" litter): created on the first prompt — except seeded sessions.
     # NOTE: we intentionally do NOT persist a DB row here. Every TUI/desktop launch (and every "New agent" /
     # draft) opens a session here just to paint the composer, so eagerly creating a row left an "Untitled"
