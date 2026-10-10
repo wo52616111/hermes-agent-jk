@@ -85,7 +85,8 @@ export function richEightBitColorNumber(red: number, green: number, blue: number
  * against the client's actual TERM, e.g. `,xterm*:Tc`) — this is tmux's own
  * resolved answer, not a config file re-parse, so it's correct even when the
  * override is scoped by TERM pattern. One `tmux display` round-trip
- * (~10-15ms locally) at startup only, memoized like every other check here.
+ * at startup only, memoized like every other check here. A query that gives no
+ * answer (timeout) defers to `COLORTERM=truecolor|24bit` instead of clamping.
  *
  * `HERMES_TUI_TRUECOLOR=1` (see shouldUseRichEightBitDowngradeForLegacyAppleTerminal
  * above) remains an explicit override for anyone whose tmux/terminal combo
@@ -96,20 +97,26 @@ export function richEightBitColorNumber(red: number, green: number, blue: number
  * globalSettings.env, so reading it here is correct. chalk is a singleton, so
  * this clamps ALL truecolor output (fg+bg+hex) across the entire app.
  */
-export function tmuxClientSupportsRgb(env: NodeJS.ProcessEnv, exec = execFileSync): boolean {
+// Measured at 125-270ms per round-trip on a loaded machine, so a 200ms budget
+// turned a slow answer into a false "no RGB" and quantised the whole UI to the
+// 256-colour cube (a #1b142d bubble became #5f005f). Startup-only, memoized.
+const TMUX_PROBE_TIMEOUT_MS = 1500
+
+const COLORTERM_TRUECOLOR = /^(?:truecolor|24bit)$/i
+
+/** `true`/`false` is tmux's own verdict; `null` means the query gave no answer (timeout, no tmux). */
+export function tmuxClientSupportsRgb(env: NodeJS.ProcessEnv, exec = execFileSync): boolean | null {
   try {
     const features = exec('tmux', ['display', '-p', '#{client_termfeatures}'], {
       encoding: 'utf8',
       env,
       stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 200
+      timeout: TMUX_PROBE_TIMEOUT_MS
     })
 
     return /\bRGB\b|\bTc\b/.test(features)
   } catch {
-    // tmux binary missing/unreachable, or the query failed for any reason —
-    // fall back to the historical conservative clamp rather than guessing.
-    return false
+    return null
   }
 }
 
@@ -129,8 +136,14 @@ export function clampChalkLevelForTmux(
     return false
   }
 
-  if (!noTruecolorOverride && tmuxClientSupportsRgb(env, exec)) {
-    return false
+  if (!noTruecolorOverride) {
+    const rgb = tmuxClientSupportsRgb(env, exec)
+
+    // No answer is not "no": fall back to what the outer terminal advertises
+    // rather than quantising a truecolor-capable client.
+    if (rgb === true || (rgb === null && COLORTERM_TRUECOLOR.test((env.COLORTERM ?? '').trim()))) {
+      return false
+    }
   }
 
   chalk.level = 2

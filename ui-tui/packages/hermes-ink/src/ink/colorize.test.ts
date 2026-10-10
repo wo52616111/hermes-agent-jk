@@ -79,12 +79,27 @@ describe('tmuxClientSupportsRgb', () => {
     expect(tmuxClientSupportsRgb({} as NodeJS.ProcessEnv, exec)).toBe(false)
   })
 
-  it('reports false (fails closed) when the tmux query throws', () => {
+  it('reports unknown (null), not false, when the tmux query throws', () => {
+    // A timeout on a loaded machine is "no answer", not "no RGB support".
     const exec = () => {
       throw new Error('tmux: no server running')
     }
 
-    expect(tmuxClientSupportsRgb({} as NodeJS.ProcessEnv, exec)).toBe(false)
+    expect(tmuxClientSupportsRgb({} as NodeJS.ProcessEnv, exec)).toBeNull()
+  })
+
+  it('gives the query a budget that survives a loaded machine (round-trips measured at 125-270ms)', () => {
+    let timeout = 0
+
+    const exec = (_cmd: string, _args: readonly string[], opts: { timeout?: number }) => {
+      timeout = opts.timeout ?? 0
+
+      return 'RGB'
+    }
+
+    tmuxClientSupportsRgb({} as NodeJS.ProcessEnv, exec as never)
+
+    expect(timeout).toBeGreaterThanOrEqual(1000)
   })
 })
 
@@ -127,5 +142,36 @@ describe('clampChalkLevelForTmux', () => {
     const env = { HERMES_TUI_TRUECOLOR: '0', TMUX: '/tmp/tmux-1' } as NodeJS.ProcessEnv
 
     expect(clampChalkLevelForTmux(env, 3, rgbExec)).toBe(true)
+  })
+
+  describe('when the tmux query gives no answer', () => {
+    const failExec = () => {
+      throw new Error('ETIMEDOUT')
+    }
+
+    it('trusts COLORTERM=truecolor instead of quantising to 256 colours', () => {
+      const env = { COLORTERM: 'truecolor', TMUX: '/tmp/tmux-1' } as NodeJS.ProcessEnv
+
+      expect(clampChalkLevelForTmux(env, 3, failExec as never)).toBe(false)
+    })
+
+    it('trusts COLORTERM=24bit', () => {
+      const env = { COLORTERM: '24bit', TMUX: '/tmp/tmux-1' } as NodeJS.ProcessEnv
+
+      expect(clampChalkLevelForTmux(env, 3, failExec as never)).toBe(false)
+    })
+
+    it('keeps the conservative clamp when nothing else advertises truecolor', () => {
+      const env = { TMUX: '/tmp/tmux-1' } as NodeJS.ProcessEnv
+
+      expect(clampChalkLevelForTmux(env, 3, failExec as never)).toBe(true)
+    })
+  })
+
+  it('still clamps when tmux answers that the client has no RGB, even if COLORTERM says truecolor', () => {
+    // A definite "no" is tmux's own verdict about what it will pass through.
+    const env = { COLORTERM: 'truecolor', TMUX: '/tmp/tmux-1' } as NodeJS.ProcessEnv
+
+    expect(clampChalkLevelForTmux(env, 3, noRgbExec)).toBe(true)
   })
 })
