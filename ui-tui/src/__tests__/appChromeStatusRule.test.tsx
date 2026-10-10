@@ -222,14 +222,15 @@ const capacityText = (row: React.ReactElement<any>) =>
   textContent((row.type as (p: unknown) => ReactNodeLike)(row.props))
 
 describe('StatusRule multi-provider quota (account_usage_all)', () => {
-  it('highlights the active provider label in accent bold', () => {
+  it('uses body text for every provider label while retaining active-provider emphasis', () => {
     const segs = layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW, 'openai-codex')
-    const labels = segs.filter(s => /│ (A\\|codex|go)$/.test(s.text))
+    const labels = segs.filter(s => / (A\\|codex|go)$/.test(s.text))
 
-    expect(labels.map(s => s.text.trim())).toEqual(['│ A\\', '│ codex', '│ go'])
+    expect(labels.map(s => s.text.trim())).toEqual(['A\\', 'codex', 'go'])
     expect(labels.map(s => !!s.bold)).toEqual([false, true, false])
-    expect(labels[1]!.color).toBe(DEFAULT_THEME.color.accent)
-    expect(labels[0]!.color).toBe(DEFAULT_THEME.color.muted)
+    expect(labels[1]!.color).toBe(DEFAULT_THEME.color.text)
+    expect(labels[0]!.color).toBe(DEFAULT_THEME.color.text)
+    expect(labels[2]!.color).toBe(DEFAULT_THEME.color.text)
   })
 
   it('keeps the active provider when narrow widths drop trailing groups', () => {
@@ -253,10 +254,10 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
 
   it('highlights the active provider even when it is the only group shown', () => {
     const segs = layoutQuotaGroups(ALL_GROUPS.slice(0, 1), 9999, DEFAULT_THEME, NOW, 'anthropic')
-    const label = segs.find(s => s.text === ' │ A\\')
+    const label = segs.find(s => s.text === ' A\\')
 
     expect(label?.bold).toBe(true)
-    expect(label?.color).toBe(DEFAULT_THEME.color.accent)
+    expect(label?.color).toBe(DEFAULT_THEME.color.text)
   })
 
   it('renders one labelled group per provider, skipping opus/sonnet sub-windows', () => {
@@ -287,7 +288,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(segs.find(s => s.text === ' 5h 95%')?.color).toBe(DEFAULT_THEME.color.error)
     expect(segs.find(s => s.text === ' 7d 75%')?.color).toBe(DEFAULT_THEME.color.warn)
     expect(segs.find(s => s.text === ' 5h 10%')?.color).toBe(DEFAULT_THEME.color.statusGood)
-    expect(segs.find(s => s.text === ' │ A\\')?.color).toBe(DEFAULT_THEME.color.muted)
+    expect(segs.find(s => s.text === ' A\\')?.color).toBe(DEFAULT_THEME.color.text)
   })
 
   it('degrades on narrow widths: resets first, then 5h windows, then trailing groups', () => {
@@ -337,7 +338,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(marker.dim).toBe(false)
   })
 
-  it('colours the freshness text by age without colouring the provider label', () => {
+  it('colours freshness text by age while keeping inactive provider labels at body contrast', () => {
     const segs = layoutQuotaGroups(
       [
         group({ age_s: 30 * 60, provider: 'anthropic', windows: [] }),
@@ -354,7 +355,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(segs.find(s => s.text === ' │ ◷ 5h')?.color).toBe(DEFAULT_THEME.color.muted)
     expect(segs.find(s => s.text === ' │ ◷ 10h')?.color).toBe(DEFAULT_THEME.color.statusWarn)
     expect(segs.find(s => s.text === ' │ ◷ 2d')?.color).toBe(DEFAULT_THEME.color.statusBad)
-    expect(segs.find(s => s.text === ' A\\')?.color).toBe(DEFAULT_THEME.color.muted)
+    expect(segs.find(s => s.text === ' A\\')?.color).toBe(DEFAULT_THEME.color.text)
   })
 
   it('renders a route hint after its group in warn colour', () => {
@@ -411,6 +412,33 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(otherCapacity.props.activeProvider).toBeNull()
     expect(capacityText(otherCapacity)).toBe('─ usage │ codex 5h 5% 7d 7% ↻ 4d │ go 5h 0% mo 36% ↻ 13d')
     expect(`${capacityText(activeCapacity)}${capacityText(otherCapacity)}`).not.toContain('99%')
+
+    vi.useRealTimers()
+  })
+
+  it('lays context, active-provider, and other-provider usage out as aligned table cells', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const element = StatusRule({
+      ...baseProps,
+      cols: 200,
+      usage: {
+        ...baseProps.usage,
+        account_usage_all: ALL_GROUPS,
+        account_usage_active: 'anthropic'
+      }
+    })
+
+    const rows = React.Children.toArray(element.props.children)
+    const primary = capacityText(rows[1] as React.ReactElement<any>)
+    const secondary = capacityText(rows[2] as React.ReactElement<any>)
+
+    expect(primary).toMatch(/^─ ctx {3}50k\/200k {2}\[.+\] 25% +│ A\\ 5h 17%/)
+    expect(secondary).toMatch(/^─ other codex 5h 5% 7d 7% ↻ 4d +│ go 5h 0%/)
+    expect(secondary).not.toMatch(/^─ other {2}/)
+    expect(primary.indexOf('│')).toBe(secondary.indexOf('│'))
+    expect(primary.indexOf('50k/200k')).toBe(secondary.indexOf('codex'))
 
     vi.useRealTimers()
   })

@@ -399,7 +399,7 @@ export interface QuotaSegment {
   text: string
 }
 
-type QuotaColorRole = 'active' | 'freshness' | 'hint' | 'muted' | 'quota'
+type QuotaColorRole = 'active' | 'body' | 'freshness' | 'hint' | 'muted' | 'quota'
 
 interface QuotaPiece {
   dim?: boolean
@@ -419,7 +419,8 @@ export function layoutQuotaGroups(
   budget: number,
   t: Theme,
   now = Date.now(),
-  activeProvider?: string | null
+  activeProvider?: string | null,
+  leadingSeparator = true
 ) {
   const activeIndex = groups.findIndex(group => group.provider === activeProvider)
 
@@ -437,11 +438,15 @@ export function layoutQuotaGroups(
       const freshnessAgeS = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
       const hasFreshnessAge = freshnessAgeS !== null
 
+      const separator = !leadingSeparator && gi === 0 ? '' : ' │'
+
       const pieces: QuotaPiece[] = [
         ...(hasFreshnessAge
-          ? [{ freshnessAgeS, role: 'freshness' as const, text: ` │ ${marker}` }]
-          : []),
-        { role: gi === activeIndex ? 'active' : 'muted', text: hasFreshnessAge ? ` ${label}` : ` │ ${label}` }
+          ? [{ freshnessAgeS, role: 'freshness' as const, text: `${separator} ${marker}` }]
+          : separator
+            ? [{ role: 'muted' as const, text: separator }]
+            : []),
+        { role: gi === activeIndex ? 'active' : 'body', text: ` ${label}` }
       ]
 
       for (const window of group.windows) {
@@ -495,15 +500,53 @@ export function layoutQuotaGroups(
           ? quotaColor(piece.pct ?? 0, t)
           : piece.role === 'freshness'
             ? quotaFreshnessColor(piece.freshnessAgeS ?? 0, t)
-          : piece.role === 'hint'
-            ? t.color.warn
-            : piece.role === 'active'
-              ? t.color.accent
-              : t.color.muted,
+          : piece.role === 'body'
+            ? t.color.text
+            : piece.role === 'hint'
+              ? t.color.warn
+              : piece.role === 'active'
+                ? t.color.text
+                : t.color.muted,
       dim: piece.dim ?? (piece.role === 'muted' && pi > 0),
       key: `${gi}-${pi}`,
       text: piece.text
     }))
+  )
+}
+
+// Fixed label gutter (`─ ctx` / `─ other`) so both capacity rows start their content in one column.
+const CAPACITY_LABEL_WIDTH = stringWidth('─ other')
+
+function quotaTextNodes(segments: QuotaSegment[]): ReactNode[] {
+  return segments.map(item => (
+    <Text bold={item.bold} color={item.color} dim={item.dim} key={item.key}>
+      {item.text}
+    </Text>
+  ))
+}
+
+function CapacityTableRow({
+  left,
+  leftContentWidth,
+  leftWidth,
+  rightQuota,
+  t
+}: {
+  left: ReactNode
+  leftContentWidth: number
+  leftWidth: number
+  rightQuota: QuotaSegment[]
+  t: Theme
+}) {
+  const padding = Math.max(0, leftWidth - leftContentWidth)
+
+  return (
+    <Box flexDirection="row" height={1} overflow="hidden">
+      {left}
+      {padding ? <Text>{' '.repeat(padding)}</Text> : null}
+      {rightQuota.length ? <Text color={t.color.muted}>│</Text> : null}
+      {quotaTextNodes(rightQuota)}
+    </Box>
   )
 }
 
@@ -567,11 +610,7 @@ function CapacityRow({
     <Box flexDirection="row" height={1} overflow="hidden">
       <Text color={t.color.muted}>{prefix}</Text>
       {showBar ? <Text color={barColor}> {barText}</Text> : null}
-      {quota.map(item => (
-        <Text bold={item.bold} color={item.color} dim={item.dim} key={item.key}>
-          {item.text}
-        </Text>
-      ))}
+      {quotaTextNodes(quota)}
     </Box>
   )
 }
@@ -986,6 +1025,40 @@ export function StatusRule({
   const capacityPrefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaGroups.length || quotaWindows.length ? '─ usage' : ''
   const showCapacityRow = !!capacityPrefix
   const showSecondaryCapacityRow = secondaryQuotaGroups.length > 0
+  // 2×2 table: [ctx | active provider] over [first other provider | remaining others].
+  // Both rows share a fixed-width label gutter and one left-column width, so the
+  // `│` column divider and each cell's content start line up vertically.
+  const capacityWidth = cols > 0 ? Math.floor(cols) : 9999
+  const ctxRowLabel = `${'─ ctx'.padEnd(CAPACITY_LABEL_WIDTH)} `
+  const otherRowLabel = `${'─ other'.padEnd(CAPACITY_LABEL_WIDTH)} `
+  const tableContextBar = bar && pct != null ? `  [${bar}] ${contextMark}${pct}%` : ''
+  const ctxCellWidth = stringWidth(`${ctxRowLabel}${ctxLabel}${tableContextBar}`)
+  const now = Date.now()
+
+  const otherLeadCell = secondaryQuotaGroups[0]
+    ? layoutQuotaGroups(
+        [secondaryQuotaGroups[0]],
+        Math.max(0, capacityWidth - stringWidth(otherRowLabel)),
+        t,
+        now,
+        null,
+        false
+      ).map((segment, index) => (index === 0 ? { ...segment, text: segment.text.trimStart() } : segment))
+    : []
+
+  const otherCellWidth = otherLeadCell.reduce((sum, segment) => sum + stringWidth(segment.text), stringWidth(otherRowLabel))
+  // One space of breathing room between the widest left cell and the divider.
+  const tableLeftWidth = Math.max(ctxCellWidth, otherCellWidth) + 1
+  const tableRightBudget = Math.max(0, capacityWidth - tableLeftWidth - stringWidth('│'))
+
+  const activeTableQuota = activeQuotaGroup
+    ? layoutQuotaGroups([activeQuotaGroup], tableRightBudget, t, now, activeQuotaGroup.provider, false)
+    : []
+
+  const remainingOtherQuota = layoutQuotaGroups(secondaryQuotaGroups.slice(1), tableRightBudget, t, now, null, false)
+
+  const useCapacityTable =
+    !!ctxLabel && !!activeQuotaGroup && otherLeadCell.length > 0 && activeTableQuota.length > 0
 
   const handleSessionCountClick = (event: { stopImmediatePropagation?: () => void }) => {
     event.stopImmediatePropagation?.()
@@ -1159,30 +1232,60 @@ export function StatusRule({
   )
 
   const capacityRow = showCapacityRow ? (
-    <CapacityRow
-      activeProvider={usage.account_usage_active}
-      bar={bar}
-      barColor={barColor}
-      cols={cols}
-      contextMark={contextMark}
-      ctxLabel={ctxLabel}
-      pct={pct}
-      quotaGroups={primaryQuotaGroups}
-      quotaWindows={quotaWindows}
-      t={t}
-    />
+    useCapacityTable ? (
+      <CapacityTableRow
+        left={
+          <>
+            <Text color={t.color.muted}>{`${ctxRowLabel}${ctxLabel}`}</Text>
+            {tableContextBar ? <Text color={barColor}>{tableContextBar}</Text> : null}
+          </>
+        }
+        leftContentWidth={ctxCellWidth}
+        leftWidth={tableLeftWidth}
+        rightQuota={activeTableQuota}
+        t={t}
+      />
+    ) : (
+      <CapacityRow
+        activeProvider={usage.account_usage_active}
+        bar={bar}
+        barColor={barColor}
+        cols={cols}
+        contextMark={contextMark}
+        ctxLabel={ctxLabel}
+        pct={pct}
+        quotaGroups={primaryQuotaGroups}
+        quotaWindows={quotaWindows}
+        t={t}
+      />
+    )
   ) : null
 
   const secondaryCapacityRow = showSecondaryCapacityRow ? (
-    <CapacityRow
-      activeProvider={null}
-      barColor={barColor}
-      cols={cols}
-      ctxLabel=""
-      quotaGroups={secondaryQuotaGroups}
-      quotaWindows={[]}
-      t={t}
-    />
+    useCapacityTable ? (
+      <CapacityTableRow
+        left={
+          <>
+            <Text color={t.color.muted}>{otherRowLabel}</Text>
+            {quotaTextNodes(otherLeadCell)}
+          </>
+        }
+        leftContentWidth={otherCellWidth}
+        leftWidth={tableLeftWidth}
+        rightQuota={remainingOtherQuota}
+        t={t}
+      />
+    ) : (
+      <CapacityRow
+        activeProvider={null}
+        barColor={barColor}
+        cols={cols}
+        ctxLabel=""
+        quotaGroups={secondaryQuotaGroups}
+        quotaWindows={[]}
+        t={t}
+      />
+    )
   ) : null
 
   return (
