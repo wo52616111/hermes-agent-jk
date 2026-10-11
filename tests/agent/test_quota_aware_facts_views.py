@@ -75,7 +75,7 @@ def _store(provider=PROVIDER, fp="sha256:aaa", windows=None, *, entries=None, fe
 
 
 # ============================================================================
-# 2. Window and state derivation (D9, D25, D28, D47)
+# Window and state derivation (D9, D25, D28, D47)
 # ============================================================================
 
 def test_status_rate_limited_wins_over_low_percent():
@@ -150,7 +150,7 @@ def test_refusal_recording_rule_both_directions(qdir):
 
 
 # ============================================================================
-# 3. Facts, views, writers, readers (D13, D23, D33, D34, D35, D41)
+# Facts, views, writers, readers (D13, D23, D33, D34, D35, D41)
 # ============================================================================
 
 def test_two_profiles_same_key_one_facts_record(qdir):
@@ -373,7 +373,7 @@ def test_pool_writer_publishes_only_a_view(qdir, quota_aware, monkeypatch):
 
 
 # ============================================================================
-# 4. Fail-open and read health (D16, D26)
+# Fail-open and read health (D16, D26)
 # ============================================================================
 
 def test_fail_open_with_and_without_prior_evidence(qdir, quota_aware):
@@ -416,7 +416,7 @@ def test_read_health_error_with_state_preserved(qdir, quota_aware):
 
 
 # ============================================================================
-# 5. Refresher, attribution, bounds (D42)
+# Refresher, attribution, bounds (D42)
 # ============================================================================
 
 def test_no_fetch_on_request_path(qdir, quota_aware, monkeypatch):
@@ -719,7 +719,7 @@ def test_refresher_drains_the_per_account_queue(qdir, monkeypatch):
 
 
 # ============================================================================
-# 7. Capability and configuration (D15, D38, D46)
+# Capability and configuration (D15, D38, D46)
 # ============================================================================
 
 def test_opencode_go_declares_capabilities():
@@ -1023,7 +1023,7 @@ def test_legacy_and_facts_paths_share_the_backoff_rule(qdir, monkeypatch):
 
 
 # ============================================================================
-# 12. Reader/profile scope, attribution, lifecycle and concurrency (D26, D33, D41, D42, D47)
+# Reader/profile scope, attribution, lifecycle and concurrency (D26, D33, D41, D42, D47)
 # ============================================================================
 
 def test_view_accounts_are_reader_scoped(qdir, quota_aware):
