@@ -71,10 +71,6 @@ def window_spent(window: Any, now: datetime) -> bool:
     return (used or 0) >= SPENT_ABOVE_PERCENT
 
 
-def _normalized_refusal(value: Any) -> Optional[datetime]:
-    return as_dt(value)
-
-
 def account_state(
     windows: Iterable[Any],
     *,
@@ -89,7 +85,7 @@ def account_state(
     conjunctive - ONE spent window makes the account non-covered.
     """
     now = now or _utc_now()
-    refusal = _normalized_refusal(metered_exhausted_until)
+    refusal = as_dt(metered_exhausted_until)
     if refusal is not None and refusal > now:
         return "exhausted"
     if not [w for w in windows if window_spent(w, now)]:
@@ -112,7 +108,7 @@ def effective_recovery(
         for w in windows
         if window_spent(w, now) and (reset := as_dt(_field(w, "reset_at"))) is not None
     ]
-    refusal = _normalized_refusal(metered_exhausted_until)
+    refusal = as_dt(metered_exhausted_until)
     if refusal is not None:
         resets.append(refusal)
     return max(resets) if resets else now
