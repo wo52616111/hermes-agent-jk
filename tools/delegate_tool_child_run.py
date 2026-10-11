@@ -436,7 +436,10 @@ def _defer_close_after_timeout(child: Any, child_future: Any) -> None:
 def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
     """Lease a credential from the child's pool (if any) and bind it; ``(pool, lease_id)``. The bound entry must
     serve the child's endpoint: on a mixed same-provider pool the least-leased pick may target another host, so it is
-    released and an endpoint-matching entry is leased by id instead (#68237)."""
+    released and an endpoint-matching entry is leased by id instead (#68237). The re-pick ORDERS the
+    endpoint-matching candidate set by the pool's selection policy (``order_entries``) rather than taking
+    "the first non-dead match" (D44); with no endpoint-matching entry the D17 handout applies and the repair
+    logs why."""
     child_pool = getattr(child, "_credential_pool", None)
     if child_pool is None:
         return None, None
@@ -450,10 +453,20 @@ def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
             leased_entry = next((e for e in child_pool.entries() if e.id == leased_cred_id), None)
             if not _entry_serves_endpoint(leased_entry, base_url):
                 child_pool.release_lease(leased_cred_id)
-                leased_entry = next(
-                    (e for e in child_pool.entries() if e.last_status != "dead" and _entry_serves_endpoint(e, base_url)),
-                    None,
-                )
+                # D44: candidate set = endpoint filter, then ordered by the selection policy.
+                matches = [e for e in child_pool.entries()
+                           if e.last_status != "dead" and _entry_serves_endpoint(e, base_url)]
+                if matches:
+                    ordered = child_pool.order_entries(matches)
+                else:
+                    # No endpoint-matching entry is eligible -> D17 handout (earliest recovery), logged.
+                    ordered = child_pool.order_entries(
+                        [e for e in child_pool.entries() if e.last_status != "dead"])
+                    logger.info(
+                        "delegate: no endpoint-matching credential for %s; applying the D17 handout",
+                        base_url or "?",
+                    )
+                leased_entry = ordered[0] if ordered else None
                 leased_cred_id = child_pool.acquire_lease(leased_entry.id) if leased_entry is not None else None
             if leased_entry is not None and hasattr(child, "_swap_credential"):
                 child._swap_credential(leased_entry)
