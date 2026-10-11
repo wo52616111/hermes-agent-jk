@@ -655,9 +655,11 @@ def _policy_targets_resolve(targets: list, entries: List[PooledCredential]) -> b
     return True
 
 
-# "once per provider" degradation warnings (D15/D40/D45/D46a). Keyed by (provider, reason)
-# so a hot-path ``load_pool`` cannot storm the log while the signal still reaches the user.
-_POLICY_WARNED: Set[Tuple[str, str]] = set()
+# Degradation/config warnings (D15/D40/D45/D46a), keyed so a hot-path ``load_pool`` cannot
+# storm the log while the signal still reaches the user. The degrade warnings key on
+# (provider, reason); the D46(a) config warning additionally keys on the effective
+# configuration signature, so it re-fires only when that configuration actually changes.
+_POLICY_WARNED: Set[Tuple[Any, ...]] = set()
 
 
 def _warn_policy_once(provider: str, reason: str, message: str) -> None:
@@ -669,14 +671,36 @@ def _warn_policy_once(provider: str, reason: str, message: str) -> None:
                    provider, message)
 
 
-def _warn_config_ineffective_once(provider: str, message: str) -> None:
+def _metered_config_signature(block: dict) -> Tuple[Any, ...]:
+    """A stable identity for the EFFECTIVE metered configuration (D46a).
+
+    The D46(a) warning is deduped on this signature, so two selections under one load
+    (or two loads with an unchanged ``credential_pool_policy``) warn once, while editing
+    the block — even to another still-unmatched target — yields a new signature and warns
+    again on the next load. ``metered_overflow`` is normalised to ``str`` targets, and the
+    declared / absent / malformed shape is part of the identity.
+    """
+    if not isinstance(block, dict) or "metered_overflow" not in block:
+        return ("metered_overflow", "absent")
+    targets = block.get("metered_overflow")
+    if not isinstance(targets, list):
+        return ("metered_overflow", "malformed", repr(targets))
+    return ("metered_overflow", "declared", tuple(str(t) for t in targets))
+
+
+def _warn_config_ineffective_once(
+    provider: str, signature: Tuple[Any, ...], message: str,
+) -> None:
     """Warning D46(a): the metered configuration did not take effect.
 
-    Emitted at most ONCE per provider per load (the same ``_POLICY_WARNED`` set the degrade
-    warnings use, under a dedicated key), so it is never repeated on every selection and is
-    never rate-limited away.
+    Emitted at most ONCE per provider per load for a given EFFECTIVE configuration: the
+    dedup key carries the configuration ``signature`` (the normalised ``metered_overflow``
+    targets and whether the block declared them), so several selections under one load
+    never repeat it, while a changed ``credential_pool_policy`` produces a new signature
+    and warns again on the next load. It shares the ``_POLICY_WARNED`` set with the degrade
+    warnings (under a dedicated key) and is never rate-limited away.
     """
-    key = (str(provider or ""), "metered_config_ineffective")
+    key = (str(provider or ""), "metered_config_ineffective", signature)
     if key in _POLICY_WARNED:
         return
     _POLICY_WARNED.add(key)
@@ -690,7 +714,7 @@ def _metered_config_warning(
 
     Returns ``None`` when the configuration took effect (a configured ``metered_overflow``
     list that names its accounts) or the provider does not bill after the plan is spent.
-    Two trigger cases, both once per provider per load:
+    Two trigger cases, both once per provider per effective configuration:
 
     * a configured list exists but does not name an account (unmatched / ambiguous target), or
     * no ``metered_overflow`` is configured at all.
@@ -730,10 +754,11 @@ def resolve_selection_policy(
 
     block = get_pool_policy_block(provider)
     # D46(a): a billing-capable provider whose metered_overflow did not take effect warns
-    # once per provider per load - independent of any fill_first degradation below.
+    # once per provider per effective configuration - independent of any fill_first
+    # degradation below.
     config_warning = _metered_config_warning(provider, entries, block)
     if config_warning:
-        _warn_config_ineffective_once(provider, config_warning)
+        _warn_config_ineffective_once(provider, _metered_config_signature(block), config_warning)
 
     if not _provider_supports_per_account(provider):
         _warn_policy_once(provider, "no_capability",
