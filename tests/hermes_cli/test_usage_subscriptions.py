@@ -125,16 +125,33 @@ def test_all_subscriptions_human_output_lists_each_account(qdir, monkeypatch, ca
 
 
 def test_all_subscriptions_reports_a_provider_with_only_per_account_facts(qdir, monkeypatch, capsys):
-    """A ``quota_aware`` provider no longer writes a legacy snapshot (B1), so ``status_groups()``
-    has no entry for it. The CLI must still list it - built from its per-account view - instead of
-    printing an empty ``subscriptions`` list while the gateway renders the same accounts. This does
-    NOT mock ``status_groups``: it exercises the real integration path."""
+    """A ``quota_aware`` provider never serves a legacy single-account snapshot (B1/D41): the
+    provider-level ``status_groups()`` entry, when present, carries the SERVING account's OWN view
+    windows (never the other account's, never a stale snapshot) and is absent when the view has none.
+    The CLI must still list the provider and its nested per-account records - built from its view -
+    instead of printing an empty ``subscriptions`` list while the gateway renders the same accounts.
+    This does NOT mock ``status_groups``: it exercises the real integration path."""
     _store("sha256:bbb444555666", "OPENCODE_GO_API_KEY_2", [_window(period="5h", percent=1.0)])
     _store("sha256:aaa111222333", "OPENCODE_GO_API_KEY", [_window(percent=100.0)])
 
     from hermes_cli.subcommands.usage import cmd_usage
 
-    assert qs.status_groups() == []  # no legacy snapshot on disk for the quota_aware provider
+    # D41: a ``quota_aware`` provider never serves a legacy single-account snapshot. Its provider-level
+    # group, when present, carries the SERVING account's OWN view windows - never the other account's,
+    # never a stale snapshot - and is absent entirely when the view has no windows.
+    view = qs.read_view(qs.current_profile(), PROVIDER)
+    assert view is not None
+    serving_account = next(a for a in view["accounts"] if a["fingerprint"] == view["serving"])
+    other_account = next(a for a in view["accounts"] if a["fingerprint"] != view["serving"])
+    # The two accounts carry different periods, so "the serving account's own windows" is
+    # distinguishable from "the other account's" - a group built from the wrong account cannot pass.
+    assert [w["period"] for w in serving_account["windows"]] != [w["period"] for w in other_account["windows"]]
+    expected_windows = [{k: w.get(k) for k in ("period", "used_percent", "reset_at", "rolled") if k in w}
+                        for w in serving_account["windows"]]
+    provider_groups = [g for g in qs.status_groups() if g["provider"] == PROVIDER]
+    assert len(provider_groups) <= 1
+    if provider_groups:
+        assert provider_groups[0]["windows"] == expected_windows
     assert cmd_usage(_args()) == 0
     doc = json.loads(capsys.readouterr().out)
 
