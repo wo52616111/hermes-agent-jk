@@ -1497,8 +1497,12 @@ class QuotaRefresher:
 # last hold is released, so one pool's teardown never kills another's refreshing (D42). A hold ends
 # on an explicit release AND when its pool is garbage collected, so a pool nobody keeps does not
 # leave an orphan daemon fetching forever. ``_owner_tokens`` is the authoritative set of live
-# holds; ``_pool_owner_token`` and ``_owner_finalizers`` index it, and a token leaves all three
-# together through ``_drop_owner`` so they cannot drift apart (D42).
+# holds; ``_pool_owner_token`` maps a pool to the token it was given and ``_owner_finalizers`` maps
+# a token to its finalizer. A release must NOT enumerate those indexes: holding another live pool
+# just to delete its entry drops that pool's last reference on the releasing thread, and the
+# finalizer that then runs re-enters the non-reentrant ``_refresher_guard`` this release holds and
+# deadlocks it. A token that has left the live set is left in the index, where ``start_refresher``
+# reads it as unregistered and takes a fresh one (D42).
 _pool_owner_token: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 _owner_tokens: set = set()
 _owner_finalizers: dict = {}
@@ -1506,16 +1510,10 @@ _owner_token_seq = itertools.count(1)
 
 
 def _drop_owner(token: int):
-    """Under ``_refresher_guard``: forget every trace of ``token`` — its live hold, its pool index
-    entry and its finalizer (returned undetached). A released token must leave no index entry
-    behind: a pool that releases and starts again would otherwise match its own stale entry, take
-    no fresh hold, and leave its later stop with nothing to stop (D42)."""
+    """Under ``_refresher_guard``: drop ``token`` from the live holds and return its finalizer
+    (undetached), leaving the pool index entry alone -- see the note above (D42)."""
     _owner_tokens.discard(token)
-    finalizer = _owner_finalizers.pop(token, None)
-    for pool, held in list(_pool_owner_token.items()):
-        if held == token:
-            del _pool_owner_token[pool]
-    return finalizer
+    return _owner_finalizers.pop(token, None)
 
 
 def _release_owner(token: int, timeout: float = 2.0) -> None:
@@ -1555,7 +1553,10 @@ def start_refresher(*, pool=None, interval_s: int = REFRESH_INTERVAL_S,
     collected). Idempotent."""
     global _refresher
     with _refresher_guard:
-        if pool is not None and pool not in _pool_owner_token:
+        # A pool holds the refresher iff its token is still a live hold: an index entry left behind
+        # by an earlier release must not suppress this registration, or the pool would keep the
+        # worker running with no hold to release and its teardown would never stop it (D42).
+        if pool is not None and _pool_owner_token.get(pool) not in _owner_tokens:
             token = next(_owner_token_seq)
             _pool_owner_token[pool] = token
             _owner_tokens.add(token)

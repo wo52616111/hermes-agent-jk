@@ -1442,7 +1442,7 @@ def test_forced_stop_ends_the_holds_it_found_without_stranding_a_registration(qd
         stopper.join(5)
         assert not stopper.is_alive()
         assert not qs._owner_tokens, "the forced stop left a hold standing"
-        assert not qs._pool_owner_token
+        assert qs._pool_owner_token.get(owner_b) not in qs._owner_tokens
         assert not qs.is_refresher_running() and _live_refresher_threads() == []
         # A pool that starts after the force takes a fresh hold and a fresh worker.
         owner_c = _Owner()
@@ -1471,9 +1471,93 @@ def test_a_pool_that_starts_again_takes_a_fresh_hold_so_its_teardown_stops_the_w
     assert qs.is_refresher_running() and len(qs._owner_tokens) == 1
     qs.stop_refresher(pool=owner)
     assert not qs.is_refresher_running()
-    assert not qs._owner_tokens and owner not in qs._pool_owner_token
+    # The released token leaves no LIVE hold behind; a stale index entry must stay inert.
+    assert not qs._owner_tokens and qs._pool_owner_token.get(owner) not in qs._owner_tokens
     del owner
     gc.collect()
+    assert not qs.is_refresher_running() and _live_refresher_threads() == []
+
+
+def test_a_release_never_holds_another_live_pool_while_it_holds_the_guard(qdir, monkeypatch):
+    """D42: a release must not extend another pool's lifetime while it holds the non-reentrant
+    lifecycle guard. If it does, that pool's finalizer runs on this thread inside the guard and
+    re-enters it, deadlocking the release, every later registration and the worker it was stopping.
+    Held here right after the release dropped its own hold, still inside the guard: an unrelated
+    pool whose last reference is dropped at that moment must already be collectable."""
+    owner_a = _Owner()
+    holder = {"b": _Owner()}
+    qs.start_refresher(pool=owner_a, interval_s=0.05, fetcher=lambda: None)
+    qs.start_refresher(pool=holder["b"], interval_s=0.05, fetcher=lambda: None)
+    b_ref = weakref.ref(holder["b"])
+    inside, proceed = threading.Event(), threading.Event()
+    real_drop = qs._drop_owner
+
+    def gated_drop(token):
+        dropped = real_drop(token)
+        if threading.current_thread().name == "releaser":
+            inside.set()
+            proceed.wait(5)
+        return dropped
+
+    monkeypatch.setattr(qs, "_drop_owner", gated_drop)
+    # The finalizer of the pool collected below has to wait for this guard, so unblock the releaser
+    # from a timer: a release that held no other pool must still finish on its own.
+    watchdog = threading.Timer(1.0, proceed.set)
+    releaser = threading.Thread(target=lambda: qs.stop_refresher(pool=owner_a), name="releaser")
+    watchdog.start()
+    releaser.start()
+    try:
+        assert inside.wait(5), "the release never dropped its own hold"
+        holder.clear()
+        gc.collect()
+        assert b_ref() is None, "the release held another live pool while it held the guard"
+        proceed.set()
+        releaser.join(5)
+        assert not releaser.is_alive(), "releasing one pool deadlocked on another pool's finalizer"
+        assert not qs.is_refresher_running() and _live_refresher_threads() == []
+    finally:
+        proceed.set()
+        watchdog.cancel()
+        monkeypatch.setattr(qs, "_drop_owner", real_drop)
+        releaser.join(2)
+        qs.stop_refresher()
+        for t in _live_refresher_threads():
+            t.join(1)
+
+
+def test_releasing_a_hold_never_enumerates_other_live_pools(qdir, monkeypatch):
+    """D42: releasing A's hold must not enumerate the live-pool index. Materialising the other
+    pools holds their last reference, so one collected as the release returns runs its finalizer on
+    the releasing thread while it still holds the non-reentrant guard, which re-enters the guard and
+    deadlocks the release, every later registration and the worker it was stopping. The index is
+    therefore read only for a specific pool, never listed."""
+
+    class _RefusingIndex(weakref.WeakKeyDictionary):
+        def items(self):
+            raise AssertionError("a release must not enumerate the live-pool index")
+
+        def keys(self):
+            raise AssertionError("a release must not enumerate the live-pool index")
+
+        def values(self):
+            raise AssertionError("a release must not enumerate the live-pool index")
+
+        def __iter__(self):
+            raise AssertionError("a release must not enumerate the live-pool index")
+
+    monkeypatch.setattr(qs, "_pool_owner_token", _RefusingIndex())
+    thread_errors = []
+    monkeypatch.setattr(threading, "excepthook", lambda args: thread_errors.append(args))
+    owner_a, owner_b = _Owner(), _Owner()
+    qs.start_refresher(pool=owner_a, interval_s=0.05, fetcher=lambda: None)
+    qs.start_refresher(pool=owner_b, interval_s=0.05, fetcher=lambda: None)
+    releaser = threading.Thread(target=lambda: qs.stop_refresher(pool=owner_a), name="releaser")
+    releaser.start()
+    releaser.join(5)
+    assert not releaser.is_alive()
+    assert thread_errors == [], "the release enumerated the pool index"
+    assert len(qs._owner_tokens) == 1 and qs.is_refresher_running()
+    qs.stop_refresher(pool=owner_b)
     assert not qs.is_refresher_running() and _live_refresher_threads() == []
 
 
