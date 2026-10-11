@@ -8,7 +8,7 @@ import {
   quotaStaleMarker,
   StatusRule
 } from '../components/appChrome.js'
-import type { AccountUsageGroup } from '../gatewayTypes.js'
+import type { AccountUsageAccount, AccountUsageGroup } from '../gatewayTypes.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 type ReactNodeLike = React.ReactNode
@@ -188,6 +188,47 @@ const group = (overrides: Partial<AccountUsageGroup> & Pick<AccountUsageGroup, '
   windows: [],
   ...overrides
 })
+
+const account = (
+  overrides: Partial<AccountUsageAccount> & Pick<AccountUsageAccount, 'fingerprint' | 'state'>
+): AccountUsageAccount => ({
+  label: null,
+  entry_id: null,
+  metered: false,
+  read_health: 'ok',
+  windows: [],
+  fetched_at: '2026-08-28T09:59:30Z',
+  age_s: null,
+  attempted_at: null,
+  last_error: null,
+  error_status: null,
+  backoff_until: null,
+  recovery_at: null,
+  ...overrides
+})
+
+// The user's live shape: two Go accounts, the pool serving from bbbbbb (fresh), aaaaaa overflow.
+const goAccounts: AccountUsageAccount[] = [
+  account({
+    fingerprint: 'sha256:bbbbbb',
+    label: 'OPENCODE_GO_API_KEY_2',
+    state: 'covered',
+    windows: [
+      { period: '5h', used_percent: 1, reset_at: null },
+      { period: '7d', used_percent: 0, reset_at: null }
+    ]
+  }),
+  account({
+    fingerprint: 'sha256:aaaaaa',
+    label: 'OPENCODE_GO_API_KEY',
+    metered: true,
+    state: 'overflow',
+    windows: [
+      { period: '7d', used_percent: 100, reset_at: null },
+      { period: 'monthly', used_percent: 86, reset_at: null }
+    ]
+  })
+]
 
 const ALL_GROUPS: AccountUsageGroup[] = [
   group({
@@ -473,6 +514,48 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(secondary).not.toMatch(/^─ other {2}/)
     expect(primary.indexOf('│')).toBe(secondary.indexOf('│'))
     expect(primary.indexOf('50k/200k')).toBe(secondary.indexOf('codex'))
+
+    vi.useRealTimers()
+  })
+
+  it('keeps a non-active multi-account group numbers on its row when its sub-rows are not rendered', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // The active provider is anthropic, so go (multi-account) sits on the OTHER row and its
+    // per-account sub-rows are NOT rendered. The row must carry the SERVING account's own
+    // numbers (bbbbbb: 5h 1%, 7d 0%) - never a sum, never the other account's, never invisible.
+    const element = StatusRule({
+      ...baseProps,
+      cols: 160,
+      usage: {
+        ...baseProps.usage,
+        account_usage_active: 'anthropic',
+        account_usage_all: [
+          group({
+            provider: 'anthropic',
+            windows: [{ period: '5h', used_percent: 17, reset_at: '2026-08-28T13:00:00Z' }]
+          }),
+          group({
+            provider: 'opencode-go',
+            accounts: goAccounts,
+            multi_account: true,
+            serving: 'sha256:bbbbbb',
+            strategy: 'quota_aware'
+          })
+        ]
+      }
+    })
+
+    const rows = React.Children.toArray(element.props.children)
+    const other = capacityText(rows[2] as React.ReactElement<any>)
+
+    expect(other).toContain('5h 1%')
+    expect(other).toContain('7d 0%')
+    expect(other).not.toContain('100%')
+    expect(other).not.toContain('86%')
+    expect(other).not.toContain('2 accounts')
+    expect(other).not.toContain('err')
 
     vi.useRealTimers()
   })

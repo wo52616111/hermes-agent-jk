@@ -413,23 +413,42 @@ function quotaAccountStateColor(state: string, t: Theme): string {
 }
 
 /**
- * The provider-line badge for a per-account group (D29): it speaks for THIS session's account
- * (`activeAccount`), falling back to `serving`, and is never dropped while the group renders.
+ * The account the provider line speaks for. When the line carries fallback numbers
+ * (`preferServing`) it is the SERVING account, so the numbers and the badge never mix two
+ * accounts; otherwise it is THIS session's account (D29). Each falls back to the other, then
+ * to the first account.
  */
-function quotaAccountBadge(
+function providerLineAccount(
   group: AccountUsageGroup,
-  activeAccount?: string | null
-): { role: 'exhausted' | 'overflow'; text: string } | null {
-  const accounts = group.accounts
+  activeAccount: string | null,
+  preferServing: boolean
+): AccountUsageAccount | null {
+  const accounts = group.accounts ?? []
+  const order = preferServing ? [group.serving, activeAccount] : [activeAccount, group.serving]
 
-  if (!accounts?.length) {
-    return null
+  for (const fingerprint of order) {
+    const found = fingerprint ? accounts.find(account => account.fingerprint === fingerprint) : undefined
+
+    if (found) {
+      return found
+    }
   }
 
-  const account =
-    accounts.find(a => a.fingerprint === activeAccount) ??
-    accounts.find(a => a.fingerprint === group.serving) ??
-    accounts[0]
+  return accounts[0] ?? null
+}
+
+/**
+ * The provider-line badge for a per-account group (D29): the `overflow` / `exhausted` state of
+ * the account the line speaks for, or null when that account is covered. Never dropped while
+ * the group renders.
+ */
+function quotaAccountBadge(account: AccountUsageAccount | null): {
+  role: 'exhausted' | 'overflow'
+  text: string
+} | null {
+  if (!account) {
+    return null
+  }
 
   if (account.state === 'overflow') {
     return { role: 'overflow', text: ` overflow${account.metered ? '(metered)' : ''}` }
@@ -498,8 +517,10 @@ interface QuotaPiece {
  * A group with `accounts[]` (a `quota_aware` provider's per-account view, D19) renders its
  * provider line as `label ·N accounts` plus a state badge and pushes its windows to the
  * per-account sub-rows (`layoutQuotaAccounts`) - never a sum or an average across accounts.
- * When those sub-rows are TRIMMED because they do not fit `subRowsBudget`, the provider line
- * falls back to the SERVING account's OWN windows so the numbers are never invisible.
+ * When those sub-rows are TRIMMED - too narrow for `subRowsBudget`, or never rendered because
+ * the caller renders sub-rows for the active provider only - the provider line falls back to
+ * the SERVING account's OWN windows and badge, so the numbers are never invisible and the line
+ * never mixes two accounts.
  */
 export function layoutQuotaGroups(
   groups: AccountUsageGroup[],
@@ -512,29 +533,15 @@ export function layoutQuotaGroups(
   subRowsBudget?: number
 ) {
   const activeIndex = groups.findIndex(group => group.provider === activeProvider)
-  // The width the per-account sub-rows render at; the provider line's own budget when the caller
-  // does not render sub-rows at all (so a group whose sub-rows are absent shows its numbers).
+  // Width the per-account sub-rows render at; 0 when this call renders no sub-rows.
   const accountRowsBudget = subRowsBudget ?? budget
 
-  // A group whose sub-rows were trimmed (or never rendered) must carry the serving account's own
-  // windows on the provider line; one whose sub-rows rendered in full keeps them off (D29 shape).
   const accountsTrimmed = new Map<number, boolean>()
   groups.forEach((group, gi) => {
     if (Array.isArray(group.accounts) && group.accounts.length > 0) {
       accountsTrimmed.set(gi, !quotaAccountLayout(group, activeAccount ?? null, accountRowsBudget, t, now).full)
     }
   })
-
-  const servingWindows = (group: AccountUsageGroup) => {
-    const accounts = group.accounts ?? []
-
-    const account =
-      accounts.find(a => a.fingerprint === group.serving) ??
-      accounts.find(a => a.fingerprint === activeAccount) ??
-      accounts[0]
-
-    return account?.windows ?? []
-  }
 
   const keep = (count: number) =>
     groups
@@ -551,8 +558,6 @@ export function layoutQuotaGroups(
       const hasFreshnessAge = freshnessAgeS !== null
       const accountCount = Array.isArray(group.accounts) ? group.accounts.length : 0
       const trimmed = accountsTrimmed.get(gi) ?? false
-      // `·N accounts` belongs to the sub-row design: once the sub-rows are trimmed the provider
-      // line carries the serving account's real numbers instead.
       const countSuffix = showCount && !trimmed && accountCount > 1 ? ` ·${accountCount} accounts` : ''
 
       const separator = !leadingSeparator && gi === 0 ? '' : ' │'
@@ -568,9 +573,11 @@ export function layoutQuotaGroups(
 
       let windowCount = 0
 
-      // Windows live on the sub-rows while they render; when they are trimmed the provider line
-      // falls back to the SERVING account's own windows (never a sum, never another account's).
-      const inlineWindows = accountCount === 0 ? group.windows : trimmed && fallbackNumbers ? servingWindows(group) : []
+      const fallbackToServing = accountCount > 0 && trimmed
+      const lineAccount = providerLineAccount(group, activeAccount ?? null, fallbackToServing)
+
+      const inlineWindows =
+        accountCount === 0 ? group.windows : fallbackToServing && fallbackNumbers ? lineAccount?.windows ?? [] : []
 
       for (const window of inlineWindows) {
         if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
@@ -597,8 +604,7 @@ export function layoutQuotaGroups(
         })
       }
 
-      // D29: the badge speaks for THIS session's account and is never dropped while the group renders.
-      const badge = quotaAccountBadge(group, activeAccount)
+      const badge = quotaAccountBadge(lineAccount)
 
       if (badge) {
         pieces.push({ role: badge.role, text: badge.text })
@@ -1318,6 +1324,7 @@ export function StatusRule({
   const ctxCellWidth = stringWidth(`${ctxRowLabel}${ctxLabel}${tableContextBar}`)
   const now = Date.now()
 
+  // Renders no sub-rows for this non-active provider: pass subRowsBudget 0.
   const otherLeadCell = secondaryQuotaGroups[0]
     ? layoutQuotaGroups(
         [secondaryQuotaGroups[0]],
@@ -1325,7 +1332,9 @@ export function StatusRule({
         t,
         now,
         null,
-        false
+        false,
+        null,
+        0
       ).map((segment, index) => (index === 0 ? { ...segment, text: segment.text.trimStart() } : segment))
     : []
 
@@ -1349,7 +1358,8 @@ export function StatusRule({
       )
     : []
 
-  const remainingOtherQuota = layoutQuotaGroups(secondaryQuotaGroups.slice(1), tableRightBudget, t, now, null, false)
+  // Renders no sub-rows for these other providers: pass subRowsBudget 0.
+  const remainingOtherQuota = layoutQuotaGroups(secondaryQuotaGroups.slice(1), tableRightBudget, t, now, null, false, null, 0)
 
   // Per-account sub-rows for the active provider (D19/D29): each account's OWN windows and state,
   // the session's account bold. Absent when the active group has no per-account view.
@@ -1557,7 +1567,7 @@ export function StatusRule({
         pct={pct}
         quotaGroups={primaryQuotaGroups}
         quotaWindows={quotaWindows}
-        subRowsBudget={activeQuotaGroup ? capacityWidth : undefined}
+        subRowsBudget={activeQuotaGroup ? capacityWidth : 0}
         t={t}
       />
     )
@@ -1585,6 +1595,7 @@ export function StatusRule({
         ctxLabel=""
         quotaGroups={secondaryQuotaGroups}
         quotaWindows={[]}
+        subRowsBudget={0}
         t={t}
       />
     )

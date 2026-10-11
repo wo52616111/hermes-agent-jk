@@ -161,12 +161,79 @@ describe('layoutQuotaGroups per-account provider line', () => {
   })
 
   it('keeps the provider-line badge on a narrow terminal that drops the account count', () => {
-    // Budget fits `│ go overflow(metered)` but not the ` ·2 accounts` suffix.
+    // The line speaks for the SERVING account (aaaaaa: overflow(metered)); a budget that fits
+    // `│ go overflow(metered)` but not that account's own numbers keeps the badge, drops the count.
+    const group = goGroup({
+      serving: 'sha256:aaaaaa',
+      accounts: [
+        account({
+          fingerprint: 'sha256:aaaaaa',
+          label: 'OPENCODE_GO_API_KEY',
+          metered: true,
+          read_health: 'ok',
+          state: 'overflow',
+          windows: [
+            { period: '7d', used_percent: 100, reset_at: null },
+            { period: 'monthly', used_percent: 100, reset_at: null }
+          ]
+        }),
+        account({
+          fingerprint: 'sha256:bbbbbb',
+          label: 'OPENCODE_GO_API_KEY_2',
+          read_health: 'ok',
+          state: 'covered',
+          windows: [{ period: '5h', used_percent: 1, reset_at: null }]
+        })
+      ]
+    })
+
     const text = joined(
-      layoutQuotaGroups([goGroup()], stringWidth(' │ go overflow(metered)'), DEFAULT_THEME, NOW, 'opencode-go', true, 'sha256:aaaaaa')
+      layoutQuotaGroups([group], stringWidth(' │ go overflow(metered)'), DEFAULT_THEME, NOW, 'opencode-go', true, 'sha256:bbbbbb')
     )
 
     expect(text).toContain('overflow(metered)')
+    expect(text).not.toContain('2 accounts')
+  })
+
+  it('speaks for ONE account on the trimmed provider line: the serving account numbers AND its badge', () => {
+    // Session is on aaaaaa (overflow); the pool serves from bbbbbb (exhausted). With the sub-rows
+    // trimmed (subRowsBudget 0) the provider line must carry bbbbbb's own windows AND bbbbbb's
+    // badge - one account, never a mix, never a sum.
+    const group = goGroup({
+      serving: 'sha256:bbbbbb',
+      accounts: [
+        account({
+          fingerprint: 'sha256:bbbbbb',
+          label: 'OPENCODE_GO_API_KEY_2',
+          read_health: 'ok',
+          state: 'exhausted',
+          windows: [
+            { period: '5h', used_percent: 3, reset_at: null },
+            { period: '7d', used_percent: 4, reset_at: null }
+          ]
+        }),
+        account({
+          fingerprint: 'sha256:aaaaaa',
+          label: 'OPENCODE_GO_API_KEY',
+          metered: true,
+          read_health: 'ok',
+          state: 'overflow',
+          windows: [
+            { period: '7d', used_percent: 100, reset_at: null },
+            { period: 'monthly', used_percent: 86, reset_at: null }
+          ]
+        })
+      ]
+    })
+
+    const text = joined(layoutQuotaGroups([group], 9999, DEFAULT_THEME, NOW, 'opencode-go', true, 'sha256:aaaaaa', 0))
+
+    expect(text).toContain('5h 3%')
+    expect(text).toContain('7d 4%')
+    expect(text).toContain('exhausted')
+    expect(text).not.toContain('100%')
+    expect(text).not.toContain('86%')
+    expect(text).not.toContain('overflow')
     expect(text).not.toContain('2 accounts')
   })
 
