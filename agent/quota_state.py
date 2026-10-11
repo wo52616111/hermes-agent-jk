@@ -1510,7 +1510,10 @@ def _release_owner(token: int, timeout: float = 2.0) -> None:
     if refresher is not None:
         refresher.stop(timeout)
         with _refresher_guard:
-            if _refresher is refresher and not refresher.running:
+            # Re-check under the guard, which also serializes every registration+start(): an
+            # owner that registered while this stop ran has already started this refresher, so
+            # clearing it here would strand the worker that owner just started (D42).
+            if _refresher is refresher and not refresher.running and not _owner_tokens:
                 _refresher = None
 
 
@@ -1529,8 +1532,11 @@ def start_refresher(*, pool=None, interval_s: int = REFRESH_INTERVAL_S,
             _owner_finalizers[token] = weakref.finalize(pool, _release_owner, token)
         if _refresher is None:
             _refresher = QuotaRefresher(interval_s=interval_s, fetcher=fetcher)
-        refresher = _refresher
-    return refresher.start()
+        # Register the owner and start the worker as ONE step under the guard, so a concurrent
+        # last-owner release can never clear ``_refresher`` between this owner's registration
+        # and its ``start()`` - which would leave the new owner with no worker and start an
+        # orphan the process-wide stop can no longer reach (D42).
+        return _refresher.start()
 
 
 def stop_refresher(timeout: float = 2.0, *, pool=None) -> None:
@@ -1553,7 +1559,7 @@ def stop_refresher(timeout: float = 2.0, *, pool=None) -> None:
     if refresher is not None:
         refresher.stop(timeout)
         with _refresher_guard:
-            if _refresher is refresher and not refresher.running:
+            if _refresher is refresher and not refresher.running and not _owner_tokens:
                 _refresher = None
 
 

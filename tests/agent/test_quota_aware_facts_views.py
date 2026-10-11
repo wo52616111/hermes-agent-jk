@@ -26,6 +26,14 @@ NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
 PROVIDER = "opencode-go"
 
 
+class _Owner:
+    """A bare, hashable, weak-referenceable stand-in for a live quota_aware pool."""
+
+
+def _live_refresher_threads():
+    return [t for t in threading.enumerate() if t.name == "quota-refresher" and t.is_alive()]
+
+
 @pytest.fixture
 def qdir(tmp_path, monkeypatch):
     """Shared, cross-profile quota dir with no real network/credential access."""
@@ -1264,3 +1272,130 @@ def test_timed_out_stop_then_restart_keeps_a_live_worker(qdir, monkeypatch):
     finally:
         release.set()
         qs.stop_refresher()
+
+
+def test_release_vs_register_race_keeps_the_refresher_published(qdir, monkeypatch):
+    """D42: the owner count and the worker lifecycle are serialized under one guard. When the
+    last owner's release races a NEW owner's registration, the new owner's ``start()`` lands on
+    the still-published refresher: the live owner keeps a running worker, a later owner reuses
+    it (no second worker), and no orphan worker outlives every owner.
+
+    Deterministic interleaving (no reliance on the scheduler): the last owner's ``stop()`` is
+    held after it completes but before its guard re-check, while owner B is held after it grabs
+    the refresher reference but before it calls ``start()``."""
+    owner_a = _Owner()
+    qs.start_refresher(pool=owner_a, interval_s=0.05, fetcher=lambda: None)
+    refresher_obj = qs._refresher
+    assert qs.is_refresher_running()
+
+    a_stopped, a_go, b_parked, b_go = (threading.Event() for _ in range(4))
+    real_stop, real_start = qs.QuotaRefresher.stop, qs.QuotaRefresher.start
+
+    def gated_stop(self, timeout=2.0):
+        result = real_stop(self, timeout)
+        if threading.current_thread().name == "releaser":
+            a_stopped.set()
+            a_go.wait(5)              # hold AFTER stop() returns, BEFORE the guard re-check
+        return result
+
+    def gated_start(self):
+        if threading.current_thread().name == "owner-b":
+            b_parked.set()
+            b_go.wait(5)              # hold AFTER grabbing the refresher ref, BEFORE start()
+        return real_start(self)
+
+    monkeypatch.setattr(qs.QuotaRefresher, "stop", gated_stop)
+    monkeypatch.setattr(qs.QuotaRefresher, "start", gated_start)
+    releaser = threading.Thread(target=lambda: qs.stop_refresher(pool=owner_a), name="releaser")
+    releaser.start()
+    owner_b_thread = None
+    try:
+        assert a_stopped.wait(5)
+        owner_b = _Owner()
+        owner_b_thread = threading.Thread(
+            target=lambda: qs.start_refresher(pool=owner_b, interval_s=0.05, fetcher=lambda: None),
+            name="owner-b")
+        owner_b_thread.start()
+        assert b_parked.wait(3)
+        a_go.set()                    # let the last owner's release attempt its unpublish
+        # A correct fix makes that release wait for B's start under the guard, so the refresher
+        # stays published; the buggy version unpublishes it here.
+        deadline = time.monotonic() + 0.5
+        while qs._refresher is not None and time.monotonic() < deadline:
+            time.sleep(0.005)
+        published_after_a = qs._refresher
+        b_go.set()
+        owner_b_thread.join(5)
+        releaser.join(5)
+        assert published_after_a is refresher_obj, \
+            "the last owner unpublished the refresher while a new owner was registering"
+        assert qs._refresher is refresher_obj
+        assert qs.is_refresher_running(), "a live owner was left with no running worker"
+        assert len(qs._owner_tokens) == 1
+        assert len(_live_refresher_threads()) == 1
+
+        # A later owner must REUSE the published refresher, never build a second worker.
+        owner_c = _Owner()
+        qs.start_refresher(pool=owner_c, interval_s=0.05, fetcher=lambda: None)
+        assert len(_live_refresher_threads()) == 1, "a second worker was built for one process"
+
+        qs.stop_refresher(pool=owner_b)
+        qs.stop_refresher(pool=owner_c)
+        deadline = time.monotonic() + 2
+        while _live_refresher_threads() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert _live_refresher_threads() == [], "an orphan worker outlived every owner"
+    finally:
+        a_go.set()
+        b_go.set()
+        monkeypatch.setattr(qs.QuotaRefresher, "stop", real_stop)
+        monkeypatch.setattr(qs.QuotaRefresher, "start", real_start)
+        if refresher_obj is not None:
+            refresher_obj.stop(1.0)   # reach any worker the race left unpublished
+        qs.stop_refresher()
+        if owner_b_thread is not None:
+            owner_b_thread.join(2)
+        releaser.join(2)
+        for t in _live_refresher_threads():
+            t.join(1)
+
+
+def test_start_replaces_a_worker_committed_to_exit(qdir, monkeypatch):
+    """D42: a worker that has already committed to leaving its loop (``_exiting``) must be
+    REPLACED by a racing ``start()``, never revived. Reviving a leaving worker returns a
+    refresher that dies as soon as that worker finishes, leaving a live owner with no worker."""
+    exiting_reached, exit_go = threading.Event(), threading.Event()
+    real_exit_pending = qs.QuotaRefresher._exit_pending
+
+    def gated_exit_pending(self):
+        leaving = real_exit_pending(self)
+        if leaving and threading.current_thread().name == "quota-refresher":
+            exiting_reached.set()
+            exit_go.wait(5)           # stay alive, but committed to leaving
+        return leaving
+
+    refresher = qs.QuotaRefresher(interval_s=0.05, fetcher=lambda: None)
+    refresher.start()
+    old = refresher._thread
+    try:
+        assert old is not None and old.is_alive()
+        monkeypatch.setattr(qs.QuotaRefresher, "_exit_pending", gated_exit_pending)
+        # A stop() sets ``_stop``; the worker reaches ``_exit_pending`` and parks there with
+        # ``_exiting`` already recorded, so it is alive yet on its way out.
+        stopper = threading.Thread(target=lambda: refresher.stop(0.2), name="stopper")
+        stopper.start()
+        assert exiting_reached.wait(3)
+        stopper.join(3)
+        assert refresher._exiting is True and old.is_alive()
+        # The racing start() must replace the leaving worker, not revive it.
+        refresher.start()
+        assert refresher._thread is not old, "a leaving worker was revived instead of replaced"
+        assert refresher.running is True
+        exit_go.set()
+        old.join(3)
+        assert not old.is_alive()
+        assert refresher.running is True, "the live owner was left with no worker"
+    finally:
+        exit_go.set()
+        monkeypatch.setattr(qs.QuotaRefresher, "_exit_pending", real_exit_pending)
+        refresher.stop(1.0)
