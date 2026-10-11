@@ -544,3 +544,118 @@ def test_configured_metered_overflow_target_resolves(qdir, quota_aware, monkeypa
     pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa", label="OPENCODE_GO_API_KEY_2"),
                   _entry("b", priority=1, fingerprint="sha256:bbb", label="OPENCODE_GO_API_KEY")])
     assert pool.select().id == "b"  # policy usable -> covered-first ordering
+
+
+# ============================================================================
+# 8. D46(a). "configuration did not take effect" metered warning (once per load)
+# ============================================================================
+
+
+def _d46a_records(caplog):
+    return [r for r in caplog.records if "configuration did not take effect" in r.message]
+
+
+def test_D46a_fires_once_when_configured_target_matches_no_account(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """Case 1: a billing-capable provider (opencode-go) whose configured ``metered_overflow``
+    list names no account -> WARN once per load, naming the account and the targets (D46a)."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": ["NO_SUCH_ACCOUNT"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa", label="OPENCODE_GO_API_KEY_2"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb", label="OPENCODE_GO_API_KEY")])
+    with caplog.at_level(logging.WARNING):
+        pool.select()
+        pool.select()
+    recs = _d46a_records(caplog)
+    assert len(recs) == 1
+    msg = recs[0].message
+    assert "NO_SUCH_ACCOUNT" in msg                                  # the configured targets
+    assert "OPENCODE_GO_API_KEY_2" in msg and "OPENCODE_GO_API_KEY" in msg  # the account(s)
+    assert "opencode-go" in msg
+
+
+def test_D46a_fires_once_when_no_metered_overflow_configured(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """Case 2: no ``metered_overflow`` at all on a billing-capable provider -> WARN once."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: {})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    pool = _pool([_entry("a", fingerprint="sha256:aaa", label="OPENCODE_GO_API_KEY")])
+    with caplog.at_level(logging.WARNING):
+        pool.select()
+        pool.select()
+    recs = _d46a_records(caplog)
+    assert len(recs) == 1
+    assert "not configured" in recs[0].message
+    assert "OPENCODE_GO_API_KEY" in recs[0].message
+
+
+def test_D46a_silent_when_configured_target_resolves(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """Case 3: a correctly configured list names an account -> (a) does NOT fire."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": ["OPENCODE_GO_API_KEY"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa", label="OPENCODE_GO_API_KEY_2"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb", label="OPENCODE_GO_API_KEY")])
+    with caplog.at_level(logging.WARNING):
+        pool.select()
+    assert _d46a_records(caplog) == []
+
+
+def test_D46a_does_not_repeat_across_selections_in_one_load(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """D46's last sentence: (a) is per load, never per selection."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: {})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    with caplog.at_level(logging.WARNING):
+        for _ in range(5):
+            pool.select()
+            pool.quota_choose()
+            pool.order_entries(list(pool.entries()))
+    assert len(_d46a_records(caplog)) == 1
+
+
+def test_missing_earliest_reset_first_defaults_true(qdir, quota_aware, monkeypatch, tmp_path):
+    """D39/D5: a policy block that omits ``earliest_reset_first`` resolves to the documented
+    default (true) and keeps the same-priority drain tie-break."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": ["OPENCODE_GO_API_KEY"]})
+    cp._POLICY_WARNED.clear()
+    assert qsel.EARLIEST_RESET_FIRST_DEFAULT is True
+    entries = [_entry("a", label="OPENCODE_GO_API_KEY")]
+    policy, usable = cp.resolve_selection_policy(PROVIDER, entries)
+    assert usable is True
+    assert policy.earliest_reset_first is True
+    # ...and the default actually engages the drain tie-break within one priority (D39).
+    a = _entry("A", priority=0)
+    b = _entry("B", priority=0)
+    states = _states(
+        A={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=300)]},
+        B={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=100)]},
+    )
+    ordered = [e.id for e in qsel.ordered_candidates([a, b], states, policy, NOW)]
+    assert ordered == ["B", "A"]
