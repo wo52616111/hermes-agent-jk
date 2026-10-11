@@ -38,8 +38,8 @@ class _PoolWith:
         return list(self._entries)
 
 
-def _live_entry(fingerprint, token):
-    return SimpleNamespace(last_status="ok", access_token=token,
+def _live_entry(fingerprint, token, source="env:A_KEY"):
+    return SimpleNamespace(last_status="ok", access_token=token, source=source,
                            extra={} if fingerprint is None else {"secret_fingerprint": fingerprint})
 
 
@@ -1229,10 +1229,30 @@ def test_an_unresolvable_live_entry_keeps_the_stored_accounts_visible(qdir, quot
     """A live entry the store can neither name nor read a secret from is not evidence that the other
     stored accounts are retired: a partial set must not blank the panel (D41)."""
     _store(fp="sha256:kept", windows=[_facts_window(percent=10.0)])
-    pool = _PoolWith(SimpleNamespace(last_status="ok", access_token="", extra={}))
-    view = qs.read_view("default", PROVIDER, now=NOW, pool=pool)
-    assert view is not None
-    assert [a["fingerprint"] for a in view["accounts"]] == ["sha256:kept"]
+    unlabelled = SimpleNamespace(last_status="ok", access_token="", extra={})
+    owned = SimpleNamespace(last_status="ok", access_token="", source="manual", extra={})
+    for entry in (unlabelled, owned):
+        view = qs.read_view("default", PROVIDER, now=NOW, pool=_PoolWith(entry))
+        assert view is not None
+        assert [a["fingerprint"] for a in view["accounts"]] == ["sha256:kept"]
+
+
+def test_an_owned_entry_never_switches_the_retirement_filter_off(qdir, quota_aware):
+    """A credential the store never names (``manual``) is identified by the secret it holds, so its
+    presence cannot leave the pool unproven and keep every retired account on the panel: the view
+    holds one account per key rotation and the view file stops growing (D41, criterion 10)."""
+    sizes = []
+    for index in range(6):
+        _store(fp=f"sha256:key-{index:02d}", windows=[_facts_window(percent=12.0)])
+        manual = SimpleNamespace(last_status="ok", access_token="manual-secret", source="manual",
+                                 extra={})
+        pool = _PoolWith(manual, _live_entry(f"sha256:key-{index:02d}", f"key-{index:02d}"))
+        qs.update_view("default", PROVIDER, now=NOW, pool=pool)
+        sizes.append(qs.view_path("default", PROVIDER).stat().st_size)
+    written = qs._read_view_raw("default", PROVIDER)
+    assert written is not None
+    assert [a["fingerprint"] for a in written["accounts"]] == ["sha256:key-05"]
+    assert sizes[-1] == sizes[0]
 
 
 def test_the_live_fingerprint_hook_resolves_without_bootstrapping(qdir, monkeypatch):
@@ -1271,9 +1291,20 @@ def test_live_entry_fingerprints_names_every_live_identity_and_refuses_partial_s
     assert live_entry_identities([healing]) == ({"sha256:stored", rotated}, {rotated})
     assert live_entry_fingerprints([healing, dead]) == {"sha256:stored", rotated}
     assert live_entry_fingerprints([]) is None
-    unnamed = SimpleNamespace(last_status="ok", access_token="bill-me", extra={})
-    assert live_entry_fingerprints([unnamed]) is None
-    assert live_entry_fingerprints([unnamed, healing]) is None
+    # The store is responsible for naming borrowed rows and rows that name no source, so a missing
+    # name there is an incomplete store: no set of names may be taken as proof.
+    borrowed = SimpleNamespace(last_status="ok", access_token="bill-me", source="env:BILLING_KEY",
+                               extra={})
+    unlabelled = SimpleNamespace(last_status="ok", access_token="bill-me", extra={})
+    for partial in (borrowed, unlabelled):
+        assert live_entry_fingerprints([partial]) is None
+        assert live_entry_fingerprints([partial, healing]) is None
+    # An owned row is never named by the store: the secret it holds is its identity.
+    owned = SimpleNamespace(last_status="ok", access_token="bill-me", source="manual", extra={})
+    assert live_entry_fingerprints([owned]) == {str(fingerprint_secret_value("bill-me"))}
+    unidentified = SimpleNamespace(last_status="ok", access_token="", source="manual", extra={})
+    assert live_entry_fingerprints([unidentified]) is None
+    assert live_entry_fingerprints([unidentified, healing]) is None
 
 
 def test_refresher_carries_enqueue_profile_scope(qdir, tmp_path, monkeypatch):

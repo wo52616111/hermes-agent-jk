@@ -802,16 +802,21 @@ def provider_quota_multi_account(provider: str) -> bool:
 
 
 def live_entry_identities(entries) -> Optional[tuple[set, set]]:
-    """``(every identity the live pool entries answer to, the ones a current secret names)``.
+    """``(every identity the live pool entries answer to, the ones their current secrets name)``.
 
     The persisted ``secret_fingerprint`` is what the stored quota facts and the view's serving window
     are keyed by; the fingerprint of the secret an entry bills with is what a freshly added or just
-    rotated credential actually holds. The two differ until the store writes the new one, and both
-    name the same account. None when a live entry has no persisted fingerprint: the store then cannot
-    say which stored facts belong to it, so no set of names is proof that the others are retired.
+    rotated credential holds. Both name the same account while the store's own record of it is still
+    missing or behind.
+
+    An entry the store is responsible for naming (a borrowed source, or one that names none) without
+    that name means the store's naming is incomplete, so no set of names proves that the other stored
+    accounts are retired - the result is None. An entry the store never names (an owned source such
+    as ``manual``) is identified by the secret it holds, and only one with neither identity is
+    unproven.
     """
     from agent.credential_pool import STATUS_DEAD
-    from agent.credential_persistence import fingerprint_secret_value
+    from agent.credential_persistence import fingerprint_secret_value, is_borrowed_credential_source
     live: set = set()
     billed: set = set()
     for entry in entries or []:
@@ -819,17 +824,21 @@ def live_entry_identities(entries) -> Optional[tuple[set, set]]:
             continue
         extra = getattr(entry, "extra", None) or {}
         stored = extra.get("secret_fingerprint")
-        if not (isinstance(stored, str) and stored.startswith("sha256:")):
+        named = isinstance(stored, str) and stored.startswith("sha256:")
+        source = getattr(entry, "source", None)
+        if not named and (not source or is_borrowed_credential_source(source, getattr(entry, "provider", None))):
             return None
-        live.add(stored)
         # The secret-bearing fields of a pool entry, in the order credential_persistence prefers.
         values = [getattr(entry, name, None) for name in ("agent_key", "access_token", "refresh_token")]
         values += [extra.get(name) for name in ("api_key", "token", "secret")]
-        for value in values:
-            current = fingerprint_secret_value(value)
-            if current:
-                live.add(current)
-                billed.add(current)
+        current = next((fp for fp in map(fingerprint_secret_value, values) if fp), None)
+        if not named and not current:
+            return None
+        if named:
+            live.add(stored)
+        if current:
+            live.add(current)
+            billed.add(current)
     return (live, billed) if live else None
 
 
