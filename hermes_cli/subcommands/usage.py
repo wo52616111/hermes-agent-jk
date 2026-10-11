@@ -53,30 +53,62 @@ def _usage_view(provider: str) -> dict | None:
         return None
 
 
+def _account_record(account: dict) -> dict:
+    """One account as the CLI's nested document carries it: short fingerprint, effective ``state``
+    and ``read_health``, this account's own windows. Never key material."""
+    return {
+        "label": account.get("label"),
+        "fingerprint": _short_fingerprint(account.get("fingerprint")),
+        "state": account.get("state"),
+        "metered": bool(account.get("metered")),
+        "read_health": account.get("read_health"),
+        "last_error": account.get("last_error"),
+        "attempted_at": account.get("attempted_at"),
+        "age_s": account.get("age_s"),
+        "windows": [
+            {"period": w.get("period"), "used_percent": w.get("used_percent"),
+             "resets_at": w.get("reset_at"), "status": w.get("status")}
+            for w in account.get("windows") or []
+        ],
+    }
+
+
 def _usage_accounts_document(provider: str) -> list[dict]:
     """Nested per-account records (D20): effective ``state`` AND ``read_health`` per account, read
     through ``read_view``. Empty for a provider whose legacy group is unchanged."""
     view = _usage_view(provider)
     if not view:
         return []
-    records = []
-    for account in view.get("accounts") or []:
-        records.append({
-            "label": account.get("label"),
-            "fingerprint": _short_fingerprint(account.get("fingerprint")),
-            "state": account.get("state"),
-            "metered": bool(account.get("metered")),
-            "read_health": account.get("read_health"),
-            "last_error": account.get("last_error"),
-            "attempted_at": account.get("attempted_at"),
-            "age_s": account.get("age_s"),
-            "windows": [
-                {"period": w.get("period"), "used_percent": w.get("used_percent"),
-                 "resets_at": w.get("reset_at"), "status": w.get("status")}
-                for w in account.get("windows") or []
-            ],
-        })
-    return records
+    return [_account_record(account) for account in view.get("accounts") or []]
+
+
+def _subscription_group_from_view(provider: str, view: dict) -> dict:
+    """A subscription group built from a ``quota_aware`` provider's per-profile view (D41).
+
+    A ``quota_aware`` provider no longer writes a legacy ``status_groups()`` snapshot (B1), so a
+    subscription that exists only as per-account facts has no group to attach to: build one here so
+    ``hermes usage --all-subscriptions`` never reports an empty list for a provider the gateway
+    renders. ``windows`` is the SERVING account's own - never a sum or an average (D14/D34).
+    """
+    accounts = list(view.get("accounts") or [])
+    by_fp = {a.get("fingerprint"): a for a in accounts}
+    serving = by_fp.get(view.get("serving")) or (accounts[0] if accounts else {})
+    return {
+        "provider": provider,
+        "fetched_at": serving.get("fetched_at"),
+        "age_s": serving.get("age_s"),
+        "error": None,
+        "backoff_until": serving.get("backoff_until"),
+        "windows": [
+            {"period": w.get("period"), "used_percent": w.get("used_percent"), "reset_at": w.get("reset_at")}
+            for w in serving.get("windows") or []
+        ],
+        "hint": None,
+        "multi_account": len(accounts) > 1,
+        "states": dict(view.get("states") or {}),
+        "strategy": view.get("strategy"),
+        "accounts": [_account_record(a) for a in accounts],
+    }
 
 
 def _refresh_accounts(provider: str) -> int:
@@ -147,12 +179,20 @@ def _cmd_usage_subscriptions(args: argparse.Namespace) -> int:
             if accounts:
                 outcomes[provider] = f"{outcomes[provider]}; {accounts} accounts"
     groups = [g for g in quota_state.status_groups() if g["provider"] in targets]
-    # Additive (D20): each group gains its per-account array read through ``read_view``; the
-    # ``subscriptions`` array's existing keys and semantics are untouched.
     for group in groups:
         accounts = _usage_accounts_document(group["provider"])
         if accounts:
             group["accounts"] = accounts
+    # A provider whose state exists only as per-account facts (B1 stopped writing a legacy
+    # snapshot for quota_aware providers) has no status group above: add it from its view so the
+    # subscriptions array is never silently missing a provider the gateway renders.
+    known = {group["provider"] for group in groups}
+    for provider in targets:
+        if provider in known:
+            continue
+        view = _usage_view(provider)
+        if view and view.get("accounts"):
+            groups.append(_subscription_group_from_view(provider, view))
     if getattr(args, "json", False):
         print(json.dumps({"subscriptions": groups, "refresh": outcomes}, indent=2))
         return 0

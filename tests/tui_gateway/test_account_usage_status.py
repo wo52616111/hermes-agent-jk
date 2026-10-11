@@ -625,6 +625,49 @@ def test_quota_usage_tick_reages_a_session_cache_without_reading_provider_state(
     assert usage["account_usage_all"][0]["age_s"] >= 120
 
 
+def test_quota_usage_tick_reages_each_account_from_its_own_fetched_at(monkeypatch):
+    """The idle clock must age each account from ITS OWN ``fetched_at``: an account whose view was
+    read 45 minutes ago must not keep a frozen ``age_s`` while the provider line's age advances,
+    or a stale account keeps looking fresh on its sub-row (`·45m` never appears)."""
+    from datetime import timedelta
+
+    from tui_gateway import entry
+
+    fetched_at = datetime.now(timezone.utc) - timedelta(minutes=45)
+    cached_groups = [{
+        "provider": "opencode-go",
+        "fetched_at": fetched_at.isoformat(),
+        "age_s": 0,
+        "windows": [{"period": "7d", "used_percent": 1.0}],
+        "serving": "sha256:bbbbbb",
+        "accounts": [
+            {
+                "fingerprint": "sha256:bbbbbb",
+                "label": "OPENCODE_GO_API_KEY_2",
+                "state": "covered",
+                "read_health": "ok",
+                "fetched_at": fetched_at.isoformat(),
+                "age_s": 0,
+                "windows": [{"period": "7d", "used_percent": 1.0}],
+            },
+        ],
+    }]
+    emitted = []
+
+    def unexpected_provider_read():
+        raise AssertionError("idle tick must not read provider state")
+
+    monkeypatch.setattr(server, "_account_usage_all_wire", unexpected_provider_read)
+    monkeypatch.setattr(server, "_emit", lambda *args: emitted.append(args))
+    monkeypatch.setattr(server, "_sessions", {"sid": {"agent": None, "_account_usage_all": cached_groups}})
+
+    entry._publish_quota_usage()
+
+    group = emitted[0][2]["usage"]["account_usage_all"][0]
+    assert group["age_s"] >= 45 * 60
+    assert group["accounts"][0]["age_s"] >= 45 * 60
+
+
 def test_quota_usage_seed_replaces_an_empty_prebootstrap_session_cache(monkeypatch):
     from tui_gateway import entry
 

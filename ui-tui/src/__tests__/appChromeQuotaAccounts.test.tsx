@@ -124,7 +124,6 @@ describe('quotaStaleMarker multi-account marker', () => {
     expect(quotaStaleMarker({ age_s: null, error: { status: 0, message: 'multi_account' }, multi_account: true })).toBe(
       '·multi'
     )
-    // A real error status still renders as today.
     expect(quotaStaleMarker({ age_s: null, error: { status: 429, message: 'rate limited' }, multi_account: null })).toBe(
       '·429'
     )
@@ -132,13 +131,27 @@ describe('quotaStaleMarker multi-account marker', () => {
 })
 
 describe('layoutQuotaGroups per-account provider line', () => {
-  it('shows the account count and never blends the accounts into one number', () => {
-    const text = joined(layoutQuotaGroups([goGroup()], 9999, DEFAULT_THEME, NOW, 'opencode-go', true, 'sha256:bbbbbb'))
+  it('shows the account count and no inline percentage while the sub-rows have room', () => {
+    const group = goGroup()
+    const text = joined(layoutQuotaGroups([group], 9999, DEFAULT_THEME, NOW, 'opencode-go', true, 'sha256:bbbbbb'))
 
     expect(text).toContain('go ·2 accounts')
     expect(text).not.toContain('err')
-    // The provider line carries no percentage: the windows live on the sub-rows, unsummed.
+    // With room the numbers live on the sub-rows, unsummed - the provider line carries none.
     expect(text).not.toContain('%')
+    expect(layoutQuotaAccounts(group, 'sha256:bbbbbb', 9999, DEFAULT_THEME, NOW)).toHaveLength(2)
+  })
+
+  it("falls back to the SERVING account's own numbers when the sub-rows are trimmed", () => {
+    const group = goGroup()
+    // A budget too small for the sub-rows: the provider line must carry the SERVING account's
+    // own windows (bbbbbb: 5h 1%, 7d 0%) - never a sum, never the other account's numbers.
+    const trimmed = joined(layoutQuotaGroups([group], 24, DEFAULT_THEME, NOW, 'opencode-go', true, 'sha256:bbbbbb'))
+
+    expect(trimmed).toBe(' │ go 5h 1%·7d 0%')
+    expect(trimmed).not.toContain('100%')
+    expect(trimmed).not.toContain('86%')
+    expect(trimmed).not.toContain('2 accounts')
   })
 
   it('puts the session-active account state badge on the provider line', () => {
@@ -223,6 +236,38 @@ describe('layoutQuotaAccounts sub-rows', () => {
     expect(joined(narrow[0]!.segments)).toBe(activeRow)
   })
 
+  it('keeps every sub-row that fits on its own even when their widths sum past the budget', () => {
+    // Two independent sub-rows (own Boxes, no shared horizontal budget): widths 41 and 51 each
+    // fit in 80, but their sum (92) does not - summing the widths would discard the layout and
+    // hide an account's state and numbers on an 80-column terminal.
+    const group = goGroup({
+      accounts: [
+        account({
+          fingerprint: 'sha256:aaaaaa',
+          label: 'A'.repeat(21),
+          read_health: 'ok',
+          state: 'covered',
+          windows: [{ period: '7d', used_percent: 0, reset_at: null }]
+        }),
+        account({
+          fingerprint: 'sha256:bbbbbb',
+          label: 'B'.repeat(28),
+          read_health: 'ok',
+          state: 'overflow',
+          windows: [{ period: '7d', used_percent: 100, reset_at: null }]
+        })
+      ]
+    })
+
+    const rows = layoutQuotaAccounts(group, null, 80, DEFAULT_THEME, NOW)
+    const widths = rows.map(row => row.segments.reduce((sum, segment) => sum + stringWidth(segment.text), 0))
+
+    expect(rows).toHaveLength(2)
+    expect(widths).toEqual([41, 51])
+    expect(Math.max(...widths)).toBeLessThanOrEqual(80)
+    expect(widths.reduce((sum, width) => sum + width, 0)).toBeGreaterThan(80)
+  })
+
   it('returns nothing for a group without a per-account view', () => {
     expect(layoutQuotaAccounts({ ...goGroup(), accounts: undefined }, null, 9999, DEFAULT_THEME, NOW)).toEqual([])
   })
@@ -234,6 +279,27 @@ describe('accountStaleMarker', () => {
     expect(accountStaleMarker({ read_health: 'ok', age_s: 60, error_status: null })).toBe('')
     expect(accountStaleMarker({ read_health: 'error', age_s: null, error_status: 429 })).toBe('·429')
     expect(accountStaleMarker({ read_health: 'error', age_s: null, error_status: 500 })).toBe('·err')
+  })
+
+  it('renders the compact age on a sub-row once the idle clock re-aged the account', () => {
+    // The gateway's idle clock re-ages each account from its OWN fetched_at, so a 45-minute-old
+    // read (age_s 2700) surfaces as `·45m` on the account's sub-row - never the provider's age.
+    const stale = goGroup({
+      accounts: [
+        account({
+          fingerprint: 'sha256:bbbbbb',
+          label: 'OPENCODE_GO_API_KEY_2',
+          read_health: 'ok',
+          state: 'covered',
+          age_s: 45 * 60,
+          windows: [{ period: '7d', used_percent: 1, reset_at: null }]
+        })
+      ]
+    })
+
+    const rows = layoutQuotaAccounts(stale, 'sha256:bbbbbb', 9999, DEFAULT_THEME, NOW)
+
+    expect(joined(rows[0]!.segments)).toContain('·45m')
   })
 })
 

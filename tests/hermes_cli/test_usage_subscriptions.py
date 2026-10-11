@@ -122,3 +122,29 @@ def test_all_subscriptions_human_output_lists_each_account(qdir, monkeypatch, ca
     assert "OPENCODE_GO_API_KEY_2 [bbb444]" in out
     assert "overflow(metered)" in out
     assert "sha256" not in out
+
+
+def test_all_subscriptions_reports_a_provider_with_only_per_account_facts(qdir, monkeypatch, capsys):
+    """A ``quota_aware`` provider no longer writes a legacy snapshot (B1), so ``status_groups()``
+    has no entry for it. The CLI must still list it - built from its per-account view - instead of
+    printing an empty ``subscriptions`` list while the gateway renders the same accounts. This does
+    NOT mock ``status_groups``: it exercises the real integration path."""
+    _store("sha256:bbb444555666", "OPENCODE_GO_API_KEY_2", [_window(period="5h", percent=1.0)])
+    _store("sha256:aaa111222333", "OPENCODE_GO_API_KEY", [_window(percent=100.0)])
+
+    from hermes_cli.subcommands.usage import cmd_usage
+
+    assert qs.status_groups() == []  # no legacy snapshot on disk for the quota_aware provider
+    assert cmd_usage(_args()) == 0
+    doc = json.loads(capsys.readouterr().out)
+
+    subs = {g["provider"]: g for g in doc["subscriptions"]}
+    assert PROVIDER in subs
+    by_label = {a["label"]: a for a in subs[PROVIDER]["accounts"]}
+    assert set(by_label) == {"OPENCODE_GO_API_KEY_2", "OPENCODE_GO_API_KEY"}
+    assert by_label["OPENCODE_GO_API_KEY_2"]["state"] == "covered"
+    assert by_label["OPENCODE_GO_API_KEY"]["state"] == "overflow"
+    assert by_label["OPENCODE_GO_API_KEY"]["metered"] is True
+    # The provider line carries the SERVING account's own windows, never a blend.
+    assert {w["period"] for w in subs[PROVIDER]["windows"]} == {"5h"}
+    assert "sha256" not in json.dumps(doc)
