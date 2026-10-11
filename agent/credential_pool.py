@@ -121,8 +121,7 @@ STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
 STRATEGY_LEAST_USED = "least_used"
 # Quota-aware selection (spec D3): rank accounts by their own subscription usage so a spent
-# plan is never picked while a covered sibling exists. B1 wires the strategy name, the
-# per-account facts/views and the refresher; the ranking itself lands in B2.
+# plan is never picked while a covered sibling exists.
 STRATEGY_QUOTA_AWARE = "quota_aware"
 SUPPORTED_POOL_STRATEGIES = {
     STRATEGY_FILL_FIRST,
@@ -1019,19 +1018,19 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
     # ---- quota-aware lifecycle (D42) --------------------------------------
 
     def start_quota_refresher(self) -> "CredentialPool":
-        """Start (idempotently) the process-wide quota refresher for this pool."""
+        """Register this pool as a live owner of the process-wide quota refresher (D42)."""
         try:
             from agent import quota_state as qs
-            qs.start_refresher()
+            qs.start_refresher(pool=self)
         except Exception:  # noqa: BLE001
             logger.debug("quota refresher start failed for %s", self.provider, exc_info=True)
         return self
 
     def stop_quota_refresher(self) -> None:
-        """Stop the process-wide quota refresher (pool teardown)."""
+        """Release this pool's hold; the refresher stops once no live pool holds it (D42)."""
         try:
             from agent import quota_state as qs
-            qs.stop_refresher()
+            qs.stop_refresher(pool=self)
         except Exception:  # noqa: BLE001
             logger.debug("quota refresher stop failed for %s", self.provider, exc_info=True)
 
@@ -3020,7 +3019,7 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
     return seed.result
 
 
-def load_pool(provider: str) -> CredentialPool:
+def load_pool(provider: str, *, quota_bootstrap: bool = True) -> CredentialPool:
     provider = (provider or "").strip().lower()
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS:
         # One-time heal for installs that forked this grant across profiles
@@ -3092,9 +3091,11 @@ def load_pool(provider: str) -> CredentialPool:
     # profile leaves them out of the profile's own store (#100339).
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider):
         pool._borrowed_root_ids = set(disk_ids)
-    if pool._strategy == STRATEGY_QUOTA_AWARE:
+    if pool._strategy == STRATEGY_QUOTA_AWARE and quota_bootstrap:
         # D42 bootstrap: queue every entry's fingerprint so the refresher fetches each
-        # account, then publish this profile's derived view from whatever facts exist.
+        # account, then publish this profile's derived view from whatever facts exist. A
+        # read-only resolution load (attribution, per-entry fetch) passes ``quota_bootstrap=
+        # False`` so it never re-queues or rewrites the view.
         try:
             from agent import quota_state as qs
             for entry in pool.entries():

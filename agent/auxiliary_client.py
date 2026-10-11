@@ -7958,8 +7958,8 @@ def _call_llm_impl(
             return client.chat.completions.create(**kwargs)
         return _relay_sync_stream(client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode)
 
-    # D42: the credential of the client that actually serves this call, threaded into every
-    # primary/transient-retry validation so quota attribution names the account that served.
+    # D42: the served client's credential, threaded into every validation below so quota
+    # attribution names the account that served rather than falling back to the pool.
     validate_kw = {"provider": request_provider, "base_url": req.base_info,
                    "api_key": getattr(client, "api_key", None)}
 
@@ -8014,7 +8014,11 @@ def _call_llm_impl(
         def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
-                return _validate_llm_response(_relay_sync_completion(*args, **kw), task)
+                # The step's own client serves this rung, so its credential is the one to mark.
+                return _validate_llm_response(
+                    _relay_sync_completion(*args, **kw), task,
+                    provider=request_provider, base_url=req.base_info,
+                    api_key=getattr(args[0], "api_key", None))
             if kind == "retry":
                 return _retry_same_provider_sync(**kw)
             return _call_fallback_candidate_sync(*args, **kw)
@@ -8134,8 +8138,6 @@ async def _async_call_llm_impl(
         extra_headers=None, api_mode=None, route_info=route_info,
     )
     client, kwargs, request_provider = req.client, req.kwargs, req.request_provider
-    # D42: the credential of the client that actually serves this call, threaded into every
-    # primary/transient-retry validation so quota attribution names the account that served.
     validate_kw = {"provider": request_provider, "base_url": req.base_info,
                    "api_key": getattr(client, "api_key", None)}
     try:
@@ -8165,7 +8167,11 @@ async def _async_call_llm_impl(
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
-                return _validate_llm_response(await _relay_async_completion(*args, **kw), task)
+                # The step's own client serves this rung, so its credential is the one to mark.
+                return _validate_llm_response(
+                    await _relay_async_completion(*args, **kw), task,
+                    provider=request_provider, base_url=req.base_info,
+                    api_key=getattr(args[0], "api_key", None))
             if kind == "retry":
                 return await _retry_same_provider_async(**kw)
             fb_client, fb_model, fb_label = args

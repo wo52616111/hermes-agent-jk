@@ -1,14 +1,15 @@
-"""Quota-aware credential selection, slice B1 (spec D13/D23/D25/D26/D28/D33/D34/D35/D38/D41/D42/D47).
+"""Quota-aware credential selection (spec D13/D23/D25/D26/D28/D33/D34/D35/D38/D41/D42/D47/D49).
 
 Behaviour contracts for the per-account FACTS store, the per-profile VIEW reader, the
 ``QuotaRefresher`` and the billed-call fingerprint attribution. Covers verification.md
-sections 2, 3, 4, 5 and the B1 half of 7. Real imports, temp quota dirs (and two HERMES_HOMEs
+sections 2, 3, 4, 5 and 7. Real imports, temp quota dirs (and two HERMES_HOMEs
 for profile scope); nothing reads a source file's text.
 """
 
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -434,7 +435,8 @@ def _two_account_pool(monkeypatch, *, serving=None, shared_url=SHARED_URL):
     pool = CredentialPool(PROVIDER, [a, b])
     if serving is not None:
         assert pool.acquire_lease(serving) == serving
-    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider, **kw: pool)
     return pool
 
 
@@ -483,13 +485,14 @@ def test_attribution_hermes_state_path(two_account_pool, tmp_path):
 
 def test_attribution_serving_entry_beats_a_base_url_hint(qdir, monkeypatch):
     """A base_url hint that uniquely names a DIFFERENT account must not win: the pool's serving
-    state is the truth. This is the mis-attribution the base_url resolver allowed."""
+    state is the truth."""
     from agent.credential_pool import CredentialPool
     a = _mk_entry("a", "OPENCODE_GO_API_KEY_2", "kA", "sha256:aaa", "https://a.example/zen/go/v1")
     b = _mk_entry("b", "OPENCODE_GO_API_KEY", "kB", "sha256:bbb", "https://b.example/zen/go/v1")
     pool = CredentialPool(PROVIDER, [a, b])
     assert pool.acquire_lease("b") == "b"
-    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider, **kw: pool)
     from agent.aux_accounting import record_aux_usage
     pending = _drive_and_pending(lambda: record_aux_usage(
         SimpleNamespace(usage=None), "title_generation",
@@ -515,7 +518,8 @@ def test_attribution_single_account_resolves_without_a_lease(qdir, monkeypatch):
     from agent.credential_pool import CredentialPool
     solo = _mk_entry("solo", "OPENCODE_GO_API_KEY", "kOnly", "sha256:solo", SHARED_URL)
     pool = CredentialPool(PROVIDER, [solo])
-    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider, **kw: pool)
     from agent.aux_accounting import record_aux_usage
     pending = _drive_and_pending(lambda: record_aux_usage(
         SimpleNamespace(usage=None), "title_generation",
@@ -557,6 +561,8 @@ def real_two_account_pool(qdir, tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("OPENCODE_GO_API_KEY", "kB-serving")
     monkeypatch.setenv("OPENCODE_GO_API_KEY_2", "kA-other")
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    monkeypatch.setattr("agent.credential_pool.get_pool_strategy", lambda provider: "quota_aware")
     from agent.credential_pool import load_pool
     load_pool(PROVIDER)          # seed + persist the sanitized rows
     pool = load_pool(PROVIDER)   # read them back WITH their fingerprints
@@ -730,3 +736,256 @@ def test_two_hermes_homes_two_profiles(tmp_path, monkeypatch, qdir):
     assert qs.view_path("beta", PROVIDER).exists()
     assert len(list((qs.accounts_root() / PROVIDER).glob("*.json"))) == 1
     assert json.loads(qs.view_path("alpha", PROVIDER).read_text())["provider"] == PROVIDER
+
+
+# ============================================================================
+# Round 1 (code-rt) acceptance tests - one per blocking finding
+# ============================================================================
+
+def test_refresher_fetch_count_is_bounded_over_a_simulated_period(real_two_account_pool, monkeypatch):
+    """A real quota_aware pool whose load re-queues every fingerprint: over a simulated period
+    the refresher fetches at most accounts x cycles, never the thousands a bootstrap re-queue
+    busy-loop produced."""
+    serving = real_two_account_pool["kB-serving"]
+    calls = []
+
+    def counting(provider):
+        calls.append(provider)
+        return AccountUsageSnapshot(provider=provider, source="t", fetched_at=NOW, windows=())
+
+    monkeypatch.setattr(qs, "default_fetcher", counting)
+    monkeypatch.setattr(qs, "default_fetcher_for",
+                        lambda provider, *, api_key=None, base_url=None: counting(provider))
+    # Drive the PROCESS-WIDE refresher (the one a pool owns and a bootstrap re-queue wakes).
+    qs.stop_refresher()
+    qs.start_refresher(interval_s=0.05)
+    try:
+        deadline = time.monotonic() + 0.5
+        while time.monotonic() < deadline:
+            # a billed call re-enqueues (never fetches) while the refresher drains
+            qs.enqueue_refresh(PROVIDER, serving["fingerprint"])
+            time.sleep(0.05)
+    finally:
+        qs.stop_refresher()
+    assert calls, "the refresher never drained the queue"
+    # ~10 drains x 2 accounts; nothing near the thousands the re-queue busy-loop produced.
+    assert len(calls) <= 2 * 60
+
+
+def test_facts_fetch_honours_the_stored_backoff(qdir):
+    """A 429 that set ``backoff_until`` must not be re-fetched inside the window."""
+    qs.store_account_facts(
+        PROVIDER, "sha256:aaa", [_facts_window(percent=5.0)], fetched_at=None,
+        attempted_at=NOW.isoformat(),
+        error={"status": 429, "message": "rate limited", "backoff_s": 300},
+        backoff_until=(NOW + timedelta(seconds=300)).isoformat(), now=NOW)
+    hits = []
+    result = qs.fetch_account_facts(PROVIDER, "sha256:aaa", now=NOW + timedelta(seconds=1),
+                                    fetcher=lambda: hits.append(1))
+    assert result == "backoff"
+    assert hits == []
+
+
+def test_read_view_rolls_a_past_reset_window_back_to_covered(qdir, quota_aware):
+    """An expired rate-limited window rolls forward to 0% with its spent marker cleared, so the
+    account is covered and selectable again without a call."""
+    window = {"period": "7d", "used_percent": 100.0, "status": "rate-limited",
+              "reset_at": (NOW - timedelta(hours=1)).isoformat(), "window_seconds": 7 * 86400}
+    _store(fp="sha256:aaa", windows=[window])
+    acct = qs.read_view("default", PROVIDER, now=NOW, policy={})["accounts"][0]
+    assert acct["state"] == "covered"
+    assert acct["windows"][0]["status"] is None
+    assert acct["windows"][0]["used_percent"] == 0.0
+
+
+def test_one_served_call_enqueues_only_the_serving_account(real_two_account_pool):
+    """A real pool's bootstrap queues EVERY fingerprint; one call served by B must leave ONLY B."""
+    from agent import turn_usage
+    serving = real_two_account_pool["kB-serving"]
+    other = real_two_account_pool["kA-other"]
+    agent = SimpleNamespace(provider=PROVIDER, base_url=SHARED_URL, api_key="kB-serving",
+                            _credential_pool_entry_id=serving["entry_id"])
+    pending = _drive_and_pending(lambda: turn_usage._mark_quota_dirty(agent))
+    assert (PROVIDER, serving["fingerprint"]) in pending
+    assert (PROVIDER, other["fingerprint"]) not in pending
+
+
+def test_a_second_account_served_within_the_throttle_is_still_attributed(two_account_pool):
+    """The provider dirty mark is throttled, but the per-account enqueue is not: an account served
+    1s after another must still be attributed."""
+    qs._last_touch.clear()
+    with qs._pending_lock:
+        qs._pending_refreshes.clear()
+    qs.mark_called(PROVIDER, NOW, base_url=SHARED_URL, api_key="kB", entry_id="b")
+    qs.mark_called(PROVIDER, NOW + timedelta(seconds=1), base_url=SHARED_URL, api_key="kA", entry_id="a")
+    pending = qs.pending_refreshes()
+    assert (PROVIDER, "sha256:bbb") in pending
+    assert (PROVIDER, "sha256:aaa") in pending
+
+
+def test_quota_aware_provider_writes_no_single_account_snapshot(qdir, quota_aware, monkeypatch):
+    """A quota_aware provider must never publish a single account's usage as the whole
+    subscription's: the legacy reader shows no confident number (D41)."""
+    def one_account(provider):
+        return AccountUsageSnapshot(
+            provider=provider, source="t", fetched_at=NOW,
+            windows=(AccountUsageWindow("Weekly", 100.0, NOW + timedelta(days=3),
+                                        status="rate-limited"),))
+
+    monkeypatch.setattr(qs, "default_fetcher", one_account)
+    assert qs.refresh(PROVIDER, now=NOW) == "quota_aware"
+    assert qs.read_snapshot(PROVIDER, NOW) is None
+    groups = qs.status_groups(NOW, connected=lambda p: True, multi_account=lambda p: False)
+    assert all(not g.get("windows") for g in groups)
+
+
+def test_refresher_carries_pool_entries_into_the_facts_record(real_two_account_pool, monkeypatch):
+    """The refresher path (not a hand-injected store) must carry the pool entries it saw, so a
+    configured target can match and the labels reach the view - while the facts stay facts-only."""
+    serving = real_two_account_pool["kB-serving"]
+
+    def fake_for(provider, *, api_key=None, base_url=None):
+        return AccountUsageSnapshot(
+            provider=provider, source="t", fetched_at=NOW,
+            windows=(AccountUsageWindow("Weekly", 100.0, NOW + timedelta(days=3),
+                                        status="rate-limited"),))
+
+    monkeypatch.setattr(qs, "default_fetcher_for", fake_for)
+    monkeypatch.setattr(qs, "default_fetcher", lambda provider: fake_for(provider))
+    qs.enqueue_refresh(PROVIDER, serving["fingerprint"])
+    refresher = qs.QuotaRefresher(interval_s=0.05, jitter=0.0)
+    refresher.start()
+    try:
+        deadline = time.monotonic() + 3
+        while qs.read_account_facts(PROVIDER, serving["fingerprint"]) is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        refresher.stop()
+    facts = qs.read_account_facts(PROVIDER, serving["fingerprint"])
+    assert facts is not None and facts["entries"], "the refresher stored no pool entries"
+    entry = facts["entries"][0]
+    assert entry["entry_id"] == serving["entry_id"] and entry["label"]
+    forbidden = {"metered", "state", "serving", "serving_since", "states", "history", "strategy", "read_health"}
+    assert forbidden.isdisjoint(facts)
+    view = qs.read_view("default", PROVIDER, now=NOW, policy={"metered_overflow": [entry["label"]]})
+    acct = next(a for a in view["accounts"] if a["fingerprint"] == serving["fingerprint"])
+    assert acct["metered"] is True
+    assert acct["label"] == entry["label"]
+
+
+def test_declared_metered_list_is_authoritative(qdir, quota_aware):
+    """D49: a declared ``metered_overflow`` list decides metered-ness on its own; the provider's
+    billing capability applies only when the key is not declared."""
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "a", "label": "FRESH_KEY"}])
+    # declared list excludes this account -> NOT metered even though opencode-go bills
+    excluded = qs.read_view("default", PROVIDER, now=NOW, policy={"metered_overflow": ["OTHER_KEY"]})
+    assert (excluded["accounts"][0]["metered"], excluded["accounts"][0]["state"]) == (False, "exhausted")
+    # an EMPTY declared list is still authoritative
+    empty = qs.read_view("default", PROVIDER, now=NOW, policy={"metered_overflow": []})
+    assert empty["accounts"][0]["metered"] is False
+    # undeclared -> the provider capability decides
+    undeclared = qs.read_view("default", PROVIDER, now=NOW, policy={})
+    assert (undeclared["accounts"][0]["metered"], undeclared["accounts"][0]["state"]) == (True, "overflow")
+
+
+def test_serving_follows_the_account_that_actually_served(two_account_pool):
+    """``serving`` (and the published windows) must follow the attributed account, not a stale
+    stored value."""
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=10.0)])
+    _store(fp="sha256:bbb", windows=[_facts_window(percent=20.0)])
+    qs.mark_called(PROVIDER, NOW, base_url=SHARED_URL, api_key="kB", entry_id="b")
+    view = qs.read_view("default", PROVIDER, now=NOW, policy={})
+    assert view["serving"] == "sha256:bbb"
+    assert view["windows"] == qs.read_account_facts(PROVIDER, "sha256:bbb")["windows"]
+
+
+def test_non_quota_aware_call_is_never_resolved_or_enqueued(qdir, monkeypatch):
+    """A billed call on a fill_first provider must not resolve a pool, create facts or enqueue."""
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: False)
+    resolved = []
+    empty_pool = SimpleNamespace(entries=lambda: [], current=lambda: None)
+    monkeypatch.setattr("agent.credential_pool.load_pool",
+                        lambda provider, **kw: resolved.append(provider) or empty_pool)
+    with qs._pending_lock:
+        qs._pending_refreshes.clear()
+    qs.mark_called("anthropic", NOW, base_url="https://api.anthropic.com")
+    assert resolved == []
+    assert qs.pending_refreshes() == set()
+    facts_dir = qs.accounts_root() / "anthropic"
+    assert not facts_dir.exists() or not list(facts_dir.glob("*.json"))
+
+
+def test_refresher_is_reference_counted_per_pool(qdir, tmp_path, monkeypatch):
+    """Stopping one live pool must not stop another's refreshing; the thread stops with the last."""
+    monkeypatch.setattr("agent.credential_pool.get_pool_strategy", lambda provider: "quota_aware")
+    monkeypatch.setattr(qs, "default_fetcher", lambda provider: AccountUsageSnapshot(
+        provider=provider, source="t", fetched_at=NOW, windows=()))
+    monkeypatch.setattr(qs, "default_fetcher_for", lambda provider, *, api_key=None, base_url=None:
+                        AccountUsageSnapshot(provider=provider, source="t", fetched_at=NOW, windows=()))
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    from agent.credential_pool import load_pool
+    p1 = load_pool(PROVIDER)
+    p2 = load_pool(PROVIDER)
+    # Quiesce: a drain must not build a fresh pool (that is itself a symptom of the re-queue bug).
+    monkeypatch.setattr("agent.credential_pool.load_pool",
+                        lambda provider, **kw: SimpleNamespace(entries=lambda: [], current=lambda: None))
+    deadline = time.monotonic() + 3
+    while qs.pending_refreshes() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.4)  # let any in-flight drain finish so the refresher is idle before we stop it
+    assert qs.is_refresher_running() is True
+    p1.stop_quota_refresher()
+    assert qs.is_refresher_running() is True
+    p2.stop_quota_refresher()
+    assert qs.is_refresher_running() is False
+
+
+def test_agent_close_releases_the_quota_refresher(qdir, tmp_path, monkeypatch):
+    """The real agent teardown (``close()``'s phase) releases the pool's hold on the refresher."""
+    monkeypatch.setattr("agent.credential_pool.get_pool_strategy", lambda provider: "quota_aware")
+    monkeypatch.setattr(qs, "default_fetcher", lambda provider: AccountUsageSnapshot(
+        provider=provider, source="t", fetched_at=NOW, windows=()))
+    monkeypatch.setattr(qs, "default_fetcher_for", lambda provider, *, api_key=None, base_url=None:
+                        AccountUsageSnapshot(provider=provider, source="t", fetched_at=NOW, windows=()))
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    from agent.credential_pool import load_pool
+    from run_agent import AIAgent
+    pool = load_pool(PROVIDER)
+    monkeypatch.setattr("agent.credential_pool.load_pool",
+                        lambda provider, **kw: SimpleNamespace(entries=lambda: [], current=lambda: None))
+    deadline = time.monotonic() + 3
+    while qs.pending_refreshes() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    time.sleep(0.4)  # let any in-flight drain finish so the refresher is idle before we stop it
+    assert qs.is_refresher_running() is True
+    AIAgent._stop_quota_refresher(SimpleNamespace(_credential_pool=pool))
+    assert qs.is_refresher_running() is False
+
+
+def test_legacy_and_facts_paths_share_the_backoff_rule(qdir, monkeypatch):
+    """One backoff helper is used by both the snapshot and the per-account facts paths."""
+    seen = []
+    real = qs._backoff_wait
+
+    def spy(record, err):
+        seen.append(err.status)
+        return real(record, err)
+
+    monkeypatch.setattr(qs, "_backoff_wait", spy)
+    monkeypatch.setattr("agent.credential_pool.load_pool",
+                        lambda provider, **kw: SimpleNamespace(entries=lambda: [], current=lambda: None))
+
+    def boom():
+        exc = RuntimeError("rate limited")
+        exc.response = SimpleNamespace(status_code=429, headers={"Retry-After": "120"})
+        return exc
+
+    assert qs.refresh("anthropic", fetcher=lambda provider: (_ for _ in ()).throw(boom()), now=NOW) == "error"
+    assert qs.fetch_account_facts(PROVIDER, "sha256:aaa",
+                                  fetcher=lambda: (_ for _ in ()).throw(boom()), now=NOW) == "error"
+    assert seen == [429, 429]

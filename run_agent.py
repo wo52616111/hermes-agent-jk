@@ -975,6 +975,7 @@ class AIAgent(
         self._streamed_assistant_text_parts = []
         _quietly(self._trim_process_memory)
         _quietly(self._finalize_owned_session_row)
+        _quietly(self._stop_quota_refresher)
 
     # -- close()/release_clients() phases -------------------------------------------------------------
 
@@ -994,6 +995,13 @@ class AIAgent(
                 except Exception:
                     pass
             _quietly(lambda: child.close())
+
+    def _stop_quota_refresher(self) -> None:
+        """Release this agent's hold on the process-wide quota refresher (D42); the thread stops
+        once the last live pool has released it."""
+        pool = getattr(self, "_credential_pool", None)
+        if pool is not None:
+            pool.stop_quota_refresher()
 
     def _drop_shared_client(self, close_fn: Callable[[Any], None]) -> None:
         """Hand the shared OpenAI/httpx client to ``close_fn`` and clear the attribute."""
