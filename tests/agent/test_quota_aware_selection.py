@@ -637,6 +637,82 @@ def test_D46a_does_not_repeat_across_selections_in_one_load(
     assert len(_d46a_records(caplog)) == 1
 
 
+def test_D46a_same_ineffective_config_warns_once_across_loads(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """A *stable* ineffective configuration keeps to one warning: several selections, each a
+    fresh load of the same ``credential_pool_policy``, never re-fire it (D46a per load)."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": ["NO_SUCH_ACCOUNT"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    with caplog.at_level(logging.WARNING):
+        for _ in range(4):
+            pool.select()
+            pool.quota_choose()
+            pool.order_entries(list(pool.entries()))
+    assert len(_d46a_records(caplog)) == 1
+
+
+def test_D46a_warns_again_after_the_configuration_changes(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """D46(a) is per *effective* configuration: the same ineffective block warns once, but
+    editing ``credential_pool_policy`` to another still-unmatched target warns again on the
+    next load — so a long-lived process cannot go silent after a config edit (no silent
+    billing)."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    block = {"metered_overflow": ["MISSING_A"]}
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: block)
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    with caplog.at_level(logging.WARNING):
+        pool.select()
+        pool.select()                                   # same config -> still one warning
+        assert len(_d46a_records(caplog)) == 1
+        block["metered_overflow"] = ["MISSING_B"]       # the user edits the config
+        pool.select()                                   # next load -> warns again
+    recs = _d46a_records(caplog)
+    assert len(recs) == 2
+    assert "MISSING_A" in recs[0].message
+    assert "MISSING_B" in recs[1].message
+
+
+def test_D46a_silent_for_a_correctly_configured_list(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """(3) A correctly configured ``metered_overflow`` that names its account never warns — and
+    once a user FIXES a previously ineffective config, the warning stops too (no noise)."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    block = {"metered_overflow": ["OPENCODE_GO_API_KEY"]}
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: block)
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa", label="OPENCODE_GO_API_KEY_2"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb", label="OPENCODE_GO_API_KEY")])
+    with caplog.at_level(logging.WARNING):
+        pool.select()
+        pool.select()
+        assert _d46a_records(caplog) == []              # a good config is silent
+        block["metered_overflow"] = ["NO_SUCH_ACCOUNT"]  # becomes ineffective
+        pool.select()
+        assert len(_d46a_records(caplog)) == 1          # ...then it warns once
+        block["metered_overflow"] = ["OPENCODE_GO_API_KEY"]  # the user fixes it
+        pool.select()
+    assert len(_d46a_records(caplog)) == 1              # ...and a fix adds no further noise
+
+
 def test_missing_earliest_reset_first_defaults_true(qdir, quota_aware, monkeypatch, tmp_path):
     """D39/D5: a policy block that omits ``earliest_reset_first`` resolves to the documented
     default (true) and keeps the same-priority drain tie-break."""
