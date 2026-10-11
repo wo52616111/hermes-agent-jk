@@ -9,36 +9,6 @@ if TYPE_CHECKING:
     from agent.credential_pool import PooledCredential
 
 
-def target_names_identity(
-    target: Any, entry_id: Any, label: Any, source: Any, index: Optional[int] = None,
-) -> bool:
-    """Whether *target* names the account carrying these identity fields (D45).
-
-    The ONE implementation of the accepted target FORMS: exact entry id, label (case-
-    insensitive), ``env:<VAR>`` source, and a bare ``<VAR>`` normalised to ``env:<VAR>``
-    (the form a user sees in ``credential_pool_policy``). ``index`` adds the 1-based
-    position form. Precedence between forms is applied by :func:`resolve_entry_target`;
-    this predicate answers only "does this target name THIS account", so callers that
-    classify rather than resolve (the metered-account classification) share the same
-    forms instead of a second, divergent matcher.
-    """
-    raw = str(target or "").strip()
-    if not raw:
-        return False
-    if entry_id is not None and raw == str(entry_id):
-        return True
-    if label is not None and str(label).strip() and raw.lower() == str(label).strip().lower():
-        return True
-    src = str(source or "").strip()
-    if src:
-        env_ref = raw if raw.lower().startswith("env:") else f"env:{raw}"
-        if src.lower() == env_ref.lower():
-            return True
-    if index is not None and raw.isdigit() and int(raw) == index:
-        return True
-    return False
-
-
 def resolve_entry_target(
     target: Any, entries: List["PooledCredential"],
 ) -> Tuple[Optional[int], Optional["PooledCredential"], Optional[str]]:

@@ -35,9 +35,8 @@ MODE_SESSION_START = "session_start"
 MODE_TURN_BOUNDARY = "turn_boundary"
 
 # D39 (matches D5's config example): ``earliest_reset_first`` is TRUE when the policy block
-# omits it. Named and exported so the default is explicit and visible rather than a literal
-# hidden in the resolver; the alternative (treating a missing flag as False) would silently
-# disable the same-priority drain tie-break the user asked for.
+# omits it; treating a missing flag as False would silently disable the same-priority drain
+# tie-break the user asked for.
 EARLIEST_RESET_FIRST_DEFAULT = True
 
 

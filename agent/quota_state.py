@@ -1127,32 +1127,69 @@ def _policy_for(provider: str, policy: Optional[dict] = None) -> dict:
         return {}
 
 
-def _target_matches(target: Any, entry: dict) -> bool:
-    """Whether *target* names the account described by *entry* (D45 forms, shared owner).
+@dataclass(frozen=True)
+class _TargetIdentity:
+    """A stored facts entry exposed to the ONE target resolver's ``.id/.label/.source`` shape.
 
-    Classification only needs the FORMS (id / label / ``env:VAR`` / bare VAR); precedence
-    and ambiguity are the resolver's job (:func:`credential_pool_admin.resolve_entry_target`).
-    Delegating keeps one implementation, so a bare VAR naming an ``env:VAR`` source
-    classifies metered exactly as policy validation resolves it.
+    Used only when a read carries no live pool (the TUI/CLI snapshot path); selection reads pass
+    their pool and resolve against its ordered entries instead (D33/D45).
     """
-    from agent.credential_pool_admin import target_names_identity
-    return target_names_identity(
-        target, entry.get("entry_id") or entry.get("id"), entry.get("label"), entry.get("source"),
-    )
+
+    id: Any
+    label: Any
+    source: Any
 
 
-def _is_metered_facts(entries: list, provider: str, policy: dict) -> bool:
-    """D38/D49: a policy block that DECLARES ``metered_overflow`` (even as an empty list) is
-    authoritative for which accounts are metered; the provider's ``bills_when_plan_spent``
-    capability applies only when the block does not declare the key. Targets match only the
-    READING profile's own entry identities (D33), never another profile's alias."""
+def _target_candidates(pool, scoped: list, profile: str) -> list:
+    """The reading profile's OWN entries a ``metered_overflow`` target resolves against (D33/D45).
+
+    The live pool's ordered entries when the read carries one - every selection path does - else
+    the profile's stored facts entries adapted to the resolver's identity shape. Building ONE
+    ordered list per read keeps the 1-based index form consistent with the config check.
+    """
+    if pool is not None:
+        try:
+            entries = list(pool.entries())
+        except Exception:  # noqa: BLE001
+            entries = []
+        if entries:
+            return entries
+    out: list = []
+    for facts in scoped:
+        for entry in facts.get("entries") or []:
+            if entry.get("profile") == profile:
+                out.append(_TargetIdentity(
+                    entry.get("entry_id") or entry.get("id"),
+                    entry.get("label"), entry.get("source"),
+                ))
+    return out
+
+
+def _declared_metered_ids(policy: dict, candidates: list) -> Optional[set]:
+    """The entry ids a DECLARED ``metered_overflow`` list names, or ``None`` when it is undeclared
+    (then the provider's ``bills_when_plan_spent`` capability decides, D38/D49).
+
+    Every target is resolved with the ONE owner
+    :func:`credential_pool_admin.resolve_entry_target`, so classification applies the SAME
+    precedence (exact entry id > unique label > ``env:<VAR>`` source > bare VAR > 1-based index)
+    as the config check. An unmatched or ambiguous target names no account: a declared list is
+    authoritative (D49), so nothing is metered rather than the provider default leaking through.
+    """
     targets = policy.get("metered_overflow") if isinstance(policy, dict) else None
-    if isinstance(targets, list):
-        return any(
-            _target_matches(target, entry)
-            for target in targets
-            for entry in entries
-        )
+    if not isinstance(targets, list):
+        return None
+    from agent.credential_pool_admin import resolve_entry_target
+    ids: set = set()
+    for target in targets:
+        _index, entry, error = resolve_entry_target(target, candidates)
+        entry_id = getattr(entry, "id", None)
+        if entry is not None and not error and entry_id is not None:
+            ids.add(str(entry_id))
+    return ids
+
+
+def _provider_metered(provider: str) -> bool:
+    """Provider-default metered-ness when no ``metered_overflow`` list is declared (D38/D49)."""
     profile = _provider_profile(provider)
     return bool(getattr(profile, "bills_when_plan_spent", False))
 
@@ -1231,7 +1268,6 @@ def _compose_view(
     by_fp: dict = {}
     scoped: list[dict] = []
     for facts in list_account_facts(provider):
-        fp = facts.get("fingerprint")
         entries = facts.get("entries") or []
         mine = [e for e in entries if e.get("profile") == profile]
         # D33: an account belongs to the reading profile only when THAT profile's pool owns
@@ -1243,22 +1279,36 @@ def _compose_view(
         # credential that was rotated away - its facts stay on disk for whoever else owns them, but
         # this profile must not paint them as its own usage, and the view file cannot grow with every
         # key the profile has ever used.
-        if live is not None and fp is not None and fp not in live:
-            continue
+        if live is not None:
+            fingerprint = facts.get("fingerprint")
+            if fingerprint is not None and fingerprint not in live:
+                continue
         scoped.append(facts)
+    # D45: resolve the DECLARED metered_overflow list ONCE, with the ONE target resolver, against
+    # the reading profile's OWN entries - the same precedence the config check applies - then mark
+    # an account metered by membership. A declared-but-unmatched list names no account (D49), and
+    # an undeclared key falls back to the provider's billing capability.
+    metered_ids = _declared_metered_ids(policy, _target_candidates(pool, scoped, profile))
+    for facts in scoped:
+        fp = facts.get("fingerprint")
+        mine = [e for e in (facts.get("entries") or []) if e.get("profile") == profile]
+        entry = mine[0] if mine else {}
         windows = [_rolled(w, now) for w in facts.get("windows") or []]
         # D23: every policy-shaped value is derived HERE, at read time, from THIS profile's
         # CURRENT config + the stored facts - never reused from a previously-written view.
         # Editing ``credential_pool_policy`` must change the next read with no rewrite, so a
         # stored ``metered`` is a pure cache for display, not an input to classification. Two
         # profiles with different policies therefore read different states from the SAME facts.
-        metered = _is_metered_facts(mine, provider, policy)
+        if metered_ids is None:
+            metered = _provider_metered(provider)
+        else:
+            entry_id = entry.get("entry_id")
+            metered = entry_id is not None and str(entry_id) in metered_ids
         state = qstate.account_state(
             windows, metered=metered,
             metered_exhausted_until=facts.get("metered_exhausted_until"), now=now,
         )
         fetched = _dt(facts.get("fetched_at"))
-        entry = mine[0] if mine else {}
         record = {
             "fingerprint": fp,
             "label": entry.get("label"),

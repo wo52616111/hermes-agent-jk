@@ -739,8 +739,8 @@ def test_missing_earliest_reset_first_defaults_true(qdir, quota_aware, monkeypat
 
 
 # ============================================================================
-# 9 (B2 fix round 1). Endpoint repair eligibility, turn-boundary endpoint
-#    siblings, the turn-context/aux credential agreement and the D45 forms.
+# 9. Endpoint repair eligibility, turn-boundary endpoint siblings, the
+#    turn-context/aux credential agreement and the D45 target forms.
 # ============================================================================
 
 
@@ -885,7 +885,7 @@ def test_D45_valid_index_config_keeps_covered_first(qdir, quota_aware, monkeypat
 
 def test_D46b_warns_again_when_service_returns_to_metered(qdir, quota_aware, caplog):
     """D46(b): the warning tracks the SERVED account and state, so overflow A -> covered B ->
-    overflow A warns twice (B reset the state); a per-overflow-id dedup would suppress it."""
+    overflow A warns twice (B reset the state)."""
     _facts("sha256:aaa", [_win(percent=100.0)])          # A overflow
     _facts("sha256:bbb", [_win(percent=100.0)], metered_exhausted_until=NOW.replace(year=2027))
     pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
@@ -902,7 +902,7 @@ def test_D46b_warns_again_when_service_returns_to_metered(qdir, quota_aware, cap
 def test_D46b_warns_on_every_transition_into_metered_service(qdir, quota_aware, caplog):
     """D46(b): the warning tracks the SERVED account and state, so a covered account that
     turns overflow warns each time it re-enters metered service (covered -> overflow ->
-    covered -> overflow warns twice); a per-overflow-id dedup would suppress the second."""
+    covered -> overflow warns twice)."""
     _facts("sha256:aaa", [_win(percent=5.0)])            # A covered
     _facts("sha256:bbb", [_win(percent=100.0)], metered_exhausted_until=NOW.replace(year=2027))
     pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
@@ -916,3 +916,134 @@ def test_D46b_warns_on_every_transition_into_metered_service(qdir, quota_aware, 
         assert pool.select().id == "a"                   # re-entered metered -> warn 2
     msgs = [r.message for r in caplog.records if "from its metered bucket" in r.message]
     assert len(msgs) == 2
+
+
+# ============================================================================
+# 10. D45/D49: classification consumes the SAME target resolver as the config
+#     check, so an account the user did NOT name is never served from metered.
+# ============================================================================
+
+
+def _classified_states(pool, entries):
+    return {eid: state.state for eid, state in pool._quota_states(entries).items()}
+
+
+def _metered_policy(monkeypatch, block):
+    """Point BOTH the config check (``get_pool_policy_block``) and the read-time classification
+    (``quota_state._policy_for``) at the same ``metered_overflow`` block."""
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: block)
+    monkeypatch.setattr(qs, "_policy_for", lambda provider, policy=None: block)
+    return block
+
+
+def test_D45_index_form_classifies_the_resolved_account_metered(qdir, quota_aware, monkeypatch):
+    """D45/D49: classification resolves each ``metered_overflow`` target with the SAME precedence
+    the config check uses, so the 1-based index marks the resolved account metered and nothing
+    else. With both plans spent, the named account is ``overflow`` (its metered cushion) and the
+    unnamed one is ``exhausted`` -- never billed."""
+    import agent.credential_pool as cp
+    _metered_policy(monkeypatch, {"metered_overflow": ["1"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "a", "label": "Account A"}])
+    _facts("sha256:bbb", [_win(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "b", "label": "Account B"}])
+    a = _entry("a", fingerprint="sha256:aaa", priority=1)
+    b = _entry("b", fingerprint="sha256:bbb", priority=0)
+    pool = _pool([a, b])
+    assert pool.resolve_target("1")[1] is b              # index 1 = the priority-0 order head
+    assert _classified_states(pool, [a, b]) == {"a": "exhausted", "b": "overflow"}
+    assert pool.select().id == "b"                       # only the metered cushion is served
+
+
+def test_D45_entry_id_precedence_classifies_only_the_id_account_metered(qdir, quota_aware, monkeypatch):
+    """D45/D49: an exact entry id beats a colliding label in CLASSIFICATION too. Only the id's
+    account is metered; the account whose label merely collides is ``exhausted`` and never served
+    from its metered bucket."""
+    import agent.credential_pool as cp
+    _metered_policy(monkeypatch, {"metered_overflow": ["a"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "a", "label": "Account A"}])
+    _facts("sha256:bbb", [_win(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "b", "label": "a"}])
+    a = _entry("a", label="Account A", fingerprint="sha256:aaa", priority=1)
+    b = _entry("b", label="a", fingerprint="sha256:bbb", priority=0)  # b's label collides with a's id
+    pool = _pool([a, b])
+    assert pool.resolve_target("a")[1] is a              # the id wins, not the colliding label
+    assert _classified_states(pool, [a, b]) == {"a": "overflow", "b": "exhausted"}
+    assert pool.select().id == "a"                       # B is never billed
+
+
+def test_declared_metered_list_excludes_an_unnamed_account_from_billing(qdir, quota_aware, monkeypatch):
+    """D49: a declared list is authoritative. A target that names no account meters NOTHING -- the
+    provider's ``bills_when_plan_spent`` default must not leak through and bill an unnamed
+    account."""
+    import agent.credential_pool as cp
+    _metered_policy(monkeypatch, {"metered_overflow": ["NO_SUCH_ACCOUNT"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=100.0)])
+    a = _entry("a", fingerprint="sha256:aaa", priority=0)
+    b = _entry("b", fingerprint="sha256:bbb", priority=1)
+    pool = _pool([a, b])
+    assert _classified_states(pool, [a, b]) == {"a": "exhausted", "b": "exhausted"}
+
+
+def test_D46a_warning_states_the_consequence_for_the_declared_shape(
+    qdir, quota_aware, monkeypatch, caplog, tmp_path,
+):
+    """D46(a)/D49: the 'did not take effect' warning states the CONSEQUENCE of the declared shape.
+    An unmatched DECLARED list meters nothing; only an ABSENT key lets the provider default
+    classify accounts metered."""
+    import agent.credential_pool as cp
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    block = _metered_policy(monkeypatch, {"metered_overflow": ["NO_SUCH_ACCOUNT"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    pool = _pool([_entry("a", fingerprint="sha256:aaa")])
+    with caplog.at_level(logging.WARNING):
+        pool.select()
+        assert len(_d46a_records(caplog)) == 1
+        assert "no account is treated as metered" in _d46a_records(caplog)[0].message
+        del block["metered_overflow"]                    # the key is now absent
+        pool.select()
+    recs = _d46a_records(caplog)
+    assert len(recs) == 2
+    assert "classify metered by provider default" in recs[1].message
+
+
+def test_quota_choose_endpoint_filter_restricts_the_candidate_set(qdir, quota_aware):
+    """D22: ``quota_choose(endpoint=...)`` restricts the candidate set BEFORE the choose/stickiness
+    rules run, so it never returns an entry that does not serve the endpoint. The turn-boundary
+    path relies on this and needs no second endpoint re-check."""
+    from agent.credential_pool import credential_pool_entry_serves_endpoint
+    other = "https://elsewhere.example/v1"
+    _facts("sha256:aaa", [_win(percent=100.0)])          # A overflow, the session's endpoint
+    _facts("sha256:bbb", [_win(percent=5.0)])            # B covered, ANOTHER endpoint
+    pool = _pool([_entry("a", fingerprint="sha256:aaa", base_url=SHARED_URL),
+                  _entry("b", fingerprint="sha256:bbb", base_url=other)])
+    # Unfiltered, the covered sibling on the other endpoint wins the turn-boundary move.
+    assert pool.quota_choose(current_id="a", mode="turn_boundary").id == "b"
+    # Filtered to the session's endpoint, A stays and B is never a candidate.
+    chosen = pool.quota_choose(current_id="a", mode="turn_boundary", endpoint=SHARED_URL)
+    assert chosen.id == "a"
+    assert credential_pool_entry_serves_endpoint(chosen, SHARED_URL)
+    assert pool.quota_choose(current_id="a", mode="turn_boundary", endpoint=other).id == "b"
+
+
+def test_revert_guard_filters_candidates_by_the_session_endpoint(qdir, quota_aware):
+    """D22: the revert guard's quota check filters candidates by the session's endpoint, so a
+    covered entry on ANOTHER endpoint cannot cancel a valid revert onto the endpoint's account."""
+    from agent.agent_runtime_helpers import _revert_credential_rotation
+    other = "https://elsewhere.example/v1"
+    _facts("sha256:aaa", [_win(percent=5.0)])            # R: the revert target, covered, same endpoint
+    _facts("sha256:bbb", [_win(percent=100.0)])          # C: current binding, overflow, same endpoint
+    _facts("sha256:ccc", [_win(percent=5.0)])            # O: covered, OTHER endpoint, sorts first
+    pool = _pool([_entry("r", fingerprint="sha256:aaa", priority=1),
+                  _entry("c", fingerprint="sha256:bbb", priority=2),
+                  _entry("o", fingerprint="sha256:ccc", priority=0, base_url=other)])
+    agent = _Agent(pool, "c", revert_id="r")
+    _revert_credential_rotation(agent)
+    assert agent.swaps == ["r"]                          # the cross-endpoint sibling did not cancel it

@@ -438,9 +438,9 @@ def _lease_child_credential(child: Any) -> tuple[Any, Optional[str]]:
     serve the child's endpoint: on a mixed same-provider pool the least-leased pick may target another host, so it is
     released and an endpoint-matching entry is leased by id instead (#68237). The re-pick FIRST restricts the
     candidates to genuinely ELIGIBLE entries (never a cooling/dead one), then ORDERS the endpoint-matching set by the
-    pool's selection policy (``order_entries``) rather than taking "the first non-dead match" (D44); with no
-    endpoint-matching entry the D17 handout applies and the repair logs why. The bound object is always re-resolved
-    from the lease id the pool RETURNS, so the leased account and the serving account cannot diverge.
+    pool's selection policy (D44; ``order_entries``); with no endpoint-matching entry the D17 handout applies and the
+    repair logs why. The bound object is always re-resolved from the lease id the pool RETURNS, so the leased account
+    and the serving account cannot diverge.
     """
     child_pool = getattr(child, "_credential_pool", None)
     if child_pool is None:
