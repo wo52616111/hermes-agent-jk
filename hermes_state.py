@@ -1520,6 +1520,10 @@ class SessionDB(
     _TOKEN_DELTA_ROUTE_FIELDS = (
         "model", "cost_status", "cost_source", "pricing_version", "billing_provider", "billing_base_url",
         "billing_mode", "source",
+        # D42 attribution: the served account's credential is part of the route. Two adjacent
+        # deltas served by DIFFERENT accounts must not coalesce (the merged delta would keep one
+        # account's credential and mis-attribute the other's spend).
+        "served_api_key", "served_entry_id",
     )
 
     MAX_TITLE_LENGTH = 100

@@ -83,7 +83,11 @@ class OpenCodeGoProfile(ProviderProfile):
                 continue
             reset_raw = str(window.get("resetsAt") or "").replace("Z", "+00:00")
             reset_at = datetime.fromisoformat(reset_raw) if reset_raw else None
-            windows.append(AccountUsageWindow(label=label, used_percent=float(window["percent"]), reset_at=reset_at))
+            # ``status`` (e.g. "rate-limited") outranks ``percent`` when classifying a spent
+            # window; carry it through instead of dropping it (spec D2/D25).
+            status = str(window.get("status") or "").strip() or None
+            windows.append(AccountUsageWindow(label=label, used_percent=float(window["percent"]),
+                                              reset_at=reset_at, status=status))
         return AccountUsageSnapshot(provider=self.name, source="go_usage_api",
                                     fetched_at=datetime.now(timezone.utc), windows=tuple(windows))
 
@@ -125,6 +129,11 @@ opencode_go = OpenCodeGoProfile(
     name="opencode-go", aliases=("opencode_go", "go", "opencode-go-sub"), env_vars=("OPENCODE_GO_API_KEY",),
     base_url="https://opencode.ai/zen/go/v1", default_headers=dict(_ATTRIBUTION_HEADERS),
     default_aux_model="glm-5",
+    # Per-account subscription usage is readable (GET /zen/go/v1/usage) and the plan silently
+    # overflows to metered billing once spent - the two capability flags the quota-aware
+    # selection strategy keys on (spec D15/D38).
+    supports_per_account_usage=True,
+    bills_when_plan_spent=True,
     # The Go relay's upstream validates tool content as a strict string: list-type tool
     # content (native vision embeds) 422s with ``messages.N.tool.content.str Input should
     # be a valid string`` (Console Go, #104731) or 400s ``text is not set`` (MiMo, #47026),

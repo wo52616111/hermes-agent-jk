@@ -278,12 +278,18 @@ class SessionUsageMixin:
         actual_cost_usd: Optional[float]=None, cost_status: Optional[str]=None, cost_source: Optional[str]=None,
         pricing_version: Optional[str]=None, billing_provider: Optional[str]=None, billing_base_url: Optional[str]=None,
         billing_mode: Optional[str]=None, api_call_count: int=0, absolute: bool=False,
-        source: Optional[str]=None,
+        source: Optional[str]=None, served_api_key: Optional[str]=None, served_entry_id: Optional[str]=None,
     ) -> None:
         """Update token counters and backfill model if unset. *absolute*=False increments
         (per-API-call deltas, CLI path); *absolute*=True sets directly (gateway path,
         where the cached agent holds cumulative totals). ``source`` is the session's real surface
-        for the row-existence guard; callers that don't know it leave the placeholder."""
+        for the row-existence guard; callers that don't know it leave the placeholder.
+
+        ``served_api_key`` / ``served_entry_id`` are the credential of the account that ACTUALLY
+        served this call (D42); the caller that holds the resolved runtime passes them so the
+        quota-attribution mark names the right account. Not persisted as a column — they only
+        ride the coalescing route key and feed ``_record_model_usage``.
+        """
         usage = {k: v for k, v in locals().items() if k in _MODEL_USAGE_FIELDS}
         # Ensure the row exists: under concurrent load create_session() may have failed on
         # locking, and the UPDATE would silently affect 0 rows. When this guard is the first
@@ -333,7 +339,9 @@ class SessionUsageMixin:
                        WHERE id = ?""", (model, billing_provider, billing_base_url, billing_mode, session_id))
             conn.execute(sql, params)
             if record_model_usage:
-                self._record_model_usage(conn, session_id, **usage)
+                self._record_model_usage(
+                    conn, session_id, **usage,
+                    served_api_key=served_api_key, served_entry_id=served_entry_id)
         self._execute_write(_do)
 
     def _record_model_usage(
@@ -342,6 +350,7 @@ class SessionUsageMixin:
         output_tokens: int=0, cache_read_tokens: int=0, cache_write_tokens: int=0, reasoning_tokens: int=0,
         estimated_cost_usd: Optional[float]=None, actual_cost_usd: Optional[float]=None,
         cost_status: Optional[str]=None, cost_source: Optional[str]=None, api_call_count: int=0, task: str="",
+        served_api_key: Optional[str]=None, served_entry_id: Optional[str]=None,
     ) -> None:
         """Accumulate a per-API-call usage delta into session_model_usage, inside the caller's
         write txn after the ``sessions`` UPDATE. A missing model/provider falls back to
@@ -359,9 +368,15 @@ class SessionUsageMixin:
         sess = dict(row) if (row is not None and not task) else {}
         try:
             # Single boundary every persisted billed call reaches (incl. background-review forks).
+            # D42 attribution: carry the served credential the caller resolved (``served_api_key``
+            # / ``served_entry_id``) so the mark names the account that ACTUALLY served. Only when
+            # the caller held no credential does resolution fall back to the pool's serving state
+            # - and then only a UNIQUE match attributes, never a guess (base_url is not a
+            # discriminator: real accounts share one).
             from agent.quota_state import mark_called
-            mark_called(billing_provider or sess.get("billing_provider"),
-                        base_url=billing_base_url or sess.get("billing_base_url"))
+            _bp = billing_provider or sess.get("billing_provider")
+            _bu = billing_base_url or sess.get("billing_base_url")
+            mark_called(_bp, base_url=_bu, api_key=served_api_key, entry_id=served_entry_id)
         except Exception:
             pass
         counts = [v or 0 for v in (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)]
@@ -377,12 +392,16 @@ class SessionUsageMixin:
         self, session_id: str, task: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,
         billing_base_url: Optional[str]=None, input_tokens: int=0, output_tokens: int=0, cache_read_tokens: int=0,
         cache_write_tokens: int=0, reasoning_tokens: int=0, estimated_cost_usd: Optional[float]=None,
-        api_call_count: int=1,
+        api_call_count: int=1, served_api_key: Optional[str]=None, served_entry_id: Optional[str]=None,
     ) -> None:
         """Record an auxiliary LLM call's usage (vision, compression, title generation, ...)
         as a per-(model, provider, task) delta in ``session_model_usage`` WITHOUT touching
         the ``sessions`` summary row (the gateway overwrites those counters with absolute
         main-loop totals). ``api_call_count`` may aggregate N calls. Best-effort.
+
+        ``served_api_key`` / ``served_entry_id`` (D42) are the credential of the account that
+        actually served the aux call, threaded from the aux client so the quota-attribution mark
+        names the right account instead of falling back to the pool's (unbound) serving state.
 
         See #23270.
         Background-review forks record an aggregate of N fork API calls in one write with
@@ -395,7 +414,9 @@ class SessionUsageMixin:
         # FK to sessions.id: same guard as update_token_counts; the aux path carries no surface, so
         # the placeholder stays repairable by the creator's upsert (_insert_session_row).
         self._insert_session_row(session_id, "unknown")
-        self._execute_write(lambda conn: self._record_model_usage(conn, session_id, task=task, **usage))
+        self._execute_write(lambda conn: self._record_model_usage(
+            conn, session_id, task=task, **usage,
+            served_api_key=served_api_key, served_entry_id=served_entry_id))
 
     def auxiliary_usage_by_task(self, session_id: str) -> Dict[str, Dict[str, float]]:
         """Per-task auxiliary usage (``task != ''``: vision, compression, title_generation, ...) summed

@@ -120,11 +120,16 @@ STRATEGY_FILL_FIRST = "fill_first"
 STRATEGY_ROUND_ROBIN = "round_robin"
 STRATEGY_RANDOM = "random"
 STRATEGY_LEAST_USED = "least_used"
+# Quota-aware selection (spec D3): rank accounts by their own subscription usage so a spent
+# plan is never picked while a covered sibling exists. B1 wires the strategy name, the
+# per-account facts/views and the refresher; the ranking itself lands in B2.
+STRATEGY_QUOTA_AWARE = "quota_aware"
 SUPPORTED_POOL_STRATEGIES = {
     STRATEGY_FILL_FIRST,
     STRATEGY_ROUND_ROBIN,
     STRATEGY_RANDOM,
     STRATEGY_LEAST_USED,
+    STRATEGY_QUOTA_AWARE,
 }
 
 # Cooldowns before retrying an exhausted credential. Transient 401s cool down
@@ -1005,6 +1010,39 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # entries" and the caller's 401 retry loop runs unbounded. Reset when a
         # real entry is identified or an escape path returns None.
         self._unmatched_rotation_streak: int = 0
+        # D42: one lightweight refresher thread owned by the pool, started lazily with it and
+        # stopped with it. Only a quota_aware pool starts it; a bare CLI process that never
+        # binds a quota_aware pool never spawns it.
+        if self._strategy == STRATEGY_QUOTA_AWARE:
+            self.start_quota_refresher()
+
+    # ---- quota-aware lifecycle (D42) --------------------------------------
+
+    def start_quota_refresher(self) -> "CredentialPool":
+        """Start (idempotently) the process-wide quota refresher for this pool."""
+        try:
+            from agent import quota_state as qs
+            qs.start_refresher()
+        except Exception:  # noqa: BLE001
+            logger.debug("quota refresher start failed for %s", self.provider, exc_info=True)
+        return self
+
+    def stop_quota_refresher(self) -> None:
+        """Stop the process-wide quota refresher (pool teardown)."""
+        try:
+            from agent import quota_state as qs
+            qs.stop_refresher()
+        except Exception:  # noqa: BLE001
+            logger.debug("quota refresher stop failed for %s", self.provider, exc_info=True)
+
+    def sync_quota_view(self, profile: Optional[str] = None):
+        """Recompute this profile's derived view from shared facts + this profile's policy."""
+        try:
+            from agent import quota_state as qs
+            return qs.update_view(profile or qs.current_profile(), self.provider, pool=self)
+        except Exception:  # noqa: BLE001
+            logger.debug("quota view sync failed for %s", self.provider, exc_info=True)
+            return None
 
     # ---- read accessors ---------------------------------------------------
 
@@ -3054,4 +3092,16 @@ def load_pool(provider: str) -> CredentialPool:
     # profile leaves them out of the profile's own store (#100339).
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider):
         pool._borrowed_root_ids = set(disk_ids)
+    if pool._strategy == STRATEGY_QUOTA_AWARE:
+        # D42 bootstrap: queue every entry's fingerprint so the refresher fetches each
+        # account, then publish this profile's derived view from whatever facts exist.
+        try:
+            from agent import quota_state as qs
+            for entry in pool.entries():
+                fingerprint = entry.extra.get("secret_fingerprint")
+                if fingerprint:
+                    qs.enqueue_refresh(provider, fingerprint)
+            pool.sync_quota_view()
+        except Exception:  # noqa: BLE001
+            logger.debug("quota-aware bootstrap failed for %s", provider, exc_info=True)
     return pool

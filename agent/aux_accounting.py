@@ -44,7 +44,8 @@ def reset_accounting_context(token) -> None:
 
 def record_aux_usage(
     response: Any, task: Optional[str], *, provider: Optional[str] = None,
-    base_url: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None,
+    entry_id: Optional[str] = None,
 ) -> None:
     """Record an auxiliary response's token usage against the ambient session.
 
@@ -52,12 +53,18 @@ def record_aux_usage(
     agent turn, for main-loop-accounted tasks (``_EXCLUDED_TASKS``), or without usage.
     The model is read from ``response.model`` (accurate after aux provider fallback);
     *provider*/*base_url* reflect the originally-resolved route.
+
+    *api_key*/*entry_id* (D42) are the credential of the account that ACTUALLY served — the
+    aux client resolves the runtime for the call it is about to make and threads them here, so
+    the quota mark names the right account even when several accounts share one ``base_url``.
     """
     try:
         # Quota dirtiness is about the subscription being billed, not about token accounting:
         # mark before every early return (no ambient session, no usage on the response).
+        # D42 attribution: carry the served credential; ``base_url`` is never a discriminator
+        # (real opencode-go accounts share one), so only the credential names the account.
         from agent.quota_state import mark_called
-        mark_called(provider, base_url=base_url)
+        mark_called(provider, base_url=base_url, api_key=api_key, entry_id=entry_id)
     except Exception:
         pass
     try:
@@ -90,6 +97,7 @@ def record_aux_usage(
             logger.debug("Aux usage cost estimation failed", exc_info=True)
         session_db.record_auxiliary_usage(
             session_id, task, model=model, billing_provider=provider, billing_base_url=base_url,
+            served_api_key=api_key, served_entry_id=entry_id,
             input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens, cache_write_tokens=usage.cache_write_tokens,
             reasoning_tokens=usage.reasoning_tokens, estimated_cost_usd=estimated_cost,

@@ -158,7 +158,11 @@ def _record_codex_app_server_usage(agent, turn, messages=None) -> dict[str, Any]
     compressor = getattr(agent, "context_compressor", None)
 
     def billing(**extra):
-        return dict(model=agent.model, billing_provider=agent.provider, billing_base_url=agent.base_url, api_call_count=1, **extra)
+        return dict(model=agent.model, billing_provider=agent.provider, billing_base_url=agent.base_url,
+                    api_call_count=1,
+                    # D42: the served entry's identity for the hermes-state per-call boundary.
+                    served_api_key=getattr(agent, "api_key", None),
+                    served_entry_id=getattr(agent, "_credential_pool_entry_id", None), **extra)
     if not isinstance(usage, dict) or not usage:
         if compressor is not None and getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage cannot adjudicate the pending compaction; unlatch preflight deferral.

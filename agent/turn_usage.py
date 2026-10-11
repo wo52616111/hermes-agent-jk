@@ -74,7 +74,14 @@ def _mark_quota_dirty(agent: Any) -> None:
     """Tell the shared quota state this subscription was just billed (agent.quota_state)."""
     try:
         from agent.quota_state import mark_called
-        mark_called(getattr(agent, "provider", None), base_url=getattr(agent, "base_url", None))
+        mark_called(
+            getattr(agent, "provider", None),
+            base_url=getattr(agent, "base_url", None),
+            # D42 attribution: carry the served entry's identity so the refresher names the
+            # right (provider, fingerprint).
+            api_key=getattr(agent, "api_key", None),
+            entry_id=getattr(agent, "_credential_pool_entry_id", None),
+        )
     except Exception:
         logger.debug("quota dirty mark failed", exc_info=True)
 
@@ -280,6 +287,10 @@ def record_response_usage(
                 if cost_result.status == "included" else None,
                 model=agent.model,
                 api_call_count=1,
+                # D42: the served entry's identity, so the hermes-state per-call boundary names
+                # the account that actually served (matches the turn-path mark above).
+                served_api_key=getattr(agent, "api_key", None),
+                served_entry_id=getattr(agent, "_credential_pool_entry_id", None),
             )
         except Exception as e:  # silent loss here undercounts analytics
             logger.debug(

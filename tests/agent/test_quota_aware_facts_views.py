@@ -1,0 +1,732 @@
+"""Quota-aware credential selection, slice B1 (spec D13/D23/D25/D26/D28/D33/D34/D35/D38/D41/D42/D47).
+
+Behaviour contracts for the per-account FACTS store, the per-profile VIEW reader, the
+``QuotaRefresher`` and the billed-call fingerprint attribution. Covers verification.md
+sections 2, 3, 4, 5 and the B1 half of 7. Real imports, temp quota dirs (and two HERMES_HOMEs
+for profile scope); nothing reads a source file's text.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from agent import quota_aware_state as st
+from agent import quota_state as qs
+from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
+
+NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+PROVIDER = "opencode-go"
+
+
+@pytest.fixture
+def qdir(tmp_path, monkeypatch):
+    """Shared, cross-profile quota dir with no real network/credential access."""
+    root = tmp_path / "quota"
+    monkeypatch.setattr(qs, "quota_dir", lambda: root)
+    monkeypatch.setattr(qs, "default_fetcher", lambda provider: pytest.fail("real fetch"))
+    monkeypatch.setattr(qs, "default_connected", lambda provider: True)
+    monkeypatch.setattr(qs, "default_multi_account", lambda provider: False)
+    monkeypatch.setattr(qs, "credential_files", lambda: [])
+    qs._last_touch.clear()
+    qs._connected_cache.clear()
+    qs.stop_refresher()
+    with qs._pending_lock:
+        qs._pending_refreshes.clear()
+    yield root
+    qs.stop_refresher()
+    with qs._pending_lock:
+        qs._pending_refreshes.clear()
+
+
+@pytest.fixture
+def quota_aware(monkeypatch):
+    """Force the provider onto the ``quota_aware`` strategy without touching config."""
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+
+
+def _facts_window(period="7d", percent=0.0, reset_days=3, status=None):
+    return {
+        "period": period,
+        "used_percent": percent,
+        "status": status,
+        "reset_at": (NOW + timedelta(days=reset_days)).isoformat(),
+        "window_seconds": 7 * 86400,
+    }
+
+
+def _store(provider=PROVIDER, fp="sha256:aaa", windows=None, *, entries=None, fetched=True,
+           error=None, backoff_until=None, metered_exhausted_until=qs._UNSET, when=NOW):
+    return qs.store_account_facts(
+        provider, fp, windows if windows is not None else [_facts_window()],
+        entries=entries or [{"profile": "default", "entry_id": fp[-3:], "label": fp[-3:]}],
+        fetched_at=when.isoformat() if fetched else None,
+        attempted_at=when.isoformat(),
+        error=error, backoff_until=backoff_until,
+        metered_exhausted_until=metered_exhausted_until, now=when,
+    )
+
+
+# ============================================================================
+# 2. Window and state derivation (D9, D25, D28, D47)
+# ============================================================================
+
+def test_status_rate_limited_wins_over_low_percent():
+    """Fixture: ``weekly.status = "rate-limited"`` with ``percent = 91`` -> spent."""
+    window = AccountUsageWindow("Weekly", used_percent=91.0,
+                                reset_at=NOW + timedelta(days=3), status="rate-limited")
+    assert st.window_spent(window, NOW) is True
+
+
+def test_status_wins_over_percent_both_directions():
+    future = NOW + timedelta(days=3)
+    # status says ok even though percent >= 100 -> not spent
+    assert st.window_spent({"used_percent": 100.0, "status": "ok", "reset_at": future.isoformat()}, NOW) is False
+    # no status -> percent is the fallback
+    assert st.window_spent({"used_percent": 100.0, "status": None, "reset_at": future.isoformat()}, NOW) is True
+    assert st.window_spent({"used_percent": 42.0, "status": None, "reset_at": future.isoformat()}, NOW) is False
+
+
+def test_expired_window_rolls_forward_on_the_clock():
+    past = (NOW - timedelta(hours=1)).isoformat()
+    assert st.window_spent({"used_percent": 100.0, "status": "rate-limited", "reset_at": past}, NOW) is False
+
+
+def test_one_spent_window_makes_account_non_covered():
+    windows = [_facts_window(period="5h", percent=0.0),
+               _facts_window(period="7d", percent=100.0)]
+    assert st.account_state(windows, metered=False, now=NOW) == "exhausted"
+    assert st.account_state(windows, metered=True, now=NOW) == "overflow"
+    # recovery = LATEST spent reset
+    assert st.effective_recovery(windows, None, NOW) == st.as_dt(windows[1]["reset_at"])
+
+
+def test_refusal_outranks_stale_plan_evidence_and_recovery_is_max():
+    windows = [_facts_window(percent=100.0, reset_days=3)]  # plan spent, resets in 3d
+    refusal = NOW + timedelta(hours=2)
+    assert st.account_state(windows, metered=True, metered_exhausted_until=refusal, now=NOW) == "exhausted"
+    # effective recovery = max(plan spent reset, refusal) -> the later plan reset wins
+    assert st.effective_recovery(windows, refusal, NOW) == st.as_dt(windows[0]["reset_at"])
+    # and with a refusal later than the plan reset, the refusal wins
+    late = NOW + timedelta(days=5)
+    assert st.effective_recovery(windows, late, NOW) == late
+
+
+def test_d47_reviewer_case_ordering_by_effective_recovery():
+    # A: plan reset 300s, cushion until 110s. B: plan reset 200s, cushion until 190s.
+    a = {"used_percent": 100.0, "status": None, "reset_at": (NOW + timedelta(seconds=300)).isoformat()}
+    b = {"used_percent": 100.0, "status": None, "reset_at": (NOW + timedelta(seconds=200)).isoformat()}
+    a_until = NOW + timedelta(seconds=110)
+    b_until = NOW + timedelta(seconds=190)
+    at100 = {fp: st.effective_recovery([w], until, NOW)
+             for fp, w, until in (("A", a, a_until), ("B", b, b_until))}
+    assert sorted(at100, key=lambda k: at100[k]) == ["B", "A"]
+    at110 = NOW + timedelta(seconds=110)
+    # A's cushion expired -> A overflow; B still exhausted
+    assert st.account_state([a], metered=True, metered_exhausted_until=a_until, now=at110) == "overflow"
+    assert st.account_state([b], metered=True, metered_exhausted_until=b_until, now=at110) == "exhausted"
+
+
+def test_refusal_recording_rule_both_directions(qdir):
+    """D28/D47 unified: recorded when the account was ``overflow`` at refusal time; a refusal
+    while ``covered`` records nothing."""
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=100.0)])
+    # covered -> nothing recorded
+    assert qs.record_refusal(PROVIDER, "sha256:aaa", state="covered",
+                             reset_at=NOW + timedelta(hours=1), now=NOW) is False
+    assert qs.read_account_facts(PROVIDER, "sha256:aaa")["metered_exhausted_until"] is None
+    # overflow (plan already spent - the motivating case) -> recorded
+    assert qs.record_refusal(PROVIDER, "sha256:aaa", state="overflow",
+                             reset_at=NOW + timedelta(hours=1), now=NOW) is True
+    stored = qs.read_account_facts(PROVIDER, "sha256:aaa")["metered_exhausted_until"]
+    assert st.as_dt(stored) == NOW + timedelta(hours=1)
+
+
+# ============================================================================
+# 3. Facts, views, writers, readers (D13, D23, D33, D34, D35, D41)
+# ============================================================================
+
+def test_two_profiles_same_key_one_facts_record(qdir):
+    _store(entries=[{"profile": "alpha", "entry_id": "a1", "label": "OPENCODE_GO_API_KEY_2"}])
+    _store(entries=[{"profile": "beta", "entry_id": "b1", "label": "OPENCODE_GO_API_KEY_2"}])
+    files = list((qs.accounts_root() / PROVIDER).glob("*.json"))
+    assert len(files) == 1
+    record = qs.read_account_facts(PROVIDER, "sha256:aaa")
+    profiles = {e["profile"] for e in record["entries"]}
+    assert profiles == {"alpha", "beta"}
+
+
+def test_facts_record_is_facts_only(qdir):
+    _store(metered_exhausted_until=NOW + timedelta(hours=1))
+    record = qs.read_account_facts(PROVIDER, "sha256:aaa")
+    forbidden = {"metered", "state", "serving", "serving_since", "states", "history", "strategy", "read_health"}
+    assert forbidden.isdisjoint(record)
+    assert set(record) == {
+        "provider", "fingerprint", "entries", "windows", "metered_exhausted_until",
+        "fetched_at", "attempted_at", "error", "backoff_until",
+    }
+
+
+# ============================================================================
+# D23: policy-shaped values are derived AT READ TIME (never a stale view cache)
+# ============================================================================
+
+def test_read_view_reflects_policy_edits_without_a_rewrite(qdir, monkeypatch):
+    """Editing credential_pool_policy changes the NEXT read_view with no update_view call:
+    a persisted view's metered/state are a cache, never an input (spec D23)."""
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == "anthropic")
+    _store(provider="anthropic", fp="sha256:spent", windows=[_facts_window(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "s", "label": "SPENT_KEY"}])
+    config = {"credential_pool_policy": {"anthropic": {"metered_overflow": ["SPENT_KEY"]}}}
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: config)
+    # One write persists a view; its metered=True is now only a display cache.
+    written = qs.update_view("default", "anthropic", now=NOW)
+    assert (written["accounts"][0]["metered"], written["accounts"][0]["state"]) == (True, "overflow")
+    # Remove the target from config - the SAME facts must read as not-metered, immediately.
+    config["credential_pool_policy"]["anthropic"]["metered_overflow"] = []
+    after_remove = qs.read_view("default", "anthropic", now=NOW)
+    assert (after_remove["accounts"][0]["metered"], after_remove["accounts"][0]["state"]) == (False, "exhausted")
+    # Add a target back - read_view flips again, still with no rewrite.
+    config["credential_pool_policy"]["anthropic"]["metered_overflow"] = ["SPENT_KEY"]
+    after_add = qs.read_view("default", "anthropic", now=NOW)
+    assert (after_add["accounts"][0]["metered"], after_add["accounts"][0]["state"]) == (True, "overflow")
+
+
+def test_read_view_two_profiles_different_configs_same_facts(qdir, monkeypatch):
+    """Two profiles with different credential_pool_policy read different metered from the SAME
+    shared facts (D23/D33): the classification follows the READING profile's own config."""
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == "anthropic")
+    _store(provider="anthropic", fp="sha256:spent", windows=[_facts_window(percent=100.0)],
+           entries=[{"profile": "alpha", "entry_id": "s", "label": "SPENT_KEY"}])
+    facts_before = qs.read_account_facts("anthropic", "sha256:spent")
+    configs = {
+        "alpha": {"credential_pool_policy": {"anthropic": {"metered_overflow": ["SPENT_KEY"]}}},
+        "beta": {"credential_pool_policy": {}},
+    }
+    active = {"profile": "alpha"}
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: configs[active["profile"]])
+
+    def read(profile):
+        active["profile"] = profile
+        return qs.read_view(profile, "anthropic", now=NOW)
+
+    view_a = read("alpha")
+    view_b = read("beta")
+    assert (view_a["accounts"][0]["metered"], view_a["accounts"][0]["state"]) == (True, "overflow")
+    assert (view_b["accounts"][0]["metered"], view_b["accounts"][0]["state"]) == (False, "exhausted")
+    # Neither read wrote the shared facts, and beta has no view file of its own.
+    assert qs.read_account_facts("anthropic", "sha256:spent") == facts_before
+    assert not qs.view_path("beta", "anthropic").exists()
+
+
+def test_facts_record_stays_facts_only_across_a_policy_edit(qdir, monkeypatch):
+    """A policy edit changes the derived view but never leaks a policy-shaped field into the
+    shared facts record (D23)."""
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == "anthropic")
+    _store(provider="anthropic", fp="sha256:spent", windows=[_facts_window(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "s", "label": "SPENT_KEY"}])
+    before = qs.read_account_facts("anthropic", "sha256:spent")
+    config = {"credential_pool_policy": {"anthropic": {"metered_overflow": ["SPENT_KEY"]}}}
+    monkeypatch.setattr("hermes_cli.config.load_config_readonly", lambda: config)
+    qs.update_view("default", "anthropic", now=NOW)
+    config["credential_pool_policy"]["anthropic"]["metered_overflow"] = []
+    qs.read_view("default", "anthropic", now=NOW)
+    after = qs.read_account_facts("anthropic", "sha256:spent")
+    forbidden = {"metered", "state", "serving", "serving_since", "states", "history", "strategy", "read_health"}
+    assert forbidden.isdisjoint(after)
+    assert after == before
+
+
+def test_replacing_key_creates_new_facts_record(qdir):
+    _store(fp="sha256:aaa")
+    _store(fp="sha256:bbb")
+    assert len(list((qs.accounts_root() / PROVIDER).glob("*.json"))) == 2
+
+
+def test_per_entry_fetch_writes_only_facts(qdir):
+    snapshot = AccountUsageSnapshot(
+        provider=PROVIDER, source="t", fetched_at=NOW,
+        windows=(AccountUsageWindow("Weekly", 30.0, NOW + timedelta(days=3), status="ok"),))
+    assert qs.fetch_account_facts(PROVIDER, "sha256:aaa", fetcher=lambda: snapshot, now=NOW) == "fetched"
+    assert qs.account_facts_path(PROVIDER, "sha256:aaa").exists()
+    assert not (qdir / "snapshot").exists()
+    assert not (qdir / "views").exists()
+    record = qs.read_account_facts(PROVIDER, "sha256:aaa")
+    assert record["windows"][0]["period"] == "7d"
+    assert record["windows"][0]["status"] == "ok"
+
+
+def test_unmapped_label_is_preserved_not_dropped(qdir):
+    snapshot = AccountUsageSnapshot(
+        provider="openrouter", source="t", fetched_at=NOW,
+        windows=(AccountUsageWindow("API key quota", 25.0, None, detail="x"),))
+    windows = qs._windows_from_snapshot(snapshot)
+    assert windows and windows[0]["period"] == "api key quota"
+
+
+def test_non_quota_aware_provider_has_no_view_and_legacy_snapshot_unchanged(qdir):
+    _store(provider="anthropic", fp="sha256:anthropic",
+           windows=[_facts_window(period="7d", percent=10.0)],
+           entries=[{"profile": "default", "entry_id": "a", "label": "a"}])
+    assert qs.read_view("default", "anthropic") is None
+    # multi-account collapse still applies for a non-quota_aware provider
+    qs._store_multi_account("anthropic", NOW)
+    assert qs.read_snapshot("anthropic")["multi_account"] is True
+
+
+def test_quota_aware_multi_account_does_not_blank(qdir, quota_aware):
+    _store(fp="sha256:aaa")
+    qs._store_multi_account(PROVIDER, NOW)
+    assert not (qdir / "snapshot" / f"{PROVIDER}.json").exists()
+    assert qs.read_account_facts(PROVIDER, "sha256:aaa") is not None
+    # the legacy multi-account detector is also gated off for a quota_aware provider
+    assert qs.default_multi_account(PROVIDER) is False
+
+
+def test_profile_isolation_different_policies_same_facts(qdir, quota_aware, monkeypatch):
+    # anthropic: bills_when_plan_spent is False, so only a policy target makes it metered.
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == "anthropic")
+    _store(provider="anthropic", fp="sha256:spent",
+           windows=[_facts_window(percent=100.0)],
+           entries=[{"profile": "alpha", "entry_id": "s", "label": "SPENT_KEY"}])
+    facts_before = qs.read_account_facts("anthropic", "sha256:spent")
+    view_a = qs.update_view("alpha", "anthropic", now=NOW,
+                            policy={"metered_overflow": ["SPENT_KEY"]})
+    view_b = qs.update_view("beta", "anthropic", now=NOW, policy={})
+    assert view_a["accounts"][0]["state"] == "overflow"     # configured metered cushion
+    assert view_b["accounts"][0]["state"] == "exhausted"    # no cushion configured
+    # writing beta left alpha's view and the shared facts untouched
+    assert qs.read_view("alpha", "anthropic", policy={"metered_overflow": ["SPENT_KEY"]})["accounts"][0]["state"] == "overflow"
+    assert qs.read_account_facts("anthropic", "sha256:spent") == facts_before
+
+
+def test_serving_windows_equal_that_accounts_facts(qdir, quota_aware):
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=12.0)])
+    view = qs.update_view("default", PROVIDER, now=NOW, policy={})
+    assert view["serving"] == "sha256:aaa"
+    assert view["windows"] == qs.read_account_facts(PROVIDER, "sha256:aaa")["windows"]
+    assert view["windows"] != []  # not a sum/aggregate
+
+
+def test_history_restarts_when_serving_changes(qdir, quota_aware):
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=10.0)])
+    _store(fp="sha256:bbb", windows=[_facts_window(percent=20.0)])
+    first = qs.update_view("default", PROVIDER, now=NOW, policy={})
+    assert first["serving"] == "sha256:aaa"
+    assert {s["fingerprint"] for s in first["history"]} == {"sha256:aaa"}
+    # A disappears (key replaced) -> serving moves to B; the series must not chain A->B
+    qs.account_facts_path(PROVIDER, "sha256:aaa").unlink()
+    later = NOW + timedelta(minutes=5)
+    second = qs.update_view("default", PROVIDER, now=later, policy={})
+    assert second["serving"] == "sha256:bbb"
+    assert {s["fingerprint"] for s in second["history"]} == {"sha256:bbb"}
+    assert second["serving_since"] != first["serving_since"]
+
+
+def test_pool_writer_publishes_only_a_view(qdir, quota_aware, monkeypatch):
+    _store(fp="sha256:aaa")
+    from agent.credential_pool import CredentialPool, PooledCredential
+    entry = PooledCredential(provider=PROVIDER, id="a1", label="A", auth_type="api_key",
+                             priority=0, source="env:A", access_token="k")
+    entry.extra["secret_fingerprint"] = "sha256:aaa"
+    pool = CredentialPool(PROVIDER, [entry])
+    view = pool.sync_quota_view("default")
+    assert view is not None
+    assert qs.view_path("default", PROVIDER).exists()
+    assert not (qdir / "snapshot").exists()
+
+
+# ============================================================================
+# 4. Fail-open and read health (D16, D26)
+# ============================================================================
+
+def test_fail_open_with_and_without_prior_evidence(qdir, quota_aware):
+    # prior exhausted evidence, then a failed read -> still non-covered, read_health error
+    _store(fp="sha256:spent", windows=[_facts_window(percent=100.0)])
+    qs.store_account_facts(PROVIDER, "sha256:spent", [_facts_window(percent=100.0)],
+                           attempted_at=NOW.isoformat(),
+                           error={"status": 500, "message": "boom", "backoff_s": 60},
+                           backoff_until=(NOW + timedelta(seconds=60)).isoformat(), now=NOW)
+    # no prior evidence -> covered but behind; read_health error
+    qs.store_account_facts(PROVIDER, "sha256:fresh", [], attempted_at=NOW.isoformat(),
+                           error={"status": 500, "message": "boom", "backoff_s": 60},
+                           backoff_until=(NOW + timedelta(seconds=60)).isoformat(), now=NOW)
+    view = qs.read_view("default", PROVIDER, now=NOW, policy={})
+    by_fp = {a["fingerprint"]: a for a in view["accounts"]}
+    assert by_fp["sha256:spent"]["state"] in {"overflow", "exhausted"}
+    assert by_fp["sha256:fresh"]["state"] == "covered"
+    assert by_fp["sha256:spent"]["read_health"] == "error"
+    assert by_fp["sha256:fresh"]["read_health"] == "error"
+
+
+def test_unknown_only_when_no_evidence_ever(qdir, quota_aware):
+    # No facts record at all -> the account is simply absent (no fabricated state).
+    view = qs.read_view("default", PROVIDER, now=NOW, policy={})
+    assert view["accounts"] == []
+    assert view["states"] == {"covered": 0, "overflow": 0, "exhausted": 0}
+
+
+def test_read_health_error_with_state_preserved(qdir, quota_aware):
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=100.0)])
+    qs.store_account_facts(PROVIDER, "sha256:aaa", [_facts_window(percent=100.0)],
+                           attempted_at=NOW.isoformat(),
+                           error={"status": 429, "message": "rate limited", "backoff_s": 300},
+                           backoff_until=(NOW + timedelta(seconds=300)).isoformat(), now=NOW)
+    view = qs.read_view("default", PROVIDER, now=NOW, policy={})
+    acct = view["accounts"][0]
+    assert acct["read_health"] == "error"
+    assert acct["state"] in {"overflow", "exhausted"}  # state kept, not "unknown"
+    assert acct["backoff_until"] is not None
+
+
+# ============================================================================
+# 5. Refresher, attribution, bounds (D42)
+# ============================================================================
+
+def test_no_fetch_on_request_path(qdir, quota_aware, monkeypatch):
+    monkeypatch.setattr(qs, "fetch_account_facts",
+                        lambda *a, **k: pytest.fail("fetch on a request path"))
+    from agent.credential_pool import CredentialPool
+    pool = CredentialPool(PROVIDER, [])
+    pool.select()                       # selection is pure
+    qs.read_view("default", PROVIDER)   # read is pure
+
+
+def test_refresher_starts_and_stops_with_the_pool(qdir, monkeypatch):
+    monkeypatch.setattr("agent.credential_pool.get_pool_strategy", lambda provider: "quota_aware")
+    from agent.credential_pool import load_pool
+    pool = load_pool(PROVIDER)
+    assert qs.is_refresher_running() is True
+    pool.stop_quota_refresher()
+    assert qs.is_refresher_running() is False
+
+
+def test_bare_pool_does_not_start_refresher(qdir, monkeypatch):
+    monkeypatch.setattr("agent.credential_pool.get_pool_strategy", lambda provider: "fill_first")
+    from agent.credential_pool import load_pool
+    load_pool(PROVIDER)
+    assert qs.is_refresher_running() is False
+
+
+def _mk_entry(entry_id, label, key, fingerprint, base_url):
+    from agent.credential_pool import PooledCredential
+    entry = PooledCredential(provider=PROVIDER, id=entry_id, label=label, auth_type="api_key",
+                             priority=0, source=f"env:{label}", access_token=key, base_url=base_url)
+    entry.extra["secret_fingerprint"] = fingerprint
+    return entry
+
+
+# Real opencode-go accounts share ONE base_url (spec.md Current State), so a base_url match
+# can never tell the accounts apart. Attribution must come from the pool's serving state
+# (the entry the session is bound to / last leased), never from the URL (D26/D36/D42).
+SHARED_URL = "https://opencode.ai/zen/go/v1"
+
+
+def _two_account_pool(monkeypatch, *, serving=None, shared_url=SHARED_URL):
+    """Two accounts on ONE base_url, optionally bound to *serving* via the pool's real lease
+    API (``acquire_lease``), which is what a live session actually holds."""
+    from agent.credential_pool import CredentialPool
+    a = _mk_entry("a", "OPENCODE_GO_API_KEY_2", "kA", "sha256:aaa", shared_url)
+    b = _mk_entry("b", "OPENCODE_GO_API_KEY", "kB", "sha256:bbb", shared_url)
+    pool = CredentialPool(PROVIDER, [a, b])
+    if serving is not None:
+        assert pool.acquire_lease(serving) == serving
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
+    return pool
+
+
+@pytest.fixture
+def two_account_pool(qdir, monkeypatch):
+    """Two accounts sharing one base_url, with the session bound to entry ``b``."""
+    return _two_account_pool(monkeypatch, serving="b")
+
+
+def _drive_and_pending(fn):
+    qs._last_touch.clear()
+    with qs._pending_lock:
+        qs._pending_refreshes.clear()
+    fn()
+    return qs.pending_refreshes()
+
+
+def test_attribution_turn_usage_path(two_account_pool):
+    from agent import turn_usage
+    agent = SimpleNamespace(provider=PROVIDER, base_url=SHARED_URL,
+                            api_key="kB", _credential_pool_entry_id="b")
+    pending = _drive_and_pending(lambda: turn_usage._mark_quota_dirty(agent))
+    assert (PROVIDER, "sha256:bbb") in pending
+
+
+def test_attribution_aux_accounting_path(two_account_pool):
+    from agent.aux_accounting import record_aux_usage
+    pending = _drive_and_pending(lambda: record_aux_usage(
+        SimpleNamespace(usage=None), "title_generation",
+        provider=PROVIDER, base_url=SHARED_URL))
+    assert (PROVIDER, "sha256:bbb") in pending
+
+
+def test_attribution_hermes_state_path(two_account_pool, tmp_path):
+    from hermes_state import SessionDB
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", source="cli", model="m")
+        pending = _drive_and_pending(lambda: db.record_auxiliary_usage(
+            "s1", "background_review", model="m", billing_provider=PROVIDER,
+            billing_base_url=SHARED_URL, input_tokens=5))
+    finally:
+        db.close()
+    assert (PROVIDER, "sha256:bbb") in pending
+
+
+def test_attribution_serving_entry_beats_a_base_url_hint(qdir, monkeypatch):
+    """A base_url hint that uniquely names a DIFFERENT account must not win: the pool's serving
+    state is the truth. This is the mis-attribution the base_url resolver allowed."""
+    from agent.credential_pool import CredentialPool
+    a = _mk_entry("a", "OPENCODE_GO_API_KEY_2", "kA", "sha256:aaa", "https://a.example/zen/go/v1")
+    b = _mk_entry("b", "OPENCODE_GO_API_KEY", "kB", "sha256:bbb", "https://b.example/zen/go/v1")
+    pool = CredentialPool(PROVIDER, [a, b])
+    assert pool.acquire_lease("b") == "b"
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
+    from agent.aux_accounting import record_aux_usage
+    pending = _drive_and_pending(lambda: record_aux_usage(
+        SimpleNamespace(usage=None), "title_generation",
+        provider=PROVIDER, base_url="https://a.example/zen/go/v1"))
+    assert (PROVIDER, "sha256:bbb") in pending
+    assert (PROVIDER, "sha256:aaa") not in pending
+
+
+def test_attribution_unknown_never_guesses_another_account(qdir, monkeypatch):
+    """No serving binding and a shared base_url: the served account cannot be identified, so
+    nothing is recorded - never one account's fingerprint (D26/D36/D42)."""
+    _two_account_pool(monkeypatch, serving=None)
+    from agent.aux_accounting import record_aux_usage
+    pending = _drive_and_pending(lambda: record_aux_usage(
+        SimpleNamespace(usage=None), "title_generation",
+        provider=PROVIDER, base_url=SHARED_URL))
+    assert pending == set()
+    assert (PROVIDER, "sha256:aaa") not in pending and (PROVIDER, "sha256:bbb") not in pending
+
+
+def test_attribution_single_account_resolves_without_a_lease(qdir, monkeypatch):
+    """One account is unambiguous: it is attributed even before any selection is recorded."""
+    from agent.credential_pool import CredentialPool
+    solo = _mk_entry("solo", "OPENCODE_GO_API_KEY", "kOnly", "sha256:solo", SHARED_URL)
+    pool = CredentialPool(PROVIDER, [solo])
+    monkeypatch.setattr("agent.credential_pool.load_pool", lambda provider: pool)
+    from agent.aux_accounting import record_aux_usage
+    pending = _drive_and_pending(lambda: record_aux_usage(
+        SimpleNamespace(usage=None), "title_generation",
+        provider=PROVIDER, base_url=SHARED_URL))
+    assert (PROVIDER, "sha256:solo") in pending
+
+
+# ---------------------------------------------------------------------------
+# Production-path attribution: a REAL credential pool (two env-seeded opencode-go
+# accounts sharing ONE base_url) driven through the REAL aux / hermes-state /
+# turn call sites. The pool is not stubbed, so ``pool.current()`` is None (a fresh
+# pool per load) and only the threaded credential can name the serving account.
+# ---------------------------------------------------------------------------
+
+def _fake_aux_client(*, api_key, base_url):
+    """A stand-in aux OpenAI client whose ``.api_key`` is the credential that serves —
+    the outermost boundary the repo's aux tests stub; everything downstream is real."""
+    from unittest.mock import MagicMock
+    client = MagicMock()
+    client.api_key = api_key
+    client.base_url = base_url
+    client.chat.completions.create.return_value = SimpleNamespace(
+        model="glm-5",
+        choices=[SimpleNamespace(message=SimpleNamespace(role="assistant", content="t", tool_calls=None),
+                                 finish_reason="stop")],
+        usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5),
+    )
+    return client
+
+
+@pytest.fixture
+def real_two_account_pool(qdir, tmp_path, monkeypatch):
+    """Two REAL opencode-go credentials (env-seeded, one shared base_url) in a temp
+    HERMES_HOME, so ``load_pool`` builds the production pool. Loading twice mirrors
+    production: the first load persists the sanitized rows that carry
+    ``secret_fingerprint``; the second reads them back (an env row re-hydrates its secret)."""
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "kB-serving")
+    monkeypatch.setenv("OPENCODE_GO_API_KEY_2", "kA-other")
+    from agent.credential_pool import load_pool
+    load_pool(PROVIDER)          # seed + persist the sanitized rows
+    pool = load_pool(PROVIDER)   # read them back WITH their fingerprints
+    by_key = {}
+    for entry in pool.entries():
+        key = entry.runtime_api_key
+        fp = entry.extra.get("secret_fingerprint")
+        assert key and fp, f"unexpected real pool entry: {entry!r}"
+        by_key[key] = {"fingerprint": fp, "entry_id": entry.id}
+    assert set(by_key) == {"kB-serving", "kA-other"}
+    assert by_key["kB-serving"]["fingerprint"] != by_key["kA-other"]["fingerprint"]
+    return by_key
+
+
+def test_aux_call_attributes_the_serving_account_with_a_real_pool(real_two_account_pool, monkeypatch):
+    """The REAL aux production path (``call_llm`` -> the validation chokepoint) records the
+    fingerprint of the account whose credential actually served, not the sibling that shares
+    the one base_url (D26/D36/D42). With a fresh (unbound) pool ``served_fingerprint`` cannot
+    resolve from ``pool.current()``, so only the threaded credential can name the account."""
+    from agent import auxiliary_client as aux
+    serving = real_two_account_pool["kB-serving"]
+    other = real_two_account_pool["kA-other"]
+    client = _fake_aux_client(api_key="kB-serving", base_url=SHARED_URL)
+    monkeypatch.setattr(aux, "_get_cached_client", lambda *a, **k: (client, "glm-5"))
+    pending = _drive_and_pending(lambda: aux.call_llm(
+        task="title_generation", provider=PROVIDER, model="glm-5",
+        messages=[{"role": "user", "content": "hi"}]))
+    assert (PROVIDER, serving["fingerprint"]) in pending
+    assert (PROVIDER, other["fingerprint"]) not in pending
+
+
+def test_hermes_state_path_attributes_the_serving_account_with_a_real_pool(real_two_account_pool, tmp_path):
+    """A background-review fork routes its aggregate through the hermes-state per-call
+    boundary (``record_auxiliary_usage`` -> ``_record_model_usage``); the fork's served
+    credential must travel with it (D42), not fall back to the unbound pool."""
+    from agent.background_review import _record_review_usage_to_parent, _snapshot_review_usage
+    from hermes_state import SessionDB
+    serving = real_two_account_pool["kB-serving"]
+    other = real_two_account_pool["kA-other"]
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        db.create_session("s1", source="cli", model="m")
+        fork = SimpleNamespace(
+            model="m", provider=PROVIDER, base_url=SHARED_URL,
+            api_key="kB-serving", _credential_pool_entry_id=serving["entry_id"],
+            session_input_tokens=10, session_output_tokens=2,
+            session_cache_read_tokens=0, session_cache_write_tokens=0,
+            session_reasoning_tokens=0, session_api_calls=1,
+            session_estimated_cost_usd=None,
+        )
+        parent = SimpleNamespace(_session_db=db, session_id="s1")
+        usage = _snapshot_review_usage(fork)
+        pending = _drive_and_pending(lambda: _record_review_usage_to_parent(parent, usage))
+    finally:
+        db.close()
+    assert (PROVIDER, serving["fingerprint"]) in pending
+    assert (PROVIDER, other["fingerprint"]) not in pending
+
+
+def test_turn_path_attributes_the_serving_account_with_a_real_pool(real_two_account_pool):
+    """No regression on the turn path: it still names the serving account with a real pool."""
+    from agent import turn_usage
+    serving = real_two_account_pool["kB-serving"]
+    other = real_two_account_pool["kA-other"]
+    agent = SimpleNamespace(provider=PROVIDER, base_url=SHARED_URL,
+                            api_key="kB-serving", _credential_pool_entry_id=serving["entry_id"])
+    pending = _drive_and_pending(lambda: turn_usage._mark_quota_dirty(agent))
+    assert (PROVIDER, serving["fingerprint"]) in pending
+    assert (PROVIDER, other["fingerprint"]) not in pending
+
+
+def test_aux_call_with_unmatched_credential_records_nothing(real_two_account_pool, monkeypatch):
+    """A credential that names no account in the pool must record nothing, never a guess (D26)."""
+    from agent import auxiliary_client as aux
+    client = _fake_aux_client(api_key="kNOT-in-the-pool", base_url=SHARED_URL)
+    monkeypatch.setattr(aux, "_get_cached_client", lambda *a, **k: (client, "glm-5"))
+    pending = _drive_and_pending(lambda: aux.call_llm(
+        task="title_generation", provider=PROVIDER, model="glm-5",
+        messages=[{"role": "user", "content": "hi"}]))
+    assert pending == set()
+
+
+def test_backoff_account_staleness_is_visible(qdir, quota_aware):
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=5.0)])
+    qs.store_account_facts(PROVIDER, "sha256:aaa", [_facts_window(percent=5.0)],
+                           fetched_at=None, attempted_at=NOW.isoformat(),
+                           error={"status": 429, "message": "rate limited", "backoff_s": 300},
+                           backoff_until=(NOW + timedelta(seconds=300)).isoformat(), now=NOW)
+    view = qs.read_view("default", PROVIDER, now=NOW, policy={})
+    acct = view["accounts"][0]
+    assert acct["read_health"] == "error"
+    assert acct["backoff_until"] is not None
+
+
+def test_per_entry_fetch_uses_the_fingerprints_credential(qdir, two_account_pool, monkeypatch):
+    seen = {}
+
+    def fake_for(provider, *, api_key=None, base_url=None):
+        seen["args"] = (provider, api_key, base_url)
+        return AccountUsageSnapshot(provider=provider, source="t", fetched_at=NOW, windows=())
+
+    monkeypatch.setattr(qs, "default_fetcher_for", fake_for)
+    assert qs.fetch_account_facts(PROVIDER, "sha256:bbb", now=NOW) == "fetched"
+    assert seen["args"] == (PROVIDER, "kB", SHARED_URL)
+
+
+def test_refresher_drains_the_per_account_queue(qdir, monkeypatch):
+    import time
+    calls = []
+    monkeypatch.setattr(qs, "fetch_account_facts",
+                        lambda provider, fp, **k: calls.append((provider, fp)) or "fetched")
+    qs.enqueue_refresh(PROVIDER, "sha256:bbb")
+    refresher = qs.QuotaRefresher(interval_s=0.05, jitter=0.0)
+    refresher.start()
+    try:
+        deadline = time.monotonic() + 3
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.02)
+    finally:
+        refresher.stop()
+    assert (PROVIDER, "sha256:bbb") in calls
+
+
+# ============================================================================
+# 7 (B1 half). Capability and configuration (D15, D38, D46)
+# ============================================================================
+
+def test_opencode_go_declares_capabilities():
+    from providers import get_provider_profile
+    profile = get_provider_profile("opencode-go")
+    assert profile.supports_per_account_usage is True
+    assert profile.bills_when_plan_spent is True
+
+
+def test_provider_without_capability_defaults_false():
+    from providers.base import ProviderProfile
+    assert ProviderProfile.supports_per_account_usage is False
+    assert ProviderProfile.bills_when_plan_spent is False
+
+
+def test_spent_plan_with_no_matching_target_classifies_overflow(qdir, quota_aware):
+    """opencode-go bills after the plan is spent: a spent window with NO configured target
+    classifies ``overflow`` (metered), not ``exhausted`` (D38/D46)."""
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=100.0)],
+           entries=[{"profile": "default", "entry_id": "a", "label": "OPENCODE_GO_API_KEY_2"}])
+    view = qs.read_view("default", PROVIDER, now=NOW, policy={})  # no metered_overflow
+    assert view["accounts"][0]["metered"] is True
+    assert view["accounts"][0]["state"] == "overflow"
+
+
+# ============================================================================
+# Profile scope: two HERMES_HOMEs -> different profile names, shared facts
+# ============================================================================
+
+def test_two_hermes_homes_two_profiles(tmp_path, monkeypatch, qdir):
+    shared = qdir
+    monkeypatch.setattr(qs, "quota_dir", lambda: shared)
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    for name in ("alpha", "beta"):
+        home = tmp_path / ".hermes" / "profiles" / name
+        home.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(home))
+        assert qs.current_profile() == name
+    # both profiles read the SAME shared facts, each with its own view file
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes" / "profiles" / "alpha"))
+    _store(fp="sha256:aaa", entries=[{"profile": "alpha", "entry_id": "a", "label": "A"}])
+    qs.update_view("alpha", PROVIDER, now=NOW, policy={})
+    qs.update_view("beta", PROVIDER, now=NOW, policy={})
+    assert qs.view_path("alpha", PROVIDER).exists()
+    assert qs.view_path("beta", PROVIDER).exists()
+    assert len(list((qs.accounts_root() / PROVIDER).glob("*.json"))) == 1
+    assert json.loads(qs.view_path("alpha", PROVIDER).read_text())["provider"] == PROVIDER

@@ -30,6 +30,9 @@ class AccountUsageWindow:
     used_percent: Optional[float] = None
     reset_at: Optional[datetime] = None
     detail: Optional[str] = None
+    # Provider's own window state marker (e.g. opencode-go's "rate-limited"). Outranks
+    # ``used_percent`` when deciding a window is spent (spec D2/D25); None means "no marker".
+    status: Optional[str] = None
 
 
 @dataclass(frozen=True)

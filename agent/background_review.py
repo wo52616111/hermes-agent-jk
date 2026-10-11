@@ -765,6 +765,10 @@ def _snapshot_review_usage(review_agent: Any) -> Dict[str, Any]:
         **{key: getattr(review_agent, key, None) for key in ("model", "provider", "base_url")},
         **{key: int(getattr(review_agent, f"session_{key}", 0) or 0) for key in _USAGE_COUNTERS},
         "estimated_cost_usd": getattr(review_agent, "session_estimated_cost_usd", None),
+        # D42: the fork's served credential, so the parent-session mark names the account that
+        # actually served the fork's calls (the fork has no session DB of its own).
+        "api_key": getattr(review_agent, "api_key", None),
+        "entry_id": getattr(review_agent, "_credential_pool_entry_id", None),
     }
 
 
@@ -783,6 +787,7 @@ def _record_review_usage_to_parent(parent_agent: Any, usage: Dict[str, Any]) -> 
             session_id, task="background_review", model=usage.get("model"),
             billing_provider=usage.get("provider"), billing_base_url=usage.get("base_url"),
             estimated_cost_usd=usage.get("estimated_cost_usd"),
+            served_api_key=usage.get("api_key"), served_entry_id=usage.get("entry_id"),
             api_call_count=counts.pop("api_calls"), **counts,
         )
     except Exception as e:

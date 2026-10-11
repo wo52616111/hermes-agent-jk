@@ -84,6 +84,17 @@ class ProviderProfile:
     # has no registered profile.
     supports_vision: bool = False
 
+    # ── Quota-aware credential selection capability (spec D15/D38) ──
+    # True when this provider exposes per-CREDENTIAL subscription usage (a fetcher that honours
+    # an explicit credential). A provider with False degrades the `quota_aware` strategy to
+    # `fill_first` with one log line. Default False: only providers that really answer per
+    # account opt in.
+    supports_per_account_usage: bool = False
+    # True when this provider silently bills a metered balance once the plan window is spent
+    # (no error to react to). An account on such a provider classifies as metered when it is
+    # configured as the metered cushion OR when nothing matches - and warns (D38/D46).
+    bills_when_plan_spent: bool = False
+
     # True when the provider's API accepts list-type tool message
     # content (multipart with image_url parts).  Defaults to True for
     # backward compatibility.  Set to False for providers that accept
