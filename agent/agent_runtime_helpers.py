@@ -1213,9 +1213,6 @@ def quota_aware_turn_boundary(agent) -> None:
         return
     if chosen is None or chosen.id == current_id:
         return
-    if not credential_pool_entry_serves_endpoint(chosen, getattr(agent, "base_url", None)):
-        # Defensive: the candidate set was already endpoint-filtered above.
-        return
     try:
         swapped = agent._swap_credential(chosen) is not False
     except Exception as exc:  # noqa: BLE001
@@ -1256,6 +1253,7 @@ def _revert_credential_rotation(agent) -> None:
             chosen = pool.quota_choose(
                 current_id=getattr(agent, "_credential_pool_entry_id", None),
                 mode="turn_boundary",
+                endpoint=getattr(agent, "base_url", None),
             )
         except Exception as exc:  # noqa: BLE001
             logger.debug("Quota-aware revert check failed: %s", exc)

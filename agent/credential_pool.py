@@ -717,8 +717,10 @@ def _metered_config_warning(
     * a configured list exists but does not name an account (unmatched / ambiguous target), or
     * no ``metered_overflow`` is configured at all.
 
-    The message names the account(s) that will classify metered anyway and the configured
-    targets, so an unconfigured, mistyped or stale target can never produce silent spending.
+    The message names the configured targets and states the CONSEQUENCE for this shape: a
+    declared list is authoritative (D49), so an unmatched one meters nothing; only an absent
+    (or malformed) key lets the provider's billing default classify accounts metered. Either
+    way an unconfigured, mistyped or stale target can never produce silent spending.
     """
     if not _provider_bills_when_plan_spent(provider):
         return None
@@ -734,8 +736,15 @@ def _metered_config_warning(
     labels = ", ".join(sorted({
         (getattr(e, "label", None) or getattr(e, "id", "") or "?") for e in entries
     })) or "(none)"
+    if isinstance(targets, list):
+        # D49: a declared list is authoritative - an unmatched target names no account, so
+        # nothing is metered (the safe direction: no billing).
+        consequence = (f"account(s) {labels} - no account is treated as metered "
+                       "(a declared list is authoritative)")
+    else:
+        consequence = f"account(s) {labels} classify metered by provider default"
     return (f"provider bills after the plan is spent, but metered_overflow is {configured}; "
-            f"account(s) {labels} classify metered anyway")
+            f"{consequence}")
 
 
 def resolve_selection_policy(
@@ -1243,10 +1252,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
     def _warn_if_overflow(self, entry: Optional[PooledCredential], states: dict) -> None:
         """Warning (b): name the account and bucket whenever an overflow account serves (D46).
 
-        The dedup key is the SERVED account AND its served state, not the last overflow id:
-        the warning fires on each transition INTO metered service (overflow A → covered B →
-        overflow A warns twice; a covered account that later turns overflow warns too), while
-        repeated selections of the same still-overflow account stay quiet.
+        The dedup key is the SERVED account AND its served state: the warning fires on each
+        transition INTO metered service (overflow A → covered B → overflow A warns twice; a
+        covered account that later turns overflow warns too), while repeated selections of the
+        same still-overflow account stay quiet.
         """
         if entry is None:
             return
@@ -1312,9 +1321,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                       now: Optional[datetime] = None) -> List[PooledCredential]:
         """Order a caller-supplied candidate set by the pool's selection policy (D44).
 
-        The internal-repair path builds its candidate set (endpoint filter) then calls this
-        instead of taking "the first non-dead match". A non-``quota_aware`` pool orders by
-        priority, preserving today's behaviour.
+        The internal-repair path builds its candidate set (endpoint filter) then calls this.
+        A non-``quota_aware`` pool orders by priority, preserving today's behaviour.
         """
         from agent import quota_aware_selection as qsel
         if not self.is_quota_aware():
