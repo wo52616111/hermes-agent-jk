@@ -1205,14 +1205,16 @@ def quota_aware_turn_boundary(agent) -> None:
     if not current_id:
         return  # no live binding to re-evaluate
     try:
-        chosen = pool.quota_choose(current_id=current_id, mode="turn_boundary")
+        chosen = pool.quota_choose(
+            current_id=current_id, mode="turn_boundary", endpoint=getattr(agent, "base_url", None),
+        )
     except Exception as exc:  # noqa: BLE001
         logger.debug("quota-aware turn-boundary check failed: %s", exc)
         return
     if chosen is None or chosen.id == current_id:
         return
     if not credential_pool_entry_serves_endpoint(chosen, getattr(agent, "base_url", None)):
-        # Mixed same-provider pool (#68237): the entry serves another endpoint; do not rebind.
+        # Defensive: the candidate set was already endpoint-filtered above.
         return
     try:
         swapped = agent._swap_credential(chosen) is not False

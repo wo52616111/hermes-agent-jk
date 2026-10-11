@@ -638,19 +638,17 @@ def get_pool_policy_block(provider: str) -> dict:
     return block if isinstance(block, dict) else {}
 
 
-def _entry_target_dict(entry: PooledCredential) -> dict:
-    """The identity fields ``quota_state._target_matches`` resolves a policy target against."""
-    return {"entry_id": getattr(entry, "id", None),
-            "label": getattr(entry, "label", None),
-            "source": getattr(entry, "source", None)}
-
-
 def _policy_targets_resolve(targets: list, entries: List[PooledCredential]) -> bool:
-    """Every target must match EXACTLY one entry: unresolvable or duplicate-label -> False."""
-    from agent import quota_state as qs
+    """Every target must resolve to EXACTLY one entry (D45 precedence, the shared owner).
+
+    Uses the same :func:`credential_pool_admin.resolve_entry_target` the CLI uses, so a
+    valid ``metered_overflow`` config (id / label / ``env:VAR`` / bare VAR / 1-based index)
+    is never judged ambiguous or unresolvable and silently degraded to ``fill_first``.
+    """
+    from agent.credential_pool_admin import resolve_entry_target
     for target in targets:
-        matches = [e for e in entries if qs._target_matches(target, _entry_target_dict(e))]
-        if len(matches) != 1:
+        _index, entry, error = resolve_entry_target(target, entries)
+        if entry is None or error:
             return False
     return True
 
@@ -1184,9 +1182,12 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # entries" and the caller's 401 retry loop runs unbounded. Reset when a
         # real entry is identified or an escape path returns None.
         self._unmatched_rotation_streak: int = 0
-        # D46(b): the last entry we warned about serving from its metered bucket, so the
-        # "serving from a billing account" warning fires per switch/session, not per request.
-        self._last_overflow_warn_id: Optional[str] = None
+        # D46(b): the last account we SERVED and its state at that time, so the "serving
+        # from a billing account" warning fires on every transition INTO metered service
+        # (a fresh switch, or a covered account that turns overflow) rather than only once
+        # per overflow account id. A → covered B → A warns again because B reset the state.
+        self._last_served_id: Optional[str] = None
+        self._last_served_state: Optional[str] = None
         # D42: one lightweight refresher thread owned by the pool, started lazily with it and
         # stopped with it. Only a quota_aware pool starts it; a bare CLI process that never
         # binds a quota_aware pool never spawns it.
@@ -1240,14 +1241,24 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         return qsel.states_from_view(entries, view, now)
 
     def _warn_if_overflow(self, entry: Optional[PooledCredential], states: dict) -> None:
-        """Warning (b): name the account and bucket whenever an overflow account serves (D46)."""
+        """Warning (b): name the account and bucket whenever an overflow account serves (D46).
+
+        The dedup key is the SERVED account AND its served state, not the last overflow id:
+        the warning fires on each transition INTO metered service (overflow A → covered B →
+        overflow A warns twice; a covered account that later turns overflow warns too), while
+        repeated selections of the same still-overflow account stay quiet.
+        """
         if entry is None:
             return
         from agent import quota_aware_selection as qsel
         state = states.get(entry.id, qsel.UNKNOWN_STATE)
-        if state.state != qsel.OVERFLOW or self._last_overflow_warn_id == entry.id:
+        already_serving = (
+            self._last_served_id == entry.id and self._last_served_state == state.state
+        )
+        self._last_served_id = entry.id
+        self._last_served_state = state.state
+        if state.state != qsel.OVERFLOW or already_serving:
             return
-        self._last_overflow_warn_id = entry.id
         logger.warning(
             "credential pool: serving %s from its metered bucket (plan window spent) — %s",
             entry.label or entry.id[:8], self.provider,
@@ -1269,17 +1280,33 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         return chosen
 
     def quota_choose(self, *, current_id: Optional[str] = None,
-                     mode: str = "turn_boundary", now: Optional[datetime] = None) -> Optional[PooledCredential]:
+                     mode: str = "turn_boundary", now: Optional[datetime] = None,
+                     endpoint: Optional[str] = None) -> Optional[PooledCredential]:
         """Public quota-aware pick over the currently available entries (D22/D41).
 
         Used by the turn-boundary checkpoint, ``_resolve_from_pool`` and the revert guard.
-        Reads stored facts only; never fetches (D11).
+        Reads stored facts only; never fetches (D11). When *endpoint* is given the candidate
+        set is restricted to eligible entries that serve it BEFORE the choose/stickiness rules
+        run, so one incompatible order head no longer aborts the whole check (a covered sibling
+        that matches the endpoint is still found).
         """
         if not self.is_quota_aware():
             return None
         with self._lock:
             available, _pending = self._available_entries(clear_expired=True, refresh=False)
+        if endpoint is not None:
+            available = [e for e in available if credential_pool_entry_serves_endpoint(e, endpoint)]
         return self._quota_pick(available, current_id, mode, now=now)
+
+    def eligible_entries(self) -> List[PooledCredential]:
+        """The entries currently eligible to serve: the same non-cooling/non-dead set
+        ``acquire_lease``/``select`` select from (D44). Lets the internal-repair candidate
+        filter exclude a cooling entry BEFORE ordering, instead of relying on a refused
+        lease that would re-select outside the endpoint filter.
+        """
+        with self._lock:
+            available, _pending = self._available_entries(clear_expired=True, refresh=False)
+        return available
 
     def order_entries(self, entries: List[PooledCredential], *,
                       now: Optional[datetime] = None) -> List[PooledCredential]:

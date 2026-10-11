@@ -3,10 +3,89 @@ from __future__ import annotations
 
 import time
 from dataclasses import replace
-from typing import Any, Optional, Tuple, TYPE_CHECKING
+from typing import Any, List, Optional, Tuple, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agent.credential_pool import PooledCredential
+
+
+def target_names_identity(
+    target: Any, entry_id: Any, label: Any, source: Any, index: Optional[int] = None,
+) -> bool:
+    """Whether *target* names the account carrying these identity fields (D45).
+
+    The ONE implementation of the accepted target FORMS: exact entry id, label (case-
+    insensitive), ``env:<VAR>`` source, and a bare ``<VAR>`` normalised to ``env:<VAR>``
+    (the form a user sees in ``credential_pool_policy``). ``index`` adds the 1-based
+    position form. Precedence between forms is applied by :func:`resolve_entry_target`;
+    this predicate answers only "does this target name THIS account", so callers that
+    classify rather than resolve (the metered-account classification) share the same
+    forms instead of a second, divergent matcher.
+    """
+    raw = str(target or "").strip()
+    if not raw:
+        return False
+    if entry_id is not None and raw == str(entry_id):
+        return True
+    if label is not None and str(label).strip() and raw.lower() == str(label).strip().lower():
+        return True
+    src = str(source or "").strip()
+    if src:
+        env_ref = raw if raw.lower().startswith("env:") else f"env:{raw}"
+        if src.lower() == env_ref.lower():
+            return True
+    if index is not None and raw.isdigit() and int(raw) == index:
+        return True
+    return False
+
+
+def resolve_entry_target(
+    target: Any, entries: List["PooledCredential"],
+) -> Tuple[Optional[int], Optional["PooledCredential"], Optional[str]]:
+    """Resolve a target to a pool entry by the D45 precedence (the ONE owner).
+
+    Order: exact entry id > unique exact label > ``env:<VAR>`` source > bare ``<VAR>``
+    normalised to ``env:<VAR>`` > 1-based index. Returns ``(1-based index, entry, None)``
+    or ``(None, None, reason)``; an ambiguous label/source is unresolvable, never a
+    silent first match.
+    """
+    raw = str(target or "").strip()
+    if not raw:
+        return None, None, "No credential target provided."
+
+    for idx, entry in enumerate(entries, start=1):
+        if str(getattr(entry, "id", "") or "") == raw:
+            return idx, entry, None
+
+    label_hits = [
+        (idx, entry)
+        for idx, entry in enumerate(entries, start=1)
+        if str(getattr(entry, "label", "") or "").strip()
+        and raw.lower() == str(entry.label).strip().lower()
+    ]
+    if len(label_hits) == 1:
+        return label_hits[0][0], label_hits[0][1], None
+    if len(label_hits) > 1:
+        return None, None, f'Ambiguous credential label "{raw}". Use the numeric index or entry id instead.'
+
+    env_ref = raw if raw.lower().startswith("env:") else f"env:{raw}"
+    env_hits = [
+        (idx, entry)
+        for idx, entry in enumerate(entries, start=1)
+        if str(getattr(entry, "source", "") or "").strip()
+        and env_ref.lower() == str(entry.source).strip().lower()
+    ]
+    if len(env_hits) == 1:
+        return env_hits[0][0], env_hits[0][1], None
+    if len(env_hits) > 1:
+        return None, None, f'Ambiguous credential source "{env_ref}". Use the numeric index or entry id instead.'
+
+    if raw.isdigit():
+        index = int(raw)
+        if 1 <= index <= len(entries):
+            return index, entries[index - 1], None
+        return None, None, f"No credential #{index}."
+    return None, None, f'No credential matching "{raw}".'
 
 
 def _cleared_status_copy(entry: PooledCredential) -> PooledCredential:
@@ -88,30 +167,8 @@ class CredentialPoolAdminMixin:
             return self._find(lambda e: e.id == credential_id)
 
     def resolve_target(self, target: Any) -> Tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
-        raw = str(target or "").strip()
-        if not raw:
-            return None, None, "No credential target provided."
-
         with self._lock:
-            for idx, entry in enumerate(self._entries, start=1):
-                if entry.id == raw:
-                    return idx, entry, None
-
-            label_matches = [
-                (idx, entry)
-                for idx, entry in enumerate(self._entries, start=1)
-                if entry.label.strip().lower() == raw.lower()
-            ]
-            if len(label_matches) == 1:
-                return label_matches[0][0], label_matches[0][1], None
-            if len(label_matches) > 1:
-                return None, None, f'Ambiguous credential label "{raw}". Use the numeric index or entry id instead.'
-            if raw.isdigit():
-                index = int(raw)
-                if 1 <= index <= len(self._entries):
-                    return index, self._entries[index - 1], None
-                return None, None, f"No credential #{index}."
-            return None, None, f'No credential matching "{raw}".'
+            return resolve_entry_target(target, self._entries)
 
     def add_entry(self, entry: PooledCredential) -> PooledCredential:
         from agent.credential_pool import _next_priority, write_credential_pool
