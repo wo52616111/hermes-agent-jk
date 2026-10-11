@@ -35,6 +35,70 @@ def usage_snapshot_document(snapshot) -> dict:
     }
 
 
+def _short_fingerprint(fingerprint) -> str | None:
+    """``sha256:6e4e98…`` -> ``6e4e98``: enough to tell two accounts apart, never key material."""
+    raw = str(fingerprint or "")
+    if not raw:
+        return None
+    digest = raw.split(":", 1)[1] if ":" in raw else raw
+    return digest[:6]
+
+
+def _usage_view(provider: str) -> dict | None:
+    """The profile-scoped view for ``provider`` (D41), or None for a provider without one."""
+    from agent import quota_state
+    try:
+        return quota_state.read_view(quota_state.current_profile(), provider)
+    except Exception:  # noqa: BLE001 — the CLI must never crash on a bad view
+        return None
+
+
+def _usage_accounts_document(provider: str) -> list[dict]:
+    """Nested per-account records (D20): effective ``state`` AND ``read_health`` per account, read
+    through ``read_view``. Empty for a provider whose legacy group is unchanged."""
+    view = _usage_view(provider)
+    if not view:
+        return []
+    records = []
+    for account in view.get("accounts") or []:
+        records.append({
+            "label": account.get("label"),
+            "fingerprint": _short_fingerprint(account.get("fingerprint")),
+            "state": account.get("state"),
+            "metered": bool(account.get("metered")),
+            "read_health": account.get("read_health"),
+            "last_error": account.get("last_error"),
+            "attempted_at": account.get("attempted_at"),
+            "age_s": account.get("age_s"),
+            "windows": [
+                {"period": w.get("period"), "used_percent": w.get("used_percent"),
+                 "resets_at": w.get("reset_at"), "status": w.get("status")}
+                for w in account.get("windows") or []
+            ],
+        })
+    return records
+
+
+def _refresh_accounts(provider: str) -> int:
+    """Synchronously re-fetch every account of a per-account provider (D20/D42): the user asked with
+    ``--refresh``. Returns how many accounts were fetched."""
+    from agent import quota_state
+    view = _usage_view(provider)
+    if not view:
+        return 0
+    fetched = 0
+    for account in view.get("accounts") or []:
+        fingerprint = account.get("fingerprint")
+        if not isinstance(fingerprint, str) or not fingerprint:
+            continue
+        try:
+            quota_state.fetch_account_facts(provider, fingerprint)
+            fetched += 1
+        except Exception:  # noqa: BLE001 — one account's failure must not abort the rest
+            continue
+    return fetched
+
+
 def cmd_usage(args: argparse.Namespace) -> int:
     """Print the configured (or ``--provider``) account's usage windows; exit 1 when nothing could be fetched."""
     if getattr(args, "subscriptions", False) or getattr(args, "refresh", False):
@@ -77,7 +141,18 @@ def _cmd_usage_subscriptions(args: argparse.Namespace) -> int:
                 outcomes[provider] = quota_state.refresh(provider, stale_s=stale)
             except Exception as exc:  # noqa: BLE001 — report, never crash a router call
                 outcomes[provider] = f"error: {type(exc).__name__}"
+            # A provider with per-account views is refreshed per account (D20/D42): the legacy
+            # provider snapshot no longer owns its state.
+            accounts = _refresh_accounts(provider)
+            if accounts:
+                outcomes[provider] = f"{outcomes[provider]}; {accounts} accounts"
     groups = [g for g in quota_state.status_groups() if g["provider"] in targets]
+    # Additive (D20): each group gains its per-account array read through ``read_view``; the
+    # ``subscriptions`` array's existing keys and semantics are untouched.
+    for group in groups:
+        accounts = _usage_accounts_document(group["provider"])
+        if accounts:
+            group["accounts"] = accounts
     if getattr(args, "json", False):
         print(json.dumps({"subscriptions": groups, "refresh": outcomes}, indent=2))
         return 0
@@ -95,11 +170,31 @@ def _cmd_usage_subscriptions(args: argparse.Namespace) -> int:
         for window in group["windows"]:
             mark = " (rolled over)" if window.get("rolled") else ""
             print(f"  {window['period']:9} {window['used_percent']:5.1f}%  resets {window.get('reset_at') or '-'}{mark}")
+        for account in group.get("accounts") or []:
+            _print_account_line(account)
         if group.get("hint"):
             print(f"  hint: {group['hint']}")
     for provider, outcome in outcomes.items():
         print(f"refresh {provider}: {outcome}", file=sys.stderr)
     return 0
+
+
+def _print_account_line(account: dict) -> None:
+    """One per-account sub-row: label + short fingerprint, effective state and read health, and this
+    account's own windows. Never key material."""
+    label = account.get("label") or account.get("fingerprint") or "-"
+    fingerprint = account.get("fingerprint")
+    ident = f"{label} [{fingerprint}]" if fingerprint else str(label)
+    state = str(account.get("state") or "unknown")
+    if state == "overflow" and account.get("metered"):
+        state = "overflow(metered)"
+    windows = "·".join(
+        f"{w.get('period')} {(w.get('used_percent') or 0):.0f}%" for w in account.get("windows") or []
+    )
+    line = f"  • {ident:34} {state:17} {account.get('read_health') or 'unknown'}"
+    if windows:
+        line += f"  {windows}"
+    print(line)
 
 
 def build_usage_parser(subparsers) -> None:
