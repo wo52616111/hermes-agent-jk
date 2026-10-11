@@ -392,3 +392,16 @@ def test_connected_cache_still_expires_without_file_changes(qdir, monkeypatch):
     state["connected"] = False
     assert qs.status_groups(now=NOW + timedelta(seconds=10))
     assert qs.status_groups(now=NOW + timedelta(seconds=qs.CONNECTED_CACHE_S + 1)) == []
+
+
+def test_serving_account_prefers_the_served_account_and_falls_back_to_the_first():
+    """Both readers (CLI subscription group, gateway capacity group) name the provider line from the
+    served account, so its windows are the only ones on that line (D14/D34/D41)."""
+    first = {"fingerprint": "sha256:aaa", "windows": [{"period": "7d"}]}
+    second = {"fingerprint": "sha256:bbb", "windows": [{"period": "5h"}]}
+    view = {"accounts": [first, second], "serving": "sha256:bbb"}
+    assert qs.serving_account(view) is second
+    assert qs.serving_account({**view, "serving": "sha256:gone"}) is first
+    assert qs.serving_account({"accounts": [first], "serving": None}) is first
+    assert qs.serving_account({"accounts": [], "serving": "sha256:bbb"}) == {}
+    assert qs.serving_account(None) == {}

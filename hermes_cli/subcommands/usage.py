@@ -90,9 +90,9 @@ def _subscription_group_from_view(provider: str, view: dict) -> dict:
     for a provider the gateway renders. ``windows`` is the SERVING account's own - never a sum or
     an average (D14/D34).
     """
+    from agent import quota_state
     accounts = list(view.get("accounts") or [])
-    by_fp = {a.get("fingerprint"): a for a in accounts}
-    serving = by_fp.get(view.get("serving")) or (accounts[0] if accounts else {})
+    serving = quota_state.serving_account(view)
     return {
         "provider": provider,
         "fetched_at": serving.get("fetched_at"),
