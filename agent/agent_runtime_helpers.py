@@ -1190,6 +1190,43 @@ def _rebind_primary_credential_pool(agent, primary_provider, primary_model, matc
         )
 
 
+def quota_aware_turn_boundary(agent) -> None:
+    """D22 checkpoint: at a turn boundary, move a live session off a non-covered account when
+    a covered sibling exists. Reads stored, read-time-rolled state only - never fetches (D11).
+
+    This is the ONE deliberate mid-conversation move (D4); it exists to stop a session from
+    silently billing a metered balance. It never fires inside a request, and a local
+    concurrency counter never triggers it (D43): only the quota order does.
+    """
+    pool = getattr(agent, "_credential_pool", None)
+    if pool is None or not getattr(pool, "is_quota_aware", lambda: False)():
+        return
+    current_id = getattr(agent, "_credential_pool_entry_id", None)
+    if not current_id:
+        return  # no live binding to re-evaluate
+    try:
+        chosen = pool.quota_choose(current_id=current_id, mode="turn_boundary")
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("quota-aware turn-boundary check failed: %s", exc)
+        return
+    if chosen is None or chosen.id == current_id:
+        return
+    if not credential_pool_entry_serves_endpoint(chosen, getattr(agent, "base_url", None)):
+        # Mixed same-provider pool (#68237): the entry serves another endpoint; do not rebind.
+        return
+    try:
+        swapped = agent._swap_credential(chosen) is not False
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("quota-aware turn-boundary swap failed: %s", exc)
+        return
+    if swapped:
+        logger.info(
+            "Quota-aware turn boundary: switched credential %s -> %s (%s) - the previous "
+            "account is no longer covered by plan quota",
+            current_id, chosen.id, getattr(chosen, "label", None) or chosen.id[:8],
+        )
+
+
 def _revert_credential_rotation(agent) -> None:
     """Move a live session back onto the credential a quota bench rotated it off, once the bench
     lifts. New sessions already do this through ``select()``; without it a long-lived (gateway)
@@ -1209,6 +1246,21 @@ def _revert_credential_rotation(agent) -> None:
         return
     if entry is None:
         return  # still cooling down; check again next turn
+    if getattr(pool, "is_quota_aware", lambda: False)():
+        # D22/D43: never proactively revert onto a non-covered entry while the session's
+        # current account is still covered (covered-first). The quota order decides whether
+        # ``revert_id`` is the right landing spot; if not, stop trying.
+        try:
+            chosen = pool.quota_choose(
+                current_id=getattr(agent, "_credential_pool_entry_id", None),
+                mode="turn_boundary",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Quota-aware revert check failed: %s", exc)
+            chosen = None
+        if chosen is None or chosen.id != revert_id:
+            agent._credential_pool_revert_id = None
+            return
     if agent._swap_credential(entry) is not False:
         logger.info(
             "Credential %s (%s) available again — reverted pool rotation",

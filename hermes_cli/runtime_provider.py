@@ -622,6 +622,10 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: Dict[s
         pool = None
     if not (pool and pool.has_credentials()):
         return None
+    # Quota-aware pools order by per-account quota through ``select()`` (D3/D22/D41):
+    # ``_select_unlocked`` consults ``quota_state.read_view`` and the pure ``choose()``, so
+    # runtime resolution returns the same entry every other checkpoint would (covered-first,
+    # sticky while covered).
     entry = pool.select(model=target_model or None)
     if entry is None:
         return None

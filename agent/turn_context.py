@@ -1021,6 +1021,11 @@ def build_turn_context(
     set_review_attended(getattr(agent, "_review_attended", False))
     agent._restore_primary_runtime()
     _publish_runtime_main(agent)
+    # D22 turn-boundary checkpoint: move a live session off a non-covered account when a
+    # covered sibling exists (the one deliberate mid-conversation switch). Reads stored
+    # state only; a no-op for non-quota_aware pools.
+    from agent.agent_runtime_helpers import quota_aware_turn_boundary
+    quota_aware_turn_boundary(agent)
     _refresh_mcp_tools_between_turns(agent)
 
     if isinstance(user_message, str):
