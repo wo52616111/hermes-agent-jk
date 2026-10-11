@@ -1493,15 +1493,29 @@ class QuotaRefresher:
                     logger.debug("quota refresh %s/%s failed", provider, fingerprint, exc_info=True)
 
 
-# Pools that currently hold the process-wide refresher: the thread runs while ANY of them is
-# live and stops once the last one releases it, so one pool's teardown never kills another's
-# refreshing (D42). Ownership is dropped on an explicit release AND when a pool is garbage
-# collected, so a pool nobody keeps does not leave an orphan daemon fetching forever.
-_refresher_pools: "weakref.WeakSet" = weakref.WeakSet()
+# Holds on the process-wide refresher: the thread runs while ANY pool holds it and stops once the
+# last hold is released, so one pool's teardown never kills another's refreshing (D42). A hold ends
+# on an explicit release AND when its pool is garbage collected, so a pool nobody keeps does not
+# leave an orphan daemon fetching forever. ``_owner_tokens`` is the authoritative set of live
+# holds; ``_pool_owner_token`` and ``_owner_finalizers`` index it, and a token leaves all three
+# together through ``_drop_owner`` so they cannot drift apart (D42).
 _pool_owner_token: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 _owner_tokens: set = set()
 _owner_finalizers: dict = {}
 _owner_token_seq = itertools.count(1)
+
+
+def _drop_owner(token: int):
+    """Under ``_refresher_guard``: forget every trace of ``token`` — its live hold, its pool index
+    entry and its finalizer (returned undetached). A released token must leave no index entry
+    behind: a pool that releases and starts again would otherwise match its own stale entry, take
+    no fresh hold, and leave its later stop with nothing to stop (D42)."""
+    _owner_tokens.discard(token)
+    finalizer = _owner_finalizers.pop(token, None)
+    for pool, held in list(_pool_owner_token.items()):
+        if held == token:
+            del _pool_owner_token[pool]
+    return finalizer
 
 
 def _release_owner(token: int, timeout: float = 2.0) -> None:
@@ -1510,8 +1524,7 @@ def _release_owner(token: int, timeout: float = 2.0) -> None:
     with _refresher_guard:
         if token not in _owner_tokens:
             return
-        _owner_tokens.discard(token)
-        finalizer = _owner_finalizers.pop(token, None)
+        finalizer = _drop_owner(token)
         if _owner_tokens:
             return
         refresher = _refresher
@@ -1546,7 +1559,6 @@ def start_refresher(*, pool=None, interval_s: int = REFRESH_INTERVAL_S,
             token = next(_owner_token_seq)
             _pool_owner_token[pool] = token
             _owner_tokens.add(token)
-            _refresher_pools.add(pool)
             _owner_finalizers[token] = weakref.finalize(pool, _release_owner, token)
         if _refresher is None:
             _refresher = QuotaRefresher(interval_s=interval_s, fetcher=fetcher)
@@ -1559,7 +1571,8 @@ def start_refresher(*, pool=None, interval_s: int = REFRESH_INTERVAL_S,
 
 def stop_refresher(timeout: float = 2.0, *, pool=None) -> None:
     """Release ``pool``'s hold on the refresher; the thread stops once no pool holds it. With no
-    ``pool`` this is a forced process-wide stop."""
+    ``pool`` this is a forced process-wide stop: it ends every hold, including one taken while it
+    ran, and stops the worker."""
     global _refresher
     if pool is not None:
         with _refresher_guard:
@@ -1573,10 +1586,15 @@ def stop_refresher(timeout: float = 2.0, *, pool=None) -> None:
     for token in tokens:
         _release_owner(token, timeout)
     with _refresher_guard:
+        # End the force as ONE lifecycle step: holds still standing — including one registered
+        # while the releases above ran — end here, together with the stop signal, so no hold can be
+        # left pointing at a stopped refresher and no worker can outlive the stop (D42). A pool
+        # that starts again afterwards takes a fresh hold and a fresh worker.
+        for token in list(_owner_tokens):
+            finalizer = _drop_owner(token)
+            if finalizer is not None:
+                finalizer.detach()
         refresher = _refresher
-        # Forced stop: signal under the same guard a registration+start uses, so a concurrent
-        # registration cannot land between the signal and the join and be left on a worker this
-        # stop then kills (D42).
         if refresher is not None:
             refresher.request_stop()
     if refresher is not None:
