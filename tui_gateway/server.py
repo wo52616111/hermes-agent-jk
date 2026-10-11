@@ -2266,16 +2266,31 @@ def _age_account_usage_groups(groups: list[dict], now: datetime | None = None) -
     now = now or datetime.now().astimezone()
     aged = []
     for group in groups:
-        next_group = dict(group)
-        try:
-            fetched_at = datetime.fromisoformat(str(group.get("fetched_at") or "").replace("Z", "+00:00"))
-            if fetched_at.tzinfo is None:
-                fetched_at = fetched_at.astimezone()
-            next_group["age_s"] = max(0, int((now - fetched_at).total_seconds()))
-        except (TypeError, ValueError):
-            pass
+        next_group = _reaged(group, now)
+        accounts = group.get("accounts")
+        if isinstance(accounts, list):
+            # Each account ages from ITS OWN ``fetched_at``: the idle clock must not leave an
+            # account's ``age_s`` frozen at the value the view was read with, or a stale account
+            # keeps looking fresh while the provider line's age advances.
+            next_group["accounts"] = [
+                _reaged(account, now) if isinstance(account, dict) else account for account in accounts
+            ]
         aged.append(next_group)
     return aged
+
+
+def _reaged(record: dict, now: datetime) -> dict:
+    """A copy of ``record`` with ``age_s`` recomputed from its own ``fetched_at`` (left untouched
+    when the timestamp is missing or unparseable)."""
+    next_record = dict(record)
+    try:
+        fetched = datetime.fromisoformat(str(record.get("fetched_at") or "").replace("Z", "+00:00"))
+        if fetched.tzinfo is None:
+            fetched = fetched.astimezone()
+        next_record["age_s"] = max(0, int((now - fetched).total_seconds()))
+    except (TypeError, ValueError):
+        pass
+    return next_record
 
 
 def _session_usage_snapshot(session: dict | None, *, account_usage_groups: list[dict] | None = None) -> dict:

@@ -498,6 +498,8 @@ interface QuotaPiece {
  * A group with `accounts[]` (a `quota_aware` provider's per-account view, D19) renders its
  * provider line as `label ·N accounts` plus a state badge and pushes its windows to the
  * per-account sub-rows (`layoutQuotaAccounts`) - never a sum or an average across accounts.
+ * When those sub-rows are TRIMMED because they do not fit `subRowsBudget`, the provider line
+ * falls back to the SERVING account's OWN windows so the numbers are never invisible.
  */
 export function layoutQuotaGroups(
   groups: AccountUsageGroup[],
@@ -506,9 +508,33 @@ export function layoutQuotaGroups(
   now = Date.now(),
   activeProvider?: string | null,
   leadingSeparator = true,
-  activeAccount?: string | null
+  activeAccount?: string | null,
+  subRowsBudget?: number
 ) {
   const activeIndex = groups.findIndex(group => group.provider === activeProvider)
+  // The width the per-account sub-rows render at; the provider line's own budget when the caller
+  // does not render sub-rows at all (so a group whose sub-rows are absent shows its numbers).
+  const accountRowsBudget = subRowsBudget ?? budget
+
+  // A group whose sub-rows were trimmed (or never rendered) must carry the serving account's own
+  // windows on the provider line; one whose sub-rows rendered in full keeps them off (D29 shape).
+  const accountsTrimmed = new Map<number, boolean>()
+  groups.forEach((group, gi) => {
+    if (Array.isArray(group.accounts) && group.accounts.length > 0) {
+      accountsTrimmed.set(gi, !quotaAccountLayout(group, activeAccount ?? null, accountRowsBudget, t, now).full)
+    }
+  })
+
+  const servingWindows = (group: AccountUsageGroup) => {
+    const accounts = group.accounts ?? []
+
+    const account =
+      accounts.find(a => a.fingerprint === group.serving) ??
+      accounts.find(a => a.fingerprint === activeAccount) ??
+      accounts[0]
+
+    return account?.windows ?? []
+  }
 
   const keep = (count: number) =>
     groups
@@ -517,14 +543,17 @@ export function layoutQuotaGroups(
 
   type FiveHour = 'all' | 'active' | 'none'
 
-  const build = (count: number, resets: boolean, fiveHour: FiveHour, showCount: boolean) =>
+  const build = (count: number, resets: boolean, fiveHour: FiveHour, showCount: boolean, fallbackNumbers = true) =>
     keep(count).map(({ gi, group }) => {
       const label = QUOTA_PROVIDER_LABELS[group.provider] ?? group.provider
       const marker = quotaStaleMarker(group)
       const freshnessAgeS = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
       const hasFreshnessAge = freshnessAgeS !== null
       const accountCount = Array.isArray(group.accounts) ? group.accounts.length : 0
-      const countSuffix = showCount && accountCount > 1 ? ` ·${accountCount} accounts` : ''
+      const trimmed = accountsTrimmed.get(gi) ?? false
+      // `·N accounts` belongs to the sub-row design: once the sub-rows are trimmed the provider
+      // line carries the serving account's real numbers instead.
+      const countSuffix = showCount && !trimmed && accountCount > 1 ? ` ·${accountCount} accounts` : ''
 
       const separator = !leadingSeparator && gi === 0 ? '' : ' │'
 
@@ -539,8 +568,11 @@ export function layoutQuotaGroups(
 
       let windowCount = 0
 
-      // A per-account group shows its windows on the sub-rows, not inline.
-      for (const window of accountCount > 0 ? [] : group.windows) {
+      // Windows live on the sub-rows while they render; when they are trimmed the provider line
+      // falls back to the SERVING account's own windows (never a sum, never another account's).
+      const inlineWindows = accountCount === 0 ? group.windows : trimmed && fallbackNumbers ? servingWindows(group) : []
+
+      for (const window of inlineWindows) {
         if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
           continue
         }
@@ -565,8 +597,7 @@ export function layoutQuotaGroups(
         })
       }
 
-      // The provider-line badge speaks for THIS session's account (D29) and is never dropped
-      // while the group renders, so a narrow terminal that loses the sub-rows still sees it.
+      // D29: the badge speaks for THIS session's account and is never dropped while the group renders.
       const badge = quotaAccountBadge(group, activeAccount)
 
       if (badge) {
@@ -603,6 +634,12 @@ export function layoutQuotaGroups(
   // Last resort: drop the account count (the provider-line badge stays).
   for (let count = groups.length; count >= 1; count--) {
     candidates.push(build(count, false, 'none', false))
+  }
+
+  // Ultra-narrow last resort for a trimmed per-account group: drop the inline fallback numbers
+  // (badge stays) so the group still renders instead of vanishing entirely.
+  for (let count = groups.length; count >= 1; count--) {
+    candidates.push(build(count, false, 'none', false, false))
   }
 
   const chosen = candidates.find(layout => width(layout) <= budget) ?? []
@@ -644,17 +681,17 @@ export interface QuotaAccountRow {
  * stale/429 marker. The active account is bold. Degrades by dropping the other accounts' rows
  * first, then the active account's lower-priority windows (D29).
  */
-export function layoutQuotaAccounts(
+function quotaAccountLayout(
   group: AccountUsageGroup,
   activeAccount: string | null,
   budget: number,
   t: Theme,
-  now = Date.now()
-): QuotaAccountRow[] {
+  now: number
+): { full: boolean; rows: QuotaAccountRow[] } {
   const accounts = group.accounts ?? []
 
   if (accounts.length === 0) {
-    return []
+    return { full: false, rows: [] }
   }
 
   const activeFp = activeAccount ?? group.serving ?? null
@@ -722,8 +759,14 @@ export function layoutQuotaAccounts(
       return { active: isActive, segments }
     })
 
+  // Each sub-row renders in its own Box and does NOT share a horizontal budget with its
+  // siblings, so a candidate fits when its WIDEST row fits. Summing the rows would discard a
+  // layout whose rows each fit on their own (hiding an account's state and numbers).
   const width = (rows: QuotaAccountRow[]) =>
-    rows.reduce((sum, row) => sum + row.segments.reduce((acc, segment) => acc + stringWidth(segment.text), 0), 0)
+    rows.reduce(
+      (max, row) => Math.max(max, row.segments.reduce((acc, segment) => acc + stringWidth(segment.text), 0)),
+      0
+    )
 
   const candidates = [
     build(accounts, 'all'),
@@ -732,7 +775,20 @@ export function layoutQuotaAccounts(
     build(primary, 'none')
   ]
 
-  return candidates.find(rows => width(rows) <= budget) ?? candidates[candidates.length - 1] ?? []
+  const chosen = candidates.find(rows => width(rows) <= budget)
+  const rows = chosen ?? candidates[candidates.length - 1] ?? []
+
+  return { full: chosen === candidates[0], rows }
+}
+
+export function layoutQuotaAccounts(
+  group: AccountUsageGroup,
+  activeAccount: string | null,
+  budget: number,
+  t: Theme,
+  now = Date.now()
+): QuotaAccountRow[] {
+  return quotaAccountLayout(group, activeAccount, budget, t, now).rows
 }
 
 // Fixed label gutter (`─ ctx` / `─ other`) so both capacity rows start their content in one column.
@@ -781,6 +837,7 @@ function CapacityRow({
   ctxLabel,
   quotaGroups = [],
   quotaWindows,
+  subRowsBudget,
   t,
   pct
 }: {
@@ -799,6 +856,8 @@ function CapacityRow({
   /** Every connected subscription provider (`account_usage_all`). Wins over `quotaWindows`. */
   quotaGroups?: AccountUsageGroup[]
   quotaWindows: NonNullable<Usage['account_usage']>['windows']
+  /** Width the active group's per-account sub-rows render at; omitted when none render. */
+  subRowsBudget?: number
   t: Theme
 }) {
   const hasQuota = quotaGroups.length > 0 || quotaWindows.length > 0
@@ -813,7 +872,7 @@ function CapacityRow({
   }
 
   const quota: QuotaSegment[] = quotaGroups.length
-    ? layoutQuotaGroups(quotaGroups, budget, t, Date.now(), activeProvider, true, activeAccount)
+    ? layoutQuotaGroups(quotaGroups, budget, t, Date.now(), activeProvider, true, activeAccount, subRowsBudget)
     : quotaWindows.flatMap(window => {
         const used = Math.max(0, Math.min(100, Math.round(window.used_percent)))
         const reset = formatResetRemaining(window.reset_at)
@@ -1278,7 +1337,16 @@ export function StatusRule({
   const activeAccount = usage.account_usage_active_account ?? null
 
   const activeTableQuota = activeQuotaGroup
-    ? layoutQuotaGroups([activeQuotaGroup], tableRightBudget, t, now, activeQuotaGroup.provider, false, activeAccount)
+    ? layoutQuotaGroups(
+        [activeQuotaGroup],
+        tableRightBudget,
+        t,
+        now,
+        activeQuotaGroup.provider,
+        false,
+        activeAccount,
+        capacityWidth
+      )
     : []
 
   const remainingOtherQuota = layoutQuotaGroups(secondaryQuotaGroups.slice(1), tableRightBudget, t, now, null, false)
@@ -1489,6 +1557,7 @@ export function StatusRule({
         pct={pct}
         quotaGroups={primaryQuotaGroups}
         quotaWindows={quotaWindows}
+        subRowsBudget={activeQuotaGroup ? capacityWidth : undefined}
         t={t}
       />
     )
