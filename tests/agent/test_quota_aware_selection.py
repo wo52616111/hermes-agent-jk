@@ -1,0 +1,546 @@
+"""Quota-aware credential SELECTION wiring, slice B2
+(spec D3/D4/D10/D12/D21/D22/D27/D37/D39/D43/D44/D45/D47).
+
+Behaviour contracts for the pure ``choose()``/ordering and every real selection entry point:
+``CredentialPool.select`` (and ``_resolve_from_pool``), ``_acquire_lease_under_lock``, the
+turn-boundary checkpoint, ``_revert_credential_rotation`` and the internal repair. Real
+imports, a temp quota dir and a temp HERMES_HOME; nothing reads a source file's text.
+
+Covers verification.md section 1 (pure ranking) and section 6 (every checkpoint), plus the
+D28/D47 refusal -> selection integration and the D44 repair/pin rules.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+
+import pytest
+
+from agent import quota_aware_selection as qsel
+from agent import quota_aware_state as st
+from agent import quota_state as qs
+from agent.credential_pool import CredentialPool, PooledCredential
+
+NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+PROVIDER = "opencode-go"
+# Real opencode-go accounts share ONE base_url (spec.md Current State).
+SHARED_URL = "https://opencode.ai/zen/go/v1"
+
+
+# --------------------------------------------------------------------------- fixtures
+
+
+@pytest.fixture
+def qdir(tmp_path, monkeypatch):
+    """Temp quota dir with no real network/credential access."""
+    root = tmp_path / "quota"
+    monkeypatch.setattr(qs, "quota_dir", lambda: root)
+    monkeypatch.setattr(qs, "default_fetcher", lambda provider: pytest.fail("real fetch"))
+    monkeypatch.setattr(qs, "default_connected", lambda provider: True)
+    monkeypatch.setattr(qs, "default_multi_account", lambda provider: False)
+    monkeypatch.setattr(qs, "credential_files", lambda: [])
+    qs._last_touch.clear()
+    qs._connected_cache.clear()
+    qs.stop_refresher()
+    with qs._pending_lock:
+        qs._pending_refreshes.clear()
+    # Clear the once-per-provider degradation warnings so a policy test starts clean.
+    import agent.credential_pool as cp
+    cp._POLICY_WARNED.clear()
+    yield root
+    qs.stop_refresher()
+    with qs._pending_lock:
+        qs._pending_refreshes.clear()
+    cp._POLICY_WARNED.clear()
+
+
+@pytest.fixture
+def quota_aware(monkeypatch):
+    """Force PROVIDER onto the ``quota_aware`` strategy without touching config."""
+    monkeypatch.setattr("agent.credential_pool.get_pool_strategy",
+                        lambda provider: "quota_aware" if provider == PROVIDER else "fill_first")
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+
+
+# --------------------------------------------------------------------------- builders
+
+
+def _win(*, period="7d", percent=0.0, reset_seconds=None, reset_days=None, status=None):
+    reset = NOW + (timedelta(seconds=reset_seconds) if reset_seconds is not None
+                   else timedelta(days=reset_days if reset_days is not None else 3))
+    return {"period": period, "used_percent": percent, "status": status,
+            "reset_at": reset.isoformat(), "window_seconds": 7 * 86400}
+
+
+def _facts(fp, windows, *, entries=None, metered_exhausted_until=qs._UNSET, error=None,
+           when=NOW, fetched=True):
+    return qs.store_account_facts(
+        PROVIDER, fp, windows,
+        entries=entries or [{"profile": "default", "entry_id": fp[-3:], "label": fp[-3:]}],
+        fetched_at=when.isoformat() if fetched else None,
+        attempted_at=when.isoformat(), error=error,
+        metered_exhausted_until=metered_exhausted_until, now=when,
+    )
+
+
+def _entry(entry_id, *, label=None, key=None, fingerprint=None, priority=0, base_url=SHARED_URL):
+    e = PooledCredential(provider=PROVIDER, id=entry_id, label=label or entry_id,
+                         auth_type="api_key", priority=priority, source=f"env:{label or entry_id}",
+                         access_token=key or f"key-{entry_id}", base_url=base_url)
+    e.extra["secret_fingerprint"] = fingerprint or f"sha256:{entry_id}"
+    return e
+
+
+def _pool(entries, *, strategy="quota_aware"):
+    return CredentialPool(PROVIDER, list(entries))
+
+
+class _Agent:
+    """Minimal agent stand-in for the turn-boundary / revert checkpoints."""
+
+    def __init__(self, pool, entry_id, *, base_url=SHARED_URL, model="glm-5",
+                 provider=PROVIDER, revert_id=None):
+        self._credential_pool = pool
+        self._credential_pool_entry_id = entry_id
+        self._credential_pool_revert_id = revert_id
+        self.base_url = base_url
+        self.model = model
+        self.provider = provider
+        self.swaps = []
+
+    def _swap_credential(self, entry):
+        self.swaps.append(entry.id)
+        self._credential_pool_entry_id = entry.id
+        return True
+
+
+# ============================================================================
+# 1. Pure ranking (D10/D21/D39/D47)
+# ============================================================================
+
+
+def _states(**by_id):
+    """Build a states map from ``state`` / ``windows`` / ``recovery`` kwargs per entry id."""
+    out = {}
+    for eid, spec in by_id.items():
+        out[eid] = qsel.SelectionState(
+            state=spec.get("state", "unknown"),
+            windows=tuple(spec.get("windows", ())),
+            effective_recovery=spec.get("recovery"),
+        )
+    return out
+
+
+def test_total_order_classes():
+    entries = [_entry("p1", priority=1), _entry("p0", priority=0),
+               _entry("ov"), _entry("ex")]
+    states = _states(p1={"state": "covered"}, p0={"state": "covered"},
+                     ov={"state": "overflow"}, ex={"state": "exhausted"})
+    ordered = [e.id for e in qsel.ordered_candidates(entries, states, qsel.Policy(), NOW)]
+    assert ordered == ["p0", "p1", "ov", "ex"]
+
+
+def test_priority_wins_over_drain_reset():
+    """A(priority 0, reset 300) vs B(priority 1, reset 100) -> A first (D39)."""
+    a = _entry("A", priority=0)
+    b = _entry("B", priority=1)
+    states = _states(
+        A={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=300)]},
+        B={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=100)]},
+    )
+    ordered = [e.id for e in qsel.ordered_candidates([a, b], states, qsel.Policy(), NOW)]
+    assert ordered == ["A", "B"]
+
+
+def test_same_priority_drains_sooner_reset_first():
+    a = _entry("A", priority=0)
+    b = _entry("B", priority=0)
+    states = _states(
+        A={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=300)]},
+        B={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=100)]},
+    )
+    ordered = [e.id for e in qsel.ordered_candidates([a, b], states, qsel.Policy(), NOW)]
+    assert ordered == ["B", "A"]  # sooner reset drained first within one priority
+
+
+def test_earliest_reset_first_false_drops_the_reset_term():
+    a = _entry("A", priority=0)
+    b = _entry("B", priority=0)
+    states = _states(
+        A={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=300)]},
+        B={"state": "covered", "windows": [_win(percent=50.0, reset_seconds=100)]},
+    )
+    ordered = [e.id for e in qsel.ordered_candidates([a, b], states, qsel.Policy(earliest_reset_first=False), NOW)]
+    assert ordered == ["A", "B"]  # stable input order; no reset term at all
+
+
+def test_covered_beats_unknown():
+    c = _entry("C")
+    u = _entry("U")
+    states = _states(C={"state": "covered"}, U={"state": "unknown"})
+    ordered = [e.id for e in qsel.ordered_candidates([u, c], states, qsel.Policy(), NOW)]
+    assert ordered == ["C", "U"]
+
+
+def test_exhausted_order_by_effective_recovery_then_priority():
+    a = _entry("A", priority=5)
+    b = _entry("B", priority=0)
+    c = _entry("C", priority=1)
+    states = _states(
+        A={"state": "exhausted", "recovery": NOW + timedelta(seconds=50)},
+        B={"state": "exhausted", "recovery": NOW + timedelta(seconds=200)},
+        C={"state": "exhausted", "recovery": NOW + timedelta(seconds=50)},
+    )
+    ordered = [e.id for e in qsel.ordered_candidates([a, b, c], states, qsel.Policy(), NOW)]
+    # sooner recovery first; tie between A(prio5) and C(prio1) -> priority breaks it.
+    assert ordered == ["C", "A", "B"]
+
+
+def test_covered_tiebreak_ignores_recovery_and_is_constant():
+    """Inside one priority the drain key is the most-constrained window's reset; a covered
+    account carries no recovery term, so a wild ``effective_recovery`` cannot reorder it."""
+    a = _entry("A", priority=0)
+    b = _entry("B", priority=0)
+    states = _states(
+        A={"state": "covered", "windows": [_win(percent=80.0, reset_seconds=100)],
+           "recovery": NOW + timedelta(days=99)},
+        B={"state": "covered", "windows": [_win(percent=10.0, reset_seconds=50)],
+           "recovery": NOW + timedelta(days=1)},
+    )
+    first = [e.id for e in qsel.ordered_candidates([a, b], states, qsel.Policy(), NOW)]
+    # A later clock leaves the covered keys unchanged (no recovery term).
+    second = [e.id for e in qsel.ordered_candidates([a, b], states, qsel.Policy(), NOW + timedelta(hours=1))]
+    assert first == second == ["B", "A"]  # B's binding window resets sooner -> drained first
+
+
+def test_n3_mixed_no_n2_assumption():
+    entries = [_entry("a"), _entry("b"), _entry("c")]
+    states = _states(a={"state": "overflow"}, b={"state": "covered"}, c={"state": "covered"})
+    ordered = [e.id for e in qsel.ordered_candidates(entries, states, qsel.Policy(), NOW)]
+    assert ordered[0] == "b" and ordered[-1] == "a" and len(ordered) == 3
+
+
+def test_turn_boundary_keeps_current_covered_even_when_a_sibling_becomes_covered():
+    a = _entry("A", priority=1)
+    b = _entry("B", priority=0)
+    states = _states(A={"state": "covered"}, B={"state": "covered"})
+    chosen = qsel.choose([a, b], states, qsel.Policy(), "A", qsel.MODE_TURN_BOUNDARY, NOW)
+    assert chosen.id == "A"  # sticky; a higher-priority sibling does not move a live session
+
+
+def test_overflow_current_moves_to_a_covered_sibling():
+    a = _entry("A", priority=0)
+    b = _entry("B", priority=1)
+    states = _states(A={"state": "overflow"}, B={"state": "covered"})
+    chosen = qsel.choose([a, b], states, qsel.Policy(), "A", qsel.MODE_TURN_BOUNDARY, NOW)
+    assert chosen.id == "B"
+
+
+def test_unknown_current_stays():
+    a = _entry("A")
+    b = _entry("B")
+    states = _states(A={"state": "unknown"}, B={"state": "covered"})
+    chosen = qsel.choose([a, b], states, qsel.Policy(), "A", qsel.MODE_TURN_BOUNDARY, NOW)
+    assert chosen.id == "A"  # fail-open sticky
+
+
+def test_session_start_ignores_current_binding():
+    a = _entry("A", priority=1)
+    b = _entry("B", priority=0)
+    states = _states(A={"state": "covered"}, B={"state": "covered"})
+    chosen = qsel.choose([a, b], states, qsel.Policy(), "A", qsel.MODE_SESSION_START, NOW)
+    assert chosen.id == "B"  # initial assignment takes the head of the order
+
+
+# ============================================================================
+# 6. Every checkpoint (D22/D27/D37/D43/D44)
+# ============================================================================
+
+
+def test_select_prefers_covered_over_metered(qdir, quota_aware):
+    """A covered account is never passed over for a metered one."""
+    _facts("sha256:aaa", [_win(percent=10.0)])
+    _facts("sha256:bbb", [_win(percent=100.0)])  # plan spent -> overflow (metered)
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    assert pool.select().id == "a"
+
+
+def test_select_metered_strictly_last(qdir, quota_aware):
+    """Nothing covered: a usable metered account outranks a cushion-refused one (D17/D47)."""
+    _facts("sha256:aaa", [_win(percent=100.0)])  # overflow (metered)
+    _facts("sha256:bbb", [_win(percent=100.0)],
+           metered_exhausted_until=NOW + timedelta(hours=1))  # exhausted (refusal)
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    assert pool.select().id == "a"
+
+
+def test_select_is_sticky_within_the_same_account(qdir, quota_aware):
+    """A live session keeps its covered account; a counter/sibling never rebinds it."""
+    _facts("sha256:aaa", [_win(percent=10.0)])
+    _facts("sha256:bbb", [_win(percent=20.0)])
+    pool = _pool([_entry("a", priority=1, fingerprint="sha256:aaa"),
+                  _entry("b", priority=0, fingerprint="sha256:bbb")])
+    first = pool.select()
+    assert first.id == "b"  # initial: priority 0
+    # B stays covered -> every later select keeps B even though A now looks better on reset.
+    assert pool.select().id == "b"
+    assert pool.select().id == "b"
+
+
+def test_turn_boundary_switches_overflow_to_covered(qdir, quota_aware, caplog):
+    """Headline D22 case: a session silently overflowing moves at the next turn boundary."""
+    from agent.agent_runtime_helpers import quota_aware_turn_boundary
+    _facts("sha256:aaa", [_win(percent=100.0)])  # A overflow (billing)
+    _facts("sha256:bbb", [_win(percent=5.0)])    # B covered
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    agent = _Agent(pool, "a")
+    with caplog.at_level(logging.INFO):
+        quota_aware_turn_boundary(agent)
+    assert agent.swaps == ["b"]
+    assert agent._credential_pool_entry_id == "b"
+    assert any("turn boundary" in r.message.lower() for r in caplog.records)
+
+
+def test_turn_boundary_keeps_a_covered_session(qdir, quota_aware):
+    from agent.agent_runtime_helpers import quota_aware_turn_boundary
+    _facts("sha256:aaa", [_win(percent=10.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=1, fingerprint="sha256:aaa"),
+                  _entry("b", priority=0, fingerprint="sha256:bbb")])
+    agent = _Agent(pool, "a")
+    quota_aware_turn_boundary(agent)
+    assert agent.swaps == []  # sticky while covered
+
+
+def test_D43_initial_spread_but_live_session_not_rebound(qdir, quota_aware):
+    """A new child run may spread to a free covered account; a live session is never rebound."""
+    _facts("sha256:aaa", [_win(percent=10.0)])
+    _facts("sha256:bbb", [_win(percent=10.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    assert pool.acquire_lease("a") == "a"      # A holds a lease (cap default 1)
+    assert pool.acquire_lease() == "b"         # initial assignment spreads to the free covered B
+    # A live session on A stays on A even though B is idle.
+    chosen = pool.quota_choose(current_id="a", mode="turn_boundary")
+    assert chosen.id == "a"
+
+
+def test_D37_covered_at_cap_never_descends_then_a_real_refusal_moves_it(qdir, quota_aware):
+    """A covered account at its cap must not push work to an idle overflow account (D37)."""
+    _facts("sha256:aaa", [_win(percent=10.0)])   # A covered
+    _facts("sha256:bbb", [_win(percent=100.0)])  # B overflow (metered, idle)
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    assert pool.acquire_lease("a") == "a"          # A at its cap (default 1)
+    assert pool.acquire_lease() == "a"             # overcommit A; never descend to B
+    # A real refusal (429) DOES move it.
+    entry = _entry("a", fingerprint="sha256:aaa", key="key-a")
+    nxt = pool.mark_exhausted_and_rotate(status_code=429, api_key_hint="key-a", credential_id="a")
+    assert nxt is not None and nxt.id == "b"
+
+
+def test_quota_summary_reports_has_covered(qdir, quota_aware):
+    _facts("sha256:aaa", [_win(percent=10.0)])
+    _facts("sha256:bbb", [_win(percent=100.0)])
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    summary = pool.quota_summary()
+    assert summary["has_covered"] is True
+    assert summary["counts"]["covered"] == 1 and summary["counts"]["overflow"] == 1
+    # nothing covered -> has_covered False
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    pool2 = _pool([_entry("a", fingerprint="sha256:aaa")])
+    assert pool2.quota_summary()["has_covered"] is False
+
+
+def test_has_available_semantics_unchanged(qdir, quota_aware):
+    """D27: has_available stays cooldown/dead based so the D17 handout still reaches rotation."""
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    pool = _pool([_entry("a", fingerprint="sha256:aaa")])
+    assert pool.has_available() is True  # a quota-spent account is still handed out
+    assert pool.select() is not None
+
+
+def test_no_fetch_on_the_selection_path(qdir, quota_aware, monkeypatch):
+    monkeypatch.setattr(qs, "fetch_account_facts",
+                        lambda *a, **k: pytest.fail("fetch on a request path"))
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    pool.select()
+    pool.acquire_lease()
+    pool.quota_choose(current_id="a", mode="turn_boundary")
+
+
+# ---- D28/D47 refusal recording integrated with selection -------------------
+
+
+def test_D28_D47_refusal_while_overflow_removes_it_from_selection(qdir, quota_aware):
+    """A cushion refusal recorded while A served as ``overflow`` makes A ``exhausted`` and it
+    drops behind a covered sibling (D28/D47)."""
+    _facts("sha256:aaa", [_win(percent=100.0)])   # A overflow (serving as cushion)
+    _facts("sha256:bbb", [_win(percent=5.0)])     # B covered
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    # A is selected only because it outranks B by priority; with both non-covered? no - B is covered.
+    assert pool.select().id == "b"
+    assert qs.record_refusal(PROVIDER, "sha256:aaa", state="overflow",
+                             reset_at=NOW + timedelta(hours=2), now=NOW) is True
+    # A is now exhausted; selection still returns covered B.
+    assert pool.select().id == "b"
+    states = pool._quota_states(pool.entries())
+    assert states["a"].state == "exhausted"
+
+
+def test_refusal_while_covered_records_nothing(qdir, quota_aware):
+    _facts("sha256:aaa", [_win(percent=10.0)])
+    assert qs.record_refusal(PROVIDER, "sha256:aaa", state="covered",
+                             reset_at=NOW + timedelta(hours=2), now=NOW) is False
+    assert qs.read_account_facts(PROVIDER, "sha256:aaa")["metered_exhausted_until"] is None
+
+
+# ---- D44 explicit pins vs internal repair ---------------------------------
+
+
+def test_D44_operator_pin_is_honoured_even_when_not_covered(qdir, quota_aware):
+    _facts("sha256:aaa", [_win(percent=10.0)])   # A covered
+    _facts("sha256:bbb", [_win(percent=100.0)])  # B overflow (not covered)
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    assert pool.acquire_lease("b", pin=True) == "b"
+
+
+def test_D44_internal_explicit_id_is_validated(qdir, quota_aware):
+    """An internal caller may not bypass eligibility: a cooled/dead id falls back to order."""
+    _facts("sha256:aaa", [_win(percent=10.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    a = _entry("a", priority=0, fingerprint="sha256:aaa")
+    b = _entry("b", priority=1, fingerprint="sha256:bbb")
+    b.last_status = "dead"
+    pool = _pool([a, b])
+    # Internal lease of the dead entry is refused; the ordered pick returns the live one.
+    assert pool.acquire_lease("b") == "a"
+
+
+def test_D44_internal_repair_orders_by_quota_not_first_match(qdir, quota_aware):
+    """The delegate repair picks the covered endpoint-matching entry, not the first non-dead."""
+    from tools.delegate_tool_child_run import _lease_child_credential
+    _facts("sha256:aaa", [_win(percent=100.0)])  # A overflow
+    _facts("sha256:bbb", [_win(percent=5.0)])    # B covered
+    # A sorts first by priority but is not covered; B must win.
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    child = SimpleNamespace(provider=PROVIDER, base_url=SHARED_URL, _credential_pool=pool)
+    bound = []
+    child._swap_credential = lambda e: bound.append(e.id) or True
+    _pool_out, lease_id = _lease_child_credential(child)
+    assert lease_id == "b"
+    assert bound == ["b"]
+
+
+def test_D44_repair_with_no_endpoint_match_falls_to_D17_and_logs(qdir, quota_aware, caplog):
+    from tools.delegate_tool_child_run import _lease_child_credential
+    _facts("sha256:aaa", [_win(percent=5.0)])
+    other_url = "https://elsewhere.example/zen/go/v1"
+    pool = _pool([_entry("a", fingerprint="sha256:aaa", base_url=other_url)])
+    child = SimpleNamespace(provider=PROVIDER, base_url=SHARED_URL, _credential_pool=pool)
+    child._swap_credential = lambda e: True
+    with caplog.at_level(logging.INFO):
+        _pool_out, lease_id = _lease_child_credential(child)
+    assert lease_id == "a"  # D17 handout
+    assert any("D17" in r.message for r in caplog.records)
+
+
+# ---- rotation / revert -----------------------------------------------------
+
+
+def test_revert_does_not_land_on_a_non_covered_entry(qdir, quota_aware):
+    """D22/D43: the revert may not pull a covered live session back onto a non-covered entry."""
+    from agent.agent_runtime_helpers import _revert_credential_rotation
+    _facts("sha256:aaa", [_win(percent=10.0)])   # current A covered
+    _facts("sha256:bbb", [_win(percent=100.0)])  # revert target B overflow
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    agent = _Agent(pool, "a", revert_id="b")
+    _revert_credential_rotation(agent)
+    assert agent.swaps == []                       # no revert
+    assert agent._credential_pool_revert_id is None
+
+
+def test_revert_lands_on_a_covered_target(qdir, quota_aware):
+    from agent.agent_runtime_helpers import _revert_credential_rotation
+    _facts("sha256:aaa", [_win(percent=100.0)])  # current A overflow
+    _facts("sha256:bbb", [_win(percent=5.0)])    # revert target B covered
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    agent = _Agent(pool, "a", revert_id="b")
+    _revert_credential_rotation(agent)
+    assert agent.swaps == ["b"]
+
+
+def test_resolve_from_pool_returns_the_choose_result(qdir, quota_aware, monkeypatch):
+    """``_resolve_from_pool`` routes through the quota-aware select() (D22/D41)."""
+    from hermes_cli import runtime_provider as rp
+    _facts("sha256:aaa", [_win(percent=100.0)])  # A overflow
+    _facts("sha256:bbb", [_win(percent=5.0)])    # B covered
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    monkeypatch.setattr(rp, "load_pool", lambda provider: pool)
+    rt = rp._resolve_from_pool(PROVIDER, PROVIDER, {}, None, None, None)
+    assert rt is not None
+    assert rt["api_key"] == "key-b"  # the covered account, same as choose()
+
+
+# ============================================================================
+# 7 (B2 half). Capability and policy degradation (D15/D40/D45)
+# ============================================================================
+
+
+def test_provider_without_capability_degrades_to_fill_first(qdir, monkeypatch, caplog):
+    """v1 supports opencode-go only: any other provider orders as fill_first and logs once."""
+    from agent.credential_pool import CredentialPool, resolve_selection_policy
+    monkeypatch.setattr("agent.credential_pool.get_pool_strategy", lambda provider: "quota_aware")
+    _facts("sha256:aaa", [_win(percent=100.0)], )  # spent, but provider has no capability
+    e = PooledCredential(provider="anthropic", id="a", label="A", auth_type="api_key",
+                         priority=0, source="env:A", access_token="k")
+    e.extra["secret_fingerprint"] = "sha256:aaa"
+    with caplog.at_level(logging.WARNING):
+        policy, usable = resolve_selection_policy("anthropic", [e])
+    assert usable is False
+    assert any("degraded to fill_first" in r.message for r in caplog.records)
+
+
+def test_malformed_metered_overflow_degrades_to_fill_first(qdir, quota_aware, monkeypatch, caplog):
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": "not-a-list"})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    with caplog.at_level(logging.WARNING):
+        assert pool.select().id == "a"  # fill_first: priority order, not covered-first
+    assert any("degraded to fill_first" in r.message for r in caplog.records)
+
+
+def test_unresolved_policy_target_degrades_to_fill_first(qdir, quota_aware, monkeypatch, caplog):
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": ["NO_SUCH_ACCOUNT"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    with caplog.at_level(logging.WARNING):
+        assert pool.select().id == "a"
+    assert any("degraded to fill_first" in r.message for r in caplog.records)
+
+
+def test_configured_metered_overflow_target_resolves(qdir, quota_aware, monkeypatch):
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": ["OPENCODE_GO_API_KEY"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa", label="OPENCODE_GO_API_KEY_2"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb", label="OPENCODE_GO_API_KEY")])
+    assert pool.select().id == "b"  # policy usable -> covered-first ordering
