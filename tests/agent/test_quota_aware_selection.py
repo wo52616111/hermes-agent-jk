@@ -24,7 +24,10 @@ from agent import quota_aware_state as st
 from agent import quota_state as qs
 from agent.credential_pool import CredentialPool, PooledCredential
 
-NOW = datetime(2026, 10, 11, 12, 0, tzinfo=timezone.utc)
+# The pool-level entry points under test (select / _quota_states / acquire_lease) read the real
+# clock, so a frozen NOW makes every NOW-relative cooling deadline expire as wall time passes and
+# the pool tests flip from pass to fail hours after they are written. Anchor the test clock to now.
+NOW = datetime.now(timezone.utc).replace(microsecond=0)
 PROVIDER = "opencode-go"
 # Real opencode-go accounts share ONE base_url (spec.md Current State).
 SHARED_URL = "https://opencode.ai/zen/go/v1"
