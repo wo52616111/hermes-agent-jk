@@ -262,6 +262,43 @@ const joined = (segments: QuotaSegment[]) => segments.map(s => s.text).join('')
 const capacityText = (row: React.ReactElement<any>) =>
   textContent((row.type as (p: unknown) => ReactNodeLike)(row.props))
 
+// Flat text of every StatusRule child row. The capacity rows are components whose own children are
+// computed inside, so textContent alone would miss them — render each to its flat text.
+const renderRows = (element: React.ReactElement<any>) =>
+  React.Children.toArray(element.props.children)
+    .map(row => {
+      const r = row as React.ReactElement<any>
+      const isCapacity = r.props && ('quotaGroups' in r.props || 'rightQuota' in r.props)
+
+      return isCapacity ? textContent((r.type as (p: unknown) => ReactNodeLike)(r.props)) : textContent(r)
+    })
+    .join('\n')
+
+// The user's live narrow-terminal shape: the active provider is the 2-account Go pool, its
+// sub-rows too wide for the terminal, so the row must fall back to the SERVING account's own
+// numbers. Each call site that supplies that fallback is pinned by a test below.
+const goPool = (overrides: Partial<AccountUsageGroup> = {}) =>
+  group({
+    provider: 'opencode-go',
+    age_s: 0,
+    accounts: goAccounts,
+    multi_account: true,
+    serving: 'sha256:bbbbbb',
+    strategy: 'quota_aware',
+    ...overrides
+  })
+
+const anthropic = (overrides: Partial<AccountUsageGroup> = {}) =>
+  group({
+    provider: 'anthropic',
+    age_s: 0,
+    windows: [
+      { period: '5h', used_percent: 17, reset_at: null },
+      { period: '7d', used_percent: 40, reset_at: null }
+    ],
+    ...overrides
+  })
+
 describe('StatusRule multi-provider quota (account_usage_all)', () => {
   it('uses body text for every provider label while retaining active-provider emphasis', () => {
     const segs = layoutQuotaGroups(ALL_GROUPS, 9999, DEFAULT_THEME, NOW, 'openai-codex')
@@ -556,6 +593,133 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(other).not.toContain('86%')
     expect(other).not.toContain('2 accounts')
     expect(other).not.toContain('err')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the serving account numbers whenever the non-table row fits them (narrow sweep)', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // The aligned table's right column is far narrower than the full row. At cols 39-50 it can
+    // only "fit" by dropping go's windows, yet the non-table row fits `◷ 0m go 5h 1%·7d 0%` at
+    // the same width - so the numbers must never go invisible (parent ruling, R4-F1).
+    const missing: number[] = []
+
+    for (const cols of [38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]) {
+      const text = renderRows(
+        StatusRule({
+          ...baseProps,
+          cols,
+          usage: {
+            ...baseProps.usage,
+            account_usage_all: [goPool(), anthropic()],
+            account_usage_active: 'opencode-go',
+            account_usage_active_account: 'sha256:bbbbbb'
+          }
+        })
+      )
+
+      if (!text.includes('5h 1%') || !text.includes('7d 0%') || text.includes('2 accounts')) {
+        missing.push(cols)
+      }
+    }
+
+    expect(missing).toEqual([])
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the serving account numbers on the all-providers row when no provider is active', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // account_usage_active=null: the primary CapacityRow renders every group and NO sub-rows are
+    // rendered, so its subRowsBudget must be 0 to force the serving account's numbers inline.
+    const rows = React.Children.toArray(
+      StatusRule({
+        ...baseProps,
+        cols: 160,
+        usage: {
+          ...baseProps.usage,
+          account_usage_all: [goPool(), anthropic()],
+          account_usage_active: null
+        }
+      }).props.children
+    )
+
+    const primary = capacityText(rows[1] as React.ReactElement<any>)
+
+    expect(primary).toContain('5h 1%')
+    expect(primary).toContain('7d 0%')
+    expect(primary).not.toContain('2 accounts')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the third-place pool numbers in the table right column', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // active anthropic, codex 2nd, go pool 3rd: go lands in the table's right column via
+    // remainingOtherQuota, whose subRowsBudget must be 0 (no sub-rows for other providers).
+    const rows = React.Children.toArray(
+      StatusRule({
+        ...baseProps,
+        cols: 160,
+        usage: {
+          ...baseProps.usage,
+          account_usage_all: [
+            anthropic(),
+            group({
+              provider: 'openai-codex',
+              age_s: 0,
+              windows: [
+                { period: '5h', used_percent: 5, reset_at: null },
+                { period: '7d', used_percent: 9, reset_at: null }
+              ]
+            }),
+            goPool()
+          ],
+          account_usage_active: 'anthropic'
+        }
+      }).props.children
+    )
+
+    const secondary = capacityText(rows[2] as React.ReactElement<any>)
+
+    expect(secondary).toContain('5h 1%')
+    expect(secondary).toContain('7d 0%')
+    expect(secondary).not.toContain('2 accounts')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the pool numbers on the non-table secondary row when there is no context', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // No ctx: no table, so the secondary CapacityRow renders the pool with subRowsBudget 0 (no
+    // sub-rows for other providers) and must carry the serving account's numbers.
+    const rows = React.Children.toArray(
+      StatusRule({
+        ...baseProps,
+        cols: 160,
+        usage: {
+          ...baseProps.usage,
+          context_max: null,
+          total: 0,
+          account_usage_all: [anthropic(), goPool()],
+          account_usage_active: 'anthropic'
+        }
+      }).props.children
+    )
+
+    const secondary = capacityText(rows[2] as React.ReactElement<any>)
+
+    expect(secondary).toContain('5h 1%')
+    expect(secondary).toContain('7d 0%')
+    expect(secondary).not.toContain('2 accounts')
 
     vi.useRealTimers()
   })

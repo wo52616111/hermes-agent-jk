@@ -1,4 +1,4 @@
-"""B3: the gateway wire carries each quota account's own windows (spec D19/D26/D41).
+"""The gateway wire carries each quota account's own windows (spec D19/D26/D41).
 
 Behaviour contracts for ``_account_usage_all_wire`` (per-account ``accounts[]`` + ``serving``,
 never a blended number) and the session-local active account on ``_session_usage_snapshot``.
@@ -62,8 +62,8 @@ def _groups_by_provider(monkeypatch, groups):
 
 
 def test_account_usage_all_wire_replaces_a_multi_account_group_with_per_account_rows(qdir, monkeypatch):
-    """A quota_aware provider no longer reports empty windows: the legacy multi_account group is
-    replaced by one carrying every account's own windows (D41), with no ``err`` marker (D19)."""
+    """A quota_aware provider's group carries every account's own windows (D41), with no ``err``
+    marker (D19)."""
     _store("sha256:bbb", "OPENCODE_GO_API_KEY_2", [_window(period="5h", percent=1.0), _window(percent=0.0)])
     _store("sha256:aaa", "OPENCODE_GO_API_KEY", [_window(percent=100.0), _window(period="monthly", percent=86.0)])
     legacy = [

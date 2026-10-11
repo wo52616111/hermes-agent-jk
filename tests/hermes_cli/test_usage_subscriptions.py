@@ -1,4 +1,4 @@
-"""B3: ``hermes usage --all-subscriptions`` gains a nested per-account array (spec D20).
+"""``hermes usage --all-subscriptions`` gains a nested per-account array (spec D20).
 
 Additive only: the ``subscriptions`` array's existing keys and semantics are untouched; a group with
 a per-account view gains ``accounts[]`` (effective ``state`` + ``read_health``, short fingerprint,
@@ -149,9 +149,8 @@ def test_all_subscriptions_reports_a_provider_with_only_per_account_facts(qdir, 
     expected_windows = [{k: w.get(k) for k in ("period", "used_percent", "reset_at", "rolled") if k in w}
                         for w in serving_account["windows"]]
     provider_groups = [g for g in qs.status_groups() if g["provider"] == PROVIDER]
-    assert len(provider_groups) <= 1
-    if provider_groups:
-        assert provider_groups[0]["windows"] == expected_windows
+    assert len(provider_groups) == 1
+    assert provider_groups[0]["windows"] == expected_windows
     assert cmd_usage(_args()) == 0
     doc = json.loads(capsys.readouterr().out)
 
