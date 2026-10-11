@@ -610,6 +610,93 @@ def get_pool_strategy(provider: str) -> str:
     return strategy if strategy in SUPPORTED_POOL_STRATEGIES else STRATEGY_FILL_FIRST
 
 
+def _provider_supports_per_account(provider: str) -> bool:
+    """True when the provider exposes per-credential usage (D15). Unknown -> False."""
+    try:
+        from providers import get_provider_profile
+        profile = get_provider_profile(provider)
+        return bool(getattr(profile, "supports_per_account_usage", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def get_pool_policy_block(provider: str) -> dict:
+    """The raw ``credential_pool_policy.<provider>`` block, or {} when absent (D5/D30)."""
+    config = _load_config_safe()
+    blocks = config.get("credential_pool_policy") if config else None
+    block = blocks.get(provider) if isinstance(blocks, dict) else None
+    return block if isinstance(block, dict) else {}
+
+
+def _entry_target_dict(entry: PooledCredential) -> dict:
+    """The identity fields ``quota_state._target_matches`` resolves a policy target against."""
+    return {"entry_id": getattr(entry, "id", None),
+            "label": getattr(entry, "label", None),
+            "source": getattr(entry, "source", None)}
+
+
+def _policy_targets_resolve(targets: list, entries: List[PooledCredential]) -> bool:
+    """Every target must match EXACTLY one entry: unresolvable or duplicate-label -> False."""
+    from agent import quota_state as qs
+    for target in targets:
+        matches = [e for e in entries if qs._target_matches(target, _entry_target_dict(e))]
+        if len(matches) != 1:
+            return False
+    return True
+
+
+# "once per provider" degradation warnings (D15/D40/D45/D46a). Keyed by (provider, reason)
+# so a hot-path ``load_pool`` cannot storm the log while the signal still reaches the user.
+_POLICY_WARNED: Set[Tuple[str, str]] = set()
+
+
+def _warn_policy_once(provider: str, reason: str, message: str) -> None:
+    key = (str(provider or ""), reason)
+    if key in _POLICY_WARNED:
+        return
+    _POLICY_WARNED.add(key)
+    logger.warning("credential pool: %s strategy 'quota_aware' degraded to fill_first — %s",
+                   provider, message)
+
+
+def resolve_selection_policy(
+    provider: str, entries: List[PooledCredential],
+) -> Tuple[Any, bool]:
+    """Resolve the ordering policy for a ``quota_aware`` provider (D5/D15/D30/D40/D45).
+
+    Returns ``(policy, usable)``. ``usable=False`` means the caller must order as
+    ``fill_first``; the reason has been logged once. A provider without per-account support
+    (v1: everything but ``opencode-go``) always degrades; a malformed or unresolvable
+    ``metered_overflow`` block degrades with a warning.
+    """
+    from agent import quota_aware_selection as qsel
+
+    if not _provider_supports_per_account(provider):
+        _warn_policy_once(provider, "no_capability",
+                          "provider does not expose per-account usage")
+        return qsel.Policy(), False
+
+    block = get_pool_policy_block(provider)
+    targets = block.get("metered_overflow")
+    if targets is not None and not isinstance(targets, list):
+        _warn_policy_once(provider, "bad_targets",
+                          "metered_overflow must be a list of target strings")
+        return qsel.Policy(), False
+    if isinstance(targets, list) and targets and not _policy_targets_resolve(targets, entries):
+        _warn_policy_once(provider, "unresolved_target",
+                          "a metered_overflow target is unresolvable or ambiguous")
+        return qsel.Policy(), False
+
+    earliest = block.get("earliest_reset_first", True)
+    return qsel.Policy(earliest_reset_first=bool(earliest)), True
+
+
+def _order_fill_first(entries: List[PooledCredential]) -> List[PooledCredential]:
+    """The degrade order: priority first, stable (mirrors the pre-quota ``fill_first``)."""
+    return sorted(entries, key=lambda e: getattr(e, "priority", 0))
+
+
+
 def _keyed_custom_pool_matches(
     pool_provider: str,
     provider_norm: str,
@@ -1009,6 +1096,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # entries" and the caller's 401 retry loop runs unbounded. Reset when a
         # real entry is identified or an escape path returns None.
         self._unmatched_rotation_streak: int = 0
+        # D46(b): the last entry we warned about serving from its metered bucket, so the
+        # "serving from a billing account" warning fires per switch/session, not per request.
+        self._last_overflow_warn_id: Optional[str] = None
         # D42: one lightweight refresher thread owned by the pool, started lazily with it and
         # stopped with it. Only a quota_aware pool starts it; a bare CLI process that never
         # binds a quota_aware pool never spawns it.
@@ -1042,6 +1132,139 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         except Exception:  # noqa: BLE001
             logger.debug("quota view sync failed for %s", self.provider, exc_info=True)
             return None
+
+    # ---- quota-aware selection (D3/D4/D22/D27/D43/D44) --------------------
+
+    def is_quota_aware(self) -> bool:
+        """True when this pool selects by per-account quota."""
+        return getattr(self, "_strategy", None) == STRATEGY_QUOTA_AWARE
+
+    def _quota_policy(self) -> Tuple[Any, bool]:
+        """``(policy, usable)`` over ALL entries (a cooled metered account must still resolve)."""
+        return resolve_selection_policy(self.provider, list(self._entries))
+
+    def _quota_states(self, entries: List[PooledCredential], *, now: Optional[datetime] = None) -> dict:
+        """Per-entry read-time state from the ONE profile-scoped reader (D41). No IO fetch."""
+        from agent import quota_state as qs
+        from agent import quota_aware_selection as qsel
+        now = now or datetime.now(timezone.utc)
+        view = qs.read_view(qs.current_profile(), self.provider, now=now, pool=self)
+        return qsel.states_from_view(entries, view, now)
+
+    def _warn_if_overflow(self, entry: Optional[PooledCredential], states: dict) -> None:
+        """Warning (b): name the account and bucket whenever an overflow account serves (D46)."""
+        if entry is None:
+            return
+        from agent import quota_aware_selection as qsel
+        state = states.get(entry.id, qsel.UNKNOWN_STATE)
+        if state.state != qsel.OVERFLOW or self._last_overflow_warn_id == entry.id:
+            return
+        self._last_overflow_warn_id = entry.id
+        logger.warning(
+            "credential pool: serving %s from its metered bucket (plan window spent) — %s",
+            entry.label or entry.id[:8], self.provider,
+        )
+
+    def _quota_pick(self, available: List[PooledCredential], current_id: Optional[str], mode: str, *,
+                    now: Optional[datetime] = None) -> Optional[PooledCredential]:
+        """Choose among *available* by quota (pure decision; reads stored state only)."""
+        from agent import quota_aware_selection as qsel
+        if not available:
+            return None
+        policy, usable = self._quota_policy()
+        if not usable:
+            return _order_fill_first(available)[0]
+        now = now or datetime.now(timezone.utc)
+        states = self._quota_states(available, now=now)
+        chosen = qsel.choose(available, states, policy, current_id, mode, now)
+        self._warn_if_overflow(chosen, states)
+        return chosen
+
+    def quota_choose(self, *, current_id: Optional[str] = None,
+                     mode: str = "turn_boundary", now: Optional[datetime] = None) -> Optional[PooledCredential]:
+        """Public quota-aware pick over the currently available entries (D22/D41).
+
+        Used by the turn-boundary checkpoint, ``_resolve_from_pool`` and the revert guard.
+        Reads stored facts only; never fetches (D11).
+        """
+        if not self.is_quota_aware():
+            return None
+        with self._lock:
+            available, _pending = self._available_entries(clear_expired=True, refresh=False)
+        return self._quota_pick(available, current_id, mode, now=now)
+
+    def order_entries(self, entries: List[PooledCredential], *,
+                      now: Optional[datetime] = None) -> List[PooledCredential]:
+        """Order a caller-supplied candidate set by the pool's selection policy (D44).
+
+        The internal-repair path builds its candidate set (endpoint filter) then calls this
+        instead of taking "the first non-dead match". A non-``quota_aware`` pool orders by
+        priority, preserving today's behaviour.
+        """
+        from agent import quota_aware_selection as qsel
+        if not self.is_quota_aware():
+            return _order_fill_first(entries)
+        policy, usable = self._quota_policy()
+        if not usable:
+            return _order_fill_first(entries)
+        now = now or datetime.now(timezone.utc)
+        states = self._quota_states(entries, now=now)
+        return qsel.ordered_candidates(entries, states, policy, now)
+
+    def _quota_lease_pick(self, available: List[PooledCredential]) -> Optional[PooledCredential]:
+        """Order by quota, then apply the concurrency counter INSIDE the top class (D37/D43).
+
+        A covered account at its cap never pushes work to an idle overflow account; if every
+        account of the top class is at cap the pool overcommits one of them instead of
+        descending a class.
+        """
+        from agent import quota_aware_selection as qsel
+        if not available:
+            return None
+        policy, usable = self._quota_policy()
+        if not usable:
+            below = [e for e in _order_fill_first(available)
+                     if self._active_leases.get(e.id, 0) < self._max_concurrent]
+            return (below or _order_fill_first(available))[0]
+        now = datetime.now(timezone.utc)
+        states = self._quota_states(available, now=now)
+        ordered = qsel.ordered_candidates(available, states, policy, now)
+        top_class = qsel.CLASS.get(states.get(ordered[0].id, qsel.UNKNOWN_STATE).state, qsel.CLASS[qsel.UNKNOWN])
+        same_class = [
+            e for e in ordered
+            if qsel.CLASS.get(states.get(e.id, qsel.UNKNOWN_STATE).state, qsel.CLASS[qsel.UNKNOWN]) == top_class
+        ]
+        below = [e for e in same_class if self._active_leases.get(e.id, 0) < self._max_concurrent]
+        chosen = (below or same_class)[0]
+        self._warn_if_overflow(chosen, states)
+        return chosen
+
+    def quota_summary(self) -> Optional[dict]:
+        """Read-only plan-capacity summary (D27): ``has_covered``, per-class counts, soonest
+        effective recovery. ``None`` for a non-``quota_aware`` pool."""
+        if not self.is_quota_aware():
+            return None
+        from agent import quota_aware_selection as qsel
+        entries = list(self._entries)
+        policy, usable = self._quota_policy()
+        if not usable:
+            return {"strategy": STRATEGY_FILL_FIRST, "has_covered": None,
+                    "counts": {}, "soonest_recovery": None}
+        states = self._quota_states(entries)
+        counts = {qsel.COVERED: 0, qsel.OVERFLOW: 0, qsel.EXHAUSTED: 0}
+        recoveries = []
+        for entry in entries:
+            state = states.get(entry.id, qsel.UNKNOWN_STATE)
+            if state.state in counts:
+                counts[state.state] += 1
+            if state.state == qsel.EXHAUSTED and state.effective_recovery is not None:
+                recoveries.append(state.effective_recovery)
+        return {
+            "strategy": STRATEGY_QUOTA_AWARE,
+            "has_covered": counts[qsel.COVERED] > 0,
+            "counts": counts,
+            "soonest_recovery": min(recoveries).isoformat() if recoveries else None,
+        }
 
     # ---- read accessors ---------------------------------------------------
 
@@ -2143,7 +2366,11 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         # logs immediately.
         self._last_no_entries_log_at = None
 
-        if self._strategy == STRATEGY_RANDOM:
+        if self._strategy == STRATEGY_QUOTA_AWARE:
+            # D3/D4/D22: order by per-account quota; a live session keeps its covered
+            # account (sticky) and only moves on a real signal or at a turn boundary.
+            entry = self._quota_pick(available, self._current_id, "turn_boundary") or _order_fill_first(available)[0]
+        elif self._strategy == STRATEGY_RANDOM:
             entry = random.choice(available)
         elif self._strategy == STRATEGY_LEAST_USED and len(available) > 1:
             entry = min(available, key=lambda e: e.request_count)
@@ -2335,42 +2562,66 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     # ---- leases ------------------------------------------------------------
 
-    def acquire_lease(self, credential_id: Optional[str] = None) -> Optional[str]:
+    def acquire_lease(self, credential_id: Optional[str] = None, *, pin: bool = False) -> Optional[str]:
         """Acquire a soft lease on a credential.
 
-        With *credential_id*, lease that entry directly. Otherwise prefer the
-        least-leased available credential (priority as tie-breaker); when
-        every credential is at the soft cap, still return the least-leased
-        one instead of blocking.
+        With *credential_id*, lease that entry directly. An operator pin (``pin=True``) is
+        honoured unconditionally (D44); an INTERNAL explicit id is validated against
+        eligibility first so it cannot bypass cooldown/dead (D44). Otherwise prefer the
+        least-leased available credential (priority as tie-breaker); when every credential
+        is at the soft cap, still return the least-leased one instead of blocking.
         """
-        chosen_id, pending_refresh = self._acquire_lease_under_lock(credential_id)
+        chosen_id, pending_refresh = self._acquire_lease_under_lock(credential_id, pin=True) if pin \
+            else self._acquire_lease_under_lock(credential_id)
         if pending_refresh:
             self._refresh_pending_entries(pending_refresh)
             # Mirror select(): a pool whose entries all needed a deferred
             # refresh must retry once they are back in rotation, or the caller
             # sees "no credentials available" after a successful refresh.
             if chosen_id is None:
-                chosen_id, _ = self._acquire_lease_under_lock(credential_id)
+                chosen_id, _ = self._acquire_lease_under_lock(credential_id, pin=True) if pin \
+                    else self._acquire_lease_under_lock(credential_id)
         return chosen_id
 
     def _acquire_lease_under_lock(
-        self, credential_id: Optional[str],
+        self, credential_id: Optional[str], *, pin: bool = False,
     ) -> Tuple[Optional[str], List[PooledCredential]]:
         with self._lock:
             if credential_id:
-                self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
-                self._current_id = credential_id
-                return credential_id, []
+                if pin or not self.is_quota_aware():
+                    self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
+                    self._current_id = credential_id
+                    return credential_id, []
+                # Internal caller on a quota-aware pool: an explicit id may not bypass
+                # eligibility (D44). Lease it only when it is genuinely available; else
+                # fall through to the ordered pick (never take a cooled/dead entry).
+                available, pending_refresh = self._available_entries(clear_expired=True, refresh=True)
+                if any(e.id == credential_id for e in available):
+                    self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
+                    self._current_id = credential_id
+                    return credential_id, pending_refresh
+                logger.info(
+                    "credential pool: internal lease of %s refused — not eligible; ordering instead",
+                    credential_id,
+                )
+                credential_id = None
 
             available, pending_refresh = self._available_entries(clear_expired=True, refresh=True)
             if not available:
                 return None, pending_refresh
 
-            below_cap = [e for e in available if self._active_leases.get(e.id, 0) < self._max_concurrent]
-            chosen = min(
-                below_cap or available,
-                key=lambda entry: (self._active_leases.get(entry.id, 0), entry.priority),
-            )
+            if self.is_quota_aware():
+                # D37/D43: order by quota, then the counter only breaks ties INSIDE the
+                # top class; a covered account at its cap never descends to overflow.
+                chosen = self._quota_lease_pick(available)
+                if chosen is None:
+                    return None, pending_refresh
+            else:
+                below_cap = [e for e in available if self._active_leases.get(e.id, 0) < self._max_concurrent]
+                chosen = min(
+                    below_cap or available,
+                    key=lambda entry: (self._active_leases.get(entry.id, 0), entry.priority),
+                )
             self._active_leases[chosen.id] = self._active_leases.get(chosen.id, 0) + 1
             self._current_id = chosen.id
             return chosen.id, pending_refresh
