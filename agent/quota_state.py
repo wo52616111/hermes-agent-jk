@@ -1325,6 +1325,17 @@ def read_view(
     return _compose_view(profile, name, stored, now=now, policy=policy, pool=pool)
 
 
+def serving_account(view: Optional[dict]) -> dict:
+    """The account a view serves: ``serving`` while the view still holds that account, else its first.
+
+    Both readers (the CLI subscription group and the gateway capacity group) build their provider
+    line from it, so the two never disagree about whose windows the line carries (D41).
+    """
+    accounts = list((view or {}).get("accounts") or [])
+    by_fingerprint = {account.get("fingerprint"): account for account in accounts}
+    return by_fingerprint.get((view or {}).get("serving")) or (accounts[0] if accounts else {})
+
+
 def update_view(
     profile: str, provider: str, *, now: Optional[datetime] = None,
     policy: Optional[dict] = None, pool=None,

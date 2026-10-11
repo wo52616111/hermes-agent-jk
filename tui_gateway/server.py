@@ -2176,9 +2176,9 @@ def _account_usage_group_from_view(provider: str, view: dict) -> dict:
     windows. ``serving`` is the shared fact; the session-local active account is added in
     ``_session_usage_snapshot``.
     """
+    from agent import quota_state
     accounts = list(view.get("accounts") or [])
-    by_fp = {a.get("fingerprint"): a for a in accounts}
-    serving = by_fp.get(view.get("serving")) or (accounts[0] if accounts else {})
+    serving = quota_state.serving_account(view)
     return {
         "provider": provider,
         "fetched_at": serving.get("fetched_at"),

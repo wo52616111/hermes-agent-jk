@@ -603,7 +603,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
 
     // The aligned table's right column is far narrower than the full row. At cols 39-50 it can
     // only "fit" by dropping go's windows, yet the non-table row fits `◷ 0m go 5h 1%·7d 0%` at
-    // the same width - so the numbers must never go invisible (parent ruling, R4-F1).
+    // the same width - so the numbers must never go invisible.
     const missing: number[] = []
 
     for (const cols of [38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]) {

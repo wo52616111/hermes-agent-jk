@@ -76,7 +76,7 @@ def test_account_usage_all_wire_replaces_a_multi_account_group_with_per_account_
     groups = _groups_by_provider(monkeypatch, legacy)
 
     go = groups[PROVIDER]
-    # The `{status: 0, message: "multi_account"}` marker that rendered `go ·err` is gone.
+    # A multi-account group carries no error marker of its own.
     assert go["error"] is None
     assert go["multi_account"] is True
     assert len(go["accounts"]) == 2
