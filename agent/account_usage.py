@@ -801,34 +801,54 @@ def provider_quota_multi_account(provider: str) -> bool:
     return False
 
 
-def live_entry_fingerprints(entries) -> Optional[set]:
-    """Fingerprints of the pool entries a reader may still paint as the profile's own accounts.
+def live_entry_identities(entries) -> Optional[tuple[set, set]]:
+    """``(every identity the live pool entries answer to, the ones a current secret names)``.
 
-    A DEAD entry or one without a token is a credential the profile cannot bill with, so the identity
-    that produced its stored facts does not own them (D41). None when nothing is live: there is then
-    no evidence any stored account is retired, and callers filtering a view keep what they have
-    instead of blanking the panel.
+    The persisted ``secret_fingerprint`` is what the stored quota facts and the view's serving window
+    are keyed by; the fingerprint of the secret an entry bills with is what a freshly added or just
+    rotated credential actually holds. The two differ until the store writes the new one, and both
+    name the same account. None when a live entry has no persisted fingerprint: the store then cannot
+    say which stored facts belong to it, so no set of names is proof that the others are retired.
     """
     from agent.credential_pool import STATUS_DEAD
-    live = set()
+    from agent.credential_persistence import fingerprint_secret_value
+    live: set = set()
+    billed: set = set()
     for entry in entries or []:
-        if getattr(entry, "last_status", None) == STATUS_DEAD or not getattr(entry, "access_token", None):
+        if getattr(entry, "last_status", None) == STATUS_DEAD:
             continue
-        fingerprint = (getattr(entry, "extra", None) or {}).get("secret_fingerprint")
-        if fingerprint:
-            live.add(str(fingerprint))
-    return live or None
+        extra = getattr(entry, "extra", None) or {}
+        stored = extra.get("secret_fingerprint")
+        if not (isinstance(stored, str) and stored.startswith("sha256:")):
+            return None
+        live.add(stored)
+        # The secret-bearing fields of a pool entry, in the order credential_persistence prefers.
+        values = [getattr(entry, name, None) for name in ("agent_key", "access_token", "refresh_token")]
+        values += [extra.get(name) for name in ("api_key", "token", "secret")]
+        for value in values:
+            current = fingerprint_secret_value(value)
+            if current:
+                live.add(current)
+                billed.add(current)
+    return (live, billed) if live else None
 
 
-def provider_quota_live_fingerprints(provider: str) -> Optional[set]:
-    """``provider``'s live credential fingerprints from the local pool (no network).
+def live_entry_fingerprints(entries) -> Optional[set]:
+    """Every identity the live pool entries answer to, or None when the store cannot name them (D41)."""
+    identities = live_entry_identities(entries)
+    return identities[0] if identities else None
 
-    A read-only resolution load: membership must not bootstrap the quota state that asked for it.
+
+def provider_quota_live_fingerprints(provider: str) -> Optional[tuple[set, set]]:
+    """``live_entry_identities`` for ``provider``'s locally stored pool.
+
+    A read-only resolution load: membership must not bootstrap the quota state that asked for it, and
+    it makes no network call.
     """
     name = str(provider or "").strip().lower()
     try:
         from agent.credential_pool import load_pool
-        return live_entry_fingerprints(load_pool(name, quota_bootstrap=False).entries())
+        return live_entry_identities(load_pool(name, quota_bootstrap=False).entries())
     except Exception:
         logger.debug("quota live-fingerprint check failed for %s", name, exc_info=True)
         return None
