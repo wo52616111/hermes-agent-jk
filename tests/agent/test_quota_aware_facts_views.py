@@ -1209,7 +1209,7 @@ def test_refresher_stops_when_last_pool_is_collected(qdir, real_two_account_pool
         gc.collect()
         time.sleep(0.02)
     assert ref() is None
-    assert not qs._refresher_pools
+    assert not qs._owner_tokens and not qs._pool_owner_token
     assert not qs.is_refresher_running()
 
 
@@ -1413,6 +1413,68 @@ def test_last_release_signals_the_stop_under_the_lifecycle_guard(qdir, monkeypat
         releaser.join(2)
         for t in _live_refresher_threads():
             t.join(1)
+
+
+def test_forced_stop_ends_the_holds_it_found_without_stranding_a_registration(qdir, monkeypatch):
+    """A forced stop must end as ONE lifecycle step: a hold registered while it released the
+    earlier ones is ended by the same step that signals the worker, so no hold is ever left
+    pointing at a stopped refresher and no worker outlives the stop (D42)."""
+    owner_a = _Owner()
+    qs.start_refresher(pool=owner_a, interval_s=0.05, fetcher=lambda: None)
+    released, proceed = threading.Event(), threading.Event()
+    real_release = qs._release_owner
+
+    def gated_release(token, timeout=2.0):
+        real_release(token, timeout)
+        if threading.current_thread().name == "forced-stopper":
+            released.set()
+            proceed.wait(5)
+
+    monkeypatch.setattr(qs, "_release_owner", gated_release)
+    stopper = threading.Thread(target=qs.stop_refresher, name="forced-stopper")
+    stopper.start()
+    try:
+        assert released.wait(5)
+        owner_b = _Owner()
+        qs.start_refresher(pool=owner_b, interval_s=0.05, fetcher=lambda: None)
+        assert len(qs._owner_tokens) == 1 and qs.is_refresher_running()
+        proceed.set()
+        stopper.join(5)
+        assert not stopper.is_alive()
+        assert not qs._owner_tokens, "the forced stop left a hold standing"
+        assert not qs._pool_owner_token
+        assert not qs.is_refresher_running() and _live_refresher_threads() == []
+        # A pool that starts after the force takes a fresh hold and a fresh worker.
+        owner_c = _Owner()
+        qs.start_refresher(pool=owner_c, interval_s=0.05, fetcher=lambda: None)
+        assert qs.is_refresher_running()
+        qs.stop_refresher(pool=owner_c)
+        assert not qs.is_refresher_running()
+    finally:
+        proceed.set()
+        monkeypatch.setattr(qs, "_release_owner", real_release)
+        stopper.join(2)
+        qs.stop_refresher()
+        for t in _live_refresher_threads():
+            t.join(1)
+
+
+def test_a_pool_that_starts_again_takes_a_fresh_hold_so_its_teardown_stops_the_worker(qdir):
+    """A pool whose hold was released and that starts again must register a FRESH hold: matching
+    its own released token would skip the finalizer and make its next stop a no-op, leaving an
+    orphan worker fetching after every pool is gone (D42)."""
+    owner = _Owner()
+    qs.start_refresher(pool=owner, interval_s=0.05, fetcher=lambda: None)
+    qs.stop_refresher(pool=owner)
+    assert not qs.is_refresher_running()
+    qs.start_refresher(pool=owner, interval_s=0.05, fetcher=lambda: None)
+    assert qs.is_refresher_running() and len(qs._owner_tokens) == 1
+    qs.stop_refresher(pool=owner)
+    assert not qs.is_refresher_running()
+    assert not qs._owner_tokens and owner not in qs._pool_owner_token
+    del owner
+    gc.collect()
+    assert not qs.is_refresher_running() and _live_refresher_threads() == []
 
 
 def test_start_replaces_a_worker_committed_to_exit(qdir, monkeypatch):
