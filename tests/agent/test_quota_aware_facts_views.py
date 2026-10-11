@@ -330,6 +330,35 @@ def test_history_restarts_when_serving_changes(qdir, quota_aware):
     assert second["serving_since"] != first["serving_since"]
 
 
+def test_view_history_growth_is_bounded_across_bootstraps(qdir, quota_aware):
+    """Many bootstrap cycles (each ``update_view`` on the ``load_pool(quota_bootstrap=True)``
+    request path) with changing served windows must keep the history sample count and the view
+    file within a fixed bound, not grow one sample per call (D35)."""
+    path = qs.view_path("default", PROVIDER)
+    for i in range(300):
+        _store(fp="sha256:aaa", windows=[_facts_window(percent=float(i % 90))],
+               when=NOW + timedelta(seconds=i))
+        qs.update_view("default", PROVIDER, now=NOW + timedelta(seconds=i), policy={})
+    view = qs._read_view_raw("default", PROVIDER)
+    assert view is not None
+    assert len(view["history"]) <= 64, "the history grew without a bound"
+    assert len(view["history"]) <= qs.VIEW_HISTORY_MAX_SAMPLES
+    assert path.stat().st_size < 64 * 1024
+
+
+def test_repeated_bootstrap_with_unchanged_facts_adds_no_sample(qdir, quota_aware):
+    """A bootstrap that recomposes from UNCHANGED facts records no new sample, so a burst of
+    billed aux calls against one stable serving account cannot grow the series (D35)."""
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=10.0)])
+    first = qs.update_view("default", PROVIDER, now=NOW, policy={})
+    assert len(first["history"]) == 1
+    for i in range(1, 60):
+        qs.update_view("default", PROVIDER, now=NOW + timedelta(seconds=i), policy={})
+    view = qs._read_view_raw("default", PROVIDER)
+    assert view is not None
+    assert len(view["history"]) == 1
+
+
 def test_pool_writer_publishes_only_a_view(qdir, quota_aware, monkeypatch):
     _store(fp="sha256:aaa")
     from agent.credential_pool import CredentialPool, PooledCredential
@@ -742,13 +771,12 @@ def test_two_hermes_homes_two_profiles(tmp_path, monkeypatch, qdir):
 
 
 # ============================================================================
-# 10. Refresher bounds, attribution and lifecycle (D41, D42, D49)
+# Refresher bounds, attribution and lifecycle (D41, D42, D49)
 # ============================================================================
 
 def test_refresher_fetch_count_is_bounded_over_a_simulated_period(real_two_account_pool, monkeypatch):
     """A real quota_aware pool whose load re-queues every fingerprint: over a simulated period
-    the refresher fetches at most accounts x cycles, never the thousands a bootstrap re-queue
-    busy-loop produced."""
+    the refresher fetches at most accounts x drain cycles (bounded, not once per queue item)."""
     serving = real_two_account_pool["kB-serving"]
     calls = []
 
@@ -771,7 +799,7 @@ def test_refresher_fetch_count_is_bounded_over_a_simulated_period(real_two_accou
     finally:
         qs.stop_refresher()
     assert calls, "the refresher never drained the queue"
-    # ~10 drains x 2 accounts; nothing near the thousands the re-queue busy-loop produced.
+    # ~10 drains x 2 accounts: the fetch count is bounded by accounts x drain cycles.
     assert len(calls) <= 2 * 60
 
 
@@ -932,7 +960,7 @@ def test_refresher_is_reference_counted_per_pool(qdir, tmp_path, monkeypatch):
     from agent.credential_pool import load_pool
     p1 = load_pool(PROVIDER)
     p2 = load_pool(PROVIDER)
-    # Quiesce: a drain must not build a fresh pool (that is itself a symptom of the re-queue bug).
+    # Quiesce: a drain must not build a fresh pool (a drain must never re-queue work for itself).
     monkeypatch.setattr("agent.credential_pool.load_pool",
                         lambda provider, **kw: SimpleNamespace(entries=lambda: [], current=lambda: None))
     deadline = time.monotonic() + 3
@@ -1202,4 +1230,37 @@ def test_timed_out_stop_does_not_allow_second_worker(qdir, monkeypatch):
         release.set()
         if old_thread is not None:
             old_thread.join(3)
+        qs.stop_refresher()
+
+
+def test_timed_out_stop_then_restart_keeps_a_live_worker(qdir, monkeypatch):
+    """A stop that times out mid-fetch followed by a NEW owner must leave a RUNNING worker: the
+    live owner holds the refresher, so the worker must resume (or be replaced) and keep draining
+    the queue, never leave a live owner with no refresher (D42)."""
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(qs, "_pool_entry", lambda *a: None)
+
+    def slow_fetch():
+        entered.set()
+        release.wait(6)
+        return None
+
+    class Owner:
+        pass
+
+    qs.enqueue_refresh(PROVIDER, "sha256:aaa")
+    owner_a = Owner()
+    old = qs.start_refresher(pool=owner_a, interval_s=0.05, fetcher=slow_fetch)
+    assert entered.wait(3)
+    try:
+        qs.stop_refresher(pool=owner_a)          # last owner -> stop, join times out (2s)
+        owner_b = Owner()
+        qs.start_refresher(pool=owner_b, interval_s=0.05, fetcher=lambda: None)
+        release.set()                            # the in-flight fetch now finishes
+        time.sleep(0.5)
+        assert len(qs._owner_tokens) == 1
+        assert qs.is_refresher_running(), "a live owner holds the refresher but no worker runs"
+    finally:
+        release.set()
         qs.stop_refresher()

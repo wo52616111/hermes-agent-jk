@@ -45,6 +45,11 @@ BACKOFF_ERR_START_S = 60
 BACKOFF_ERR_CAP_S = 1800
 LOCK_WAIT_S = 20.0
 HISTORY_MAX_BYTES = 4 * 1024 * 1024
+# A per-profile view's serving history is a bounded burn-rate series: ``load_pool(
+# quota_bootstrap=True)`` recomposes and would otherwise append a sample on every billed aux
+# call, growing the view file without limit on the request path. Cap the sample count so the
+# file stays bounded however many calls pass (D35).
+VIEW_HISTORY_MAX_SAMPLES = 64
 
 # Display label -> canonical period; window length by period. Unmapped labels are preserved
 # as their own period (D25) rather than dropping the window.
@@ -1268,18 +1273,29 @@ def update_view(
     profile: str, provider: str, *, now: Optional[datetime] = None,
     policy: Optional[dict] = None, pool=None,
 ) -> dict:
-    """Recompute the per-profile view from facts + this profile's policy, append a history
-    sample for the current serving account, and persist it (D41)."""
+    """Recompute the per-profile view from facts + this profile's policy, record a history
+    sample when the SERVED data has changed, and persist it (D41).
+
+    ``load_pool(quota_bootstrap=True)`` calls this on every billed aux call, so two bounds keep
+    the view file from growing on the request path: a sample is appended only when the serving
+    account's fingerprint or windows differ from the last sample (an unchanged recompose adds
+    nothing), and the series is capped at ``VIEW_HISTORY_MAX_SAMPLES`` (D35)."""
     name = str(provider or "").strip().lower()
     now = now or _utc_now()
     stored = _read_view_raw(profile, name)
     view = _compose_view(profile, name, stored, now=now, policy=policy, pool=pool)
     if view.get("serving"):
-        view["history"] = list(view.get("history") or []) + [{
+        sample = {
             "t": now.isoformat(),
             "fingerprint": view["serving"],
             "windows": view.get("windows") or [],
-        }]
+        }
+        history = list(view.get("history") or [])
+        last = history[-1] if history else {}
+        if (last.get("fingerprint") != sample["fingerprint"]
+                or last.get("windows") != sample["windows"]):
+            history.append(sample)
+        view["history"] = history[-VIEW_HISTORY_MAX_SAMPLES:]
     write_view(profile, name, view)
     return view
 
@@ -1395,6 +1411,10 @@ class QuotaRefresher:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        # Set (under ``_lock``) the instant the worker commits to leaving its loop, so a
+        # ``start()`` racing a timed-out stop starts a replacement rather than reviving a
+        # worker that is already exiting (D42).
+        self._exiting = False
 
     def _sleep_interval(self) -> float:
         spread = self.interval_s * self.jitter
@@ -1402,18 +1422,24 @@ class QuotaRefresher:
 
     def start(self) -> "QuotaRefresher":
         with self._lock:
-            # A live - or still-exiting - worker is reused: a stop that timed out must never
-            # let a replacement start on top of it (D42 one-worker bound).
-            if self._thread is not None and self._thread.is_alive():
+            thread = self._thread
+            if thread is not None and thread.is_alive() and not self._exiting:
+                # A stop() that timed out (an in-flight fetch outlasts the join) left the worker
+                # alive but with ``_stop`` set; clearing it lets that same worker resume its loop
+                # instead of dying, so a live owner is never left without a refresher (D42). A
+                # worker that has already committed to exiting does no further work, so it is
+                # replaced instead of revived (one working worker either way).
+                self._stop.clear()
                 return self
             self._stop.clear()
+            self._exiting = False
             self._thread = threading.Thread(target=self._run, name="quota-refresher", daemon=True)
             self._thread.start()
         return self
 
     def stop(self, timeout: float = 2.0) -> None:
-        self._stop.set()
         with self._lock:
+            self._stop.set()
             thread = self._thread
         # A finalizer may collect the last pool ON the worker thread; a thread cannot join
         # itself, and it is already stopping, so leave the handle to clear on the next start.
@@ -1425,6 +1451,15 @@ class QuotaRefresher:
                 if self._thread is thread and not thread.is_alive():
                     self._thread = None
 
+    def _exit_pending(self) -> bool:
+        """Under ``_lock``: True once a stop is pending, recording that this worker is leaving
+        so a racing ``start()`` replaces it rather than reviving it (D42)."""
+        with self._lock:
+            if self._stop.is_set():
+                self._exiting = True
+                return True
+            return False
+
     @property
     def running(self) -> bool:
         with self._lock:
@@ -1434,10 +1469,10 @@ class QuotaRefresher:
         # The drain cadence IS the interval: an enqueue only marks work for the NEXT drain, it
         # never shortens the current one, so a burst of billed calls cannot turn the periodic
         # drain into a fetch storm (D42).
-        while not self._stop.is_set():
+        while not self._exit_pending():
             self._stop.wait(timeout=self._sleep_interval())
-            if self._stop.is_set():
-                break
+            if self._exit_pending():
+                return
             for provider, fingerprint, scope in _drain_pending():
                 if fingerprint is None:
                     continue
