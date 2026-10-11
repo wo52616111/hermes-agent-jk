@@ -17,7 +17,9 @@ minutes) from being stormed by a dozen TUI gateways refreshing after every turn.
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
+import itertools
 import json
 import logging
 import os
@@ -327,13 +329,13 @@ def _pool_entry(provider: str, fingerprint: str):
 
 
 def _fetcher_for_entry(provider: str, entry) -> Callable:
-    """A fetcher using the entry's OWN credential, so a per-entry refresh reads the right
-    account's usage; falls back to the provider fetcher."""
-    if entry is not None:
-        api_key = entry.runtime_api_key
-        base_url = entry.runtime_base_url
-        return lambda: default_fetcher_for(provider, api_key=api_key, base_url=base_url)
-    return lambda: default_fetcher(provider)
+    """A fetcher using the entry's OWN credential. An unresolved fingerprint FAILS CLOSED:
+    falling back to the provider default would fetch - and attribute - another account."""
+    if entry is None:
+        raise QuotaFetchError(provider, 0, None, "no pool entry for this credential fingerprint")
+    api_key = entry.runtime_api_key
+    base_url = entry.runtime_base_url
+    return lambda: default_fetcher_for(provider, api_key=api_key, base_url=base_url)
 
 
 def _account_fetcher(provider: str, fingerprint: str) -> Callable:
@@ -604,6 +606,18 @@ def status_groups(now: Optional[datetime] = None,
                            "error": dict(MULTI_ACCOUNT_ERROR), "backoff_until": None,
                            "windows": [], "hint": None, "multi_account": True})
             continue
+        if _is_quota_aware(provider):
+            # D41: a quota_aware provider owns per-account facts/views. A legacy single-account
+            # snapshot (written by an earlier build) must NEVER be shown - it would present one
+            # account's usage as the whole subscription's. Serve the profile view or nothing.
+            view = read_view(current_profile(), provider, now=now)
+            windows = [{k: w.get(k) for k in ("period", "used_percent", "reset_at", "rolled") if k in w}
+                       for w in (view or {}).get("windows") or []]
+            if not windows:
+                continue
+            groups.append({"provider": provider, "fetched_at": None, "age_s": None,
+                           "error": None, "backoff_until": None, "windows": windows, "hint": None})
+            continue
         snap = read_snapshot(provider, now)
         if not snap or not snap.get("windows"):
             continue
@@ -640,6 +654,18 @@ def account_snapshot(provider: str, now: Optional[datetime] = None):
     if name not in SUPPORTED:
         return None
     now = now or _utc_now()
+    if _is_quota_aware(name):
+        # D41: never present a legacy single-account snapshot for a quota_aware provider; the
+        # profile view (or an explicit unknown) is the only source.
+        view = read_view(current_profile(), name, now=now)
+        windows_raw = (view or {}).get("windows") or []
+        if not windows_raw:
+            return None
+        windows = tuple(
+            AccountUsageWindow(label=str(_PERIOD_LABEL.get(w.get("period"), w.get("period")) or ""),
+                               used_percent=w.get("used_percent"), reset_at=_dt(w.get("reset_at")))
+            for w in windows_raw)
+        return AccountUsageSnapshot(provider=name, source="quota_state", fetched_at=now, windows=windows)
     try:
         refresh(name, now=now)
     except Exception:  # noqa: BLE001
@@ -734,6 +760,28 @@ def current_profile() -> str:
         return "default"
 
 
+@contextlib.contextmanager
+def _profile_bound(profile: str):
+    """Bind the REQUESTED profile's home while its policy and strategy are resolved, so a
+    cross-profile read applies THAT profile's config, never the ambient process's (D23/D33)."""
+    token = None
+    try:
+        from hermes_cli.profiles import get_profile_dir
+        from hermes_constants import set_hermes_home_override
+        token = set_hermes_home_override(get_profile_dir(profile))
+    except Exception:  # noqa: BLE001 — unknown/invalid name: keep the ambient home
+        logger.debug("profile home binding failed for %s", profile, exc_info=True)
+    try:
+        yield
+    finally:
+        if token is not None:
+            try:
+                from hermes_constants import reset_hermes_home_override
+                reset_hermes_home_override(token)
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _safe_fp(fingerprint: str) -> str:
     """A fingerprint is ``sha256:...`` (contains a colon); sanitize it for a filename."""
     return str(fingerprint or "").replace(":", "_").replace("/", "_")
@@ -791,6 +839,32 @@ def _merge_facts_entries(existing: Optional[dict], entries: Optional[list]) -> l
     return merged
 
 
+_facts_locks: dict[str, threading.Lock] = {}
+_facts_locks_guard = threading.Lock()
+
+
+@contextlib.contextmanager
+def _facts_write_lock(provider: str, fingerprint: str):
+    """Serialize one fingerprint's facts read-modify-write across THREADS (a process lock)
+    and PROCESSES (flock), so a concurrent refresh cannot erase a recorded refusal or the
+    merged ``entries`` metadata. Never held across an endpoint call (D42)."""
+    key = f"{provider}/{_safe_fp(fingerprint)}"
+    with _facts_locks_guard:
+        tlock = _facts_locks.setdefault(key, threading.Lock())
+    tlock.acquire()
+    try:
+        lock_path = quota_dir() / "lock" / f"facts_{_safe_fp(key)}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        tlock.release()
+
+
 def store_account_facts(
     provider: str, fingerprint: str, windows: list, *, entries: Optional[list] = None,
     fetched_at: Optional[str] = None, attempted_at: Optional[str] = None,
@@ -802,25 +876,29 @@ def store_account_facts(
     FACTS ONLY (D23): windows + status, when it was fetched/attempted, the last error and its
     backoff, ``metered_exhausted_until``, and the pool entries seen for this fingerprint. No
     ``state`` / ``serving`` / ``states`` / history / ``metered`` - those are per-reader (D33).
+
+    The read-modify-write runs under the per-fingerprint lock so a concurrent ``record_refusal``
+    or another writer cannot be lost to a stale read (D47).
     """
     now = now or _utc_now()
-    existing = read_account_facts(provider, fingerprint) or {}
-    if metered_exhausted_until is _UNSET:
-        metered_exhausted_until = existing.get("metered_exhausted_until")
-    elif isinstance(metered_exhausted_until, datetime):
-        metered_exhausted_until = metered_exhausted_until.isoformat()
-    record = {
-        "provider": provider,
-        "fingerprint": fingerprint,
-        "entries": _merge_facts_entries(existing, entries),
-        "windows": list(windows or []),
-        "metered_exhausted_until": metered_exhausted_until,
-        "fetched_at": fetched_at if fetched_at is not None else existing.get("fetched_at"),
-        "attempted_at": attempted_at or now.isoformat(),
-        "error": error,
-        "backoff_until": backoff_until,
-    }
-    return write_account_facts(provider, fingerprint, record)
+    with _facts_write_lock(provider, fingerprint):
+        existing = read_account_facts(provider, fingerprint) or {}
+        if metered_exhausted_until is _UNSET:
+            metered_exhausted_until = existing.get("metered_exhausted_until")
+        elif isinstance(metered_exhausted_until, datetime):
+            metered_exhausted_until = metered_exhausted_until.isoformat()
+        record = {
+            "provider": provider,
+            "fingerprint": fingerprint,
+            "entries": _merge_facts_entries(existing, entries),
+            "windows": list(windows or []),
+            "metered_exhausted_until": metered_exhausted_until,
+            "fetched_at": fetched_at if fetched_at is not None else existing.get("fetched_at"),
+            "attempted_at": attempted_at or now.isoformat(),
+            "error": error,
+            "backoff_until": backoff_until,
+        }
+        return write_account_facts(provider, fingerprint, record)
 
 
 def fetch_account_facts(
@@ -878,15 +956,16 @@ def record_refusal(
     now = now or _utc_now()
     if str(state or "") != "overflow":
         return False
-    facts = read_account_facts(provider, fingerprint)
-    if facts is None:
-        return False
-    until = _dt(reset_at) if reset_at else None
-    if until is None:
-        until = now + timedelta(seconds=backoff_s or BACKOFF_429_DEFAULT_S)
-    facts["metered_exhausted_until"] = until.isoformat()
-    write_account_facts(provider, fingerprint, facts)
-    return True
+    with _facts_write_lock(provider, fingerprint):
+        facts = read_account_facts(provider, fingerprint)
+        if facts is None:
+            return False
+        until = _dt(reset_at) if reset_at else None
+        if until is None:
+            until = now + timedelta(seconds=backoff_s or BACKOFF_429_DEFAULT_S)
+        facts["metered_exhausted_until"] = until.isoformat()
+        write_account_facts(provider, fingerprint, facts)
+        return True
 
 
 # ---------------------------------------------------------------- attribution (D42)
@@ -901,9 +980,10 @@ def served_fingerprint(
     ``base_url`` is never a discriminator: real opencode-go accounts share ONE base_url, so
     matching on it would silently attribute the wrong account (or, when shared, resolve to
     nothing). Resolution order is the stable ``entry_id`` (carried by the turn path), then a
-    unique ``api_key`` match, then the pool's current entry - the one the session is bound to /
-    last leased. When nothing resolves a UNIQUE account the result is ``None`` ("unknown"): a
-    caller must record no fingerprint rather than guess a wrong one. Never raises.
+    unique ``api_key`` match. When a caller DOES supply an identity that matches no unique
+    account the result is ``None`` ("unknown") - the pool's current entry and single-account
+    inference apply ONLY when no identity was supplied at all, so a foreign credential is
+    never attributed to a configured account. Never raises.
     """
     name = quota_provider(provider, base_url)
     if name not in SUPPORTED:
@@ -927,7 +1007,13 @@ def served_fingerprint(
         }
         if len(fps) == 1:
             return next(iter(fps))
-    # The pool's real serving state: the entry the session is currently bound to.
+        # A supplied credential that matches no pool entry (or several) is UNKNOWN: the
+        # contract forbids guessing the pool's current/single account for it (D26/D42).
+        return None
+    if entry_id:
+        # An entry id was supplied but matched no entry: unknown, never a guess.
+        return None
+    # No credential identity was supplied: infer from the pool's real serving state.
     try:
         current = pool.current()
     except Exception:
@@ -1024,16 +1110,17 @@ def _target_matches(target: Any, entry: dict) -> bool:
     }
 
 
-def _is_metered_facts(facts: dict, provider: str, policy: dict) -> bool:
+def _is_metered_facts(entries: list, provider: str, policy: dict) -> bool:
     """D38/D49: a policy block that DECLARES ``metered_overflow`` (even as an empty list) is
     authoritative for which accounts are metered; the provider's ``bills_when_plan_spent``
-    capability applies only when the block does not declare the key."""
+    capability applies only when the block does not declare the key. Targets match only the
+    READING profile's own entry identities (D33), never another profile's alias."""
     targets = policy.get("metered_overflow") if isinstance(policy, dict) else None
     if isinstance(targets, list):
         return any(
             _target_matches(target, entry)
             for target in targets
-            for entry in facts.get("entries") or []
+            for entry in entries
         )
     profile = _provider_profile(provider)
     return bool(getattr(profile, "bills_when_plan_spent", False))
@@ -1048,9 +1135,13 @@ def _read_health(facts: dict, now: datetime) -> str:
     return "stale" if (now - fetched).total_seconds() > STALE_S else "ok"
 
 
-def _first_entry(facts: dict) -> dict:
-    entries = facts.get("entries") or []
-    return entries[0] if entries else {}
+def _profile_entry(facts: dict, profile: str) -> dict:
+    """The READING profile's own entry for a shared facts record: an entry tagged with that
+    profile, else {} (an untagged record carries no profile identity)."""
+    for entry in facts.get("entries") or []:
+        if entry.get("profile") == profile:
+            return entry
+    return {}
 
 
 def _pick_serving(facts_list: list, by_fp: dict, stored_serving, pool, now: datetime):
@@ -1074,26 +1165,36 @@ def _compose_view(
     profile: str, provider: str, stored: Optional[dict], *, now: datetime,
     policy: Optional[dict], pool,
 ) -> dict:
-    policy = _policy_for(provider, policy)
+    with _profile_bound(profile):
+        policy = _policy_for(provider, policy)
+        strategy = _STRATEGY_QUOTA_AWARE if _is_quota_aware(provider) else "fill_first"
     accounts: list[dict] = []
     states = {"covered": 0, "overflow": 0, "exhausted": 0}
     by_fp: dict = {}
-    facts_list = list_account_facts(provider)
-    for facts in facts_list:
+    scoped: list[dict] = []
+    for facts in list_account_facts(provider):
         fp = facts.get("fingerprint")
+        entries = facts.get("entries") or []
+        mine = [e for e in entries if e.get("profile") == profile]
+        # D33: an account belongs to the reading profile only when THAT profile's pool owns
+        # it. A record tagged solely with other profiles is theirs, not this profile's; an
+        # untagged record has no known owner and stays visible.
+        if entries and not mine:
+            continue
+        scoped.append(facts)
         windows = [_rolled(w, now) for w in facts.get("windows") or []]
         # D23: every policy-shaped value is derived HERE, at read time, from THIS profile's
         # CURRENT config + the stored facts - never reused from a previously-written view.
         # Editing ``credential_pool_policy`` must change the next read with no rewrite, so a
         # stored ``metered`` is a pure cache for display, not an input to classification. Two
         # profiles with different policies therefore read different states from the SAME facts.
-        metered = _is_metered_facts(facts, provider, policy)
+        metered = _is_metered_facts(mine, provider, policy)
         state = qstate.account_state(
             windows, metered=metered,
             metered_exhausted_until=facts.get("metered_exhausted_until"), now=now,
         )
         fetched = _dt(facts.get("fetched_at"))
-        entry = _first_entry(facts)
+        entry = mine[0] if mine else {}
         record = {
             "fingerprint": fp,
             "label": entry.get("label"),
@@ -1116,7 +1217,7 @@ def _compose_view(
             by_fp[fp] = record
         if state in states:
             states[state] += 1
-    serving = _pick_serving(facts_list, by_fp, (stored or {}).get("serving"), pool, now)
+    serving = _pick_serving(scoped, by_fp, (stored or {}).get("serving"), pool, now)
     previous_serving = (stored or {}).get("serving")
     history = list((stored or {}).get("history") or [])
     serving_since = (stored or {}).get("serving_since")
@@ -1127,7 +1228,7 @@ def _compose_view(
         serving_since = now.isoformat()
     return {
         "provider": provider,
-        "strategy": _STRATEGY_QUOTA_AWARE if _is_quota_aware(provider) else "fill_first",
+        "strategy": strategy,
         "serving": serving,
         "serving_since": serving_since,
         "windows": by_fp.get(serving, {}).get("windows", []),
@@ -1145,7 +1246,9 @@ def read_view(
 
     Returns the derived view for a provider on ``quota_aware`` (or one that already has a view
     file), with per-account state recomputed at read time FROM THIS PROFILE'S CURRENT CONFIG
-    (D23): a policy edit is visible on the very next read, with no rewrite. Returns None for any
+    (D23): a policy edit is visible on the very next read, with no rewrite. The REQUESTED
+    profile's home is bound while its policy and strategy are read, so a cross-profile read
+    applies that profile's config rather than the ambient one (D33). Returns None for any
     other provider so the caller falls back to the legacy ``snapshot/<provider>.json`` path
     unchanged (D33).
     """
@@ -1153,8 +1256,10 @@ def read_view(
     if name not in SUPPORTED:
         return None
     now = now or _utc_now()
+    with _profile_bound(profile):
+        quota_aware = _is_quota_aware(name)
     stored = _read_view_raw(profile, name)
-    if stored is None and not _is_quota_aware(name):
+    if stored is None and not quota_aware:
         return None
     return _compose_view(profile, name, stored, now=now, policy=policy, pool=pool)
 
@@ -1185,15 +1290,77 @@ _pending_lock = threading.Lock()
 _pending_refreshes: set = set()
 _refresher: Optional["QuotaRefresher"] = None
 _refresher_guard = threading.Lock()
+# The profile context each queued account must be fetched under, keyed like the queue. A bare
+# worker thread has no ContextVars of the enqueuing turn, so the home/secret scope is copied at
+# enqueue time; without it a fingerprint queued by another profile resolves in the launch
+# profile and fetches the wrong (or a default) account (D42).
+_pending_context: dict = {}
+
+
+@dataclass(frozen=True)
+class _RefreshScope:
+    home: Optional[str]
+    secrets: Optional[dict]
+
+
+def _capture_scope() -> "_RefreshScope":
+    """Copy the enqueuing turn's home + secret scope so the worker can re-bind them."""
+    home: Optional[str] = None
+    try:
+        from hermes_constants import get_hermes_home, get_hermes_home_override
+        home = get_hermes_home_override() or str(get_hermes_home())
+    except Exception:  # noqa: BLE001
+        logger.debug("refresh scope home capture failed", exc_info=True)
+    secrets: Optional[dict] = None
+    try:
+        from agent.secret_scope import current_secret_scope
+        scope = current_secret_scope()
+        secrets = dict(scope) if scope else None
+    except Exception:  # noqa: BLE001
+        logger.debug("refresh scope secret capture failed", exc_info=True)
+    return _RefreshScope(home=home, secrets=secrets)
+
+
+@contextlib.contextmanager
+def _bind_scope(scope: Optional["_RefreshScope"]):
+    """Re-bind a captured enqueue scope around a fetch in the worker thread."""
+    home_token = secret_token = None
+    if scope is not None:
+        try:
+            if scope.home:
+                from hermes_constants import set_hermes_home_override
+                home_token = set_hermes_home_override(scope.home)
+            from agent.secret_scope import set_secret_scope
+            secret_token = set_secret_scope(scope.secrets)
+        except Exception:  # noqa: BLE001
+            logger.debug("refresh scope binding failed", exc_info=True)
+    try:
+        yield
+    finally:
+        if secret_token is not None:
+            try:
+                from agent.secret_scope import reset_secret_scope
+                reset_secret_scope(secret_token)
+            except Exception:  # noqa: BLE001
+                pass
+        if home_token is not None:
+            try:
+                from hermes_constants import reset_hermes_home_override
+                reset_hermes_home_override(home_token)
+            except Exception:  # noqa: BLE001
+                pass
 
 
 def enqueue_refresh(provider: str, fingerprint: Optional[str] = None) -> None:
-    """Queue a ``(provider, fingerprint)`` refresh; never fetches here (D11/D42)."""
+    """Queue a ``(provider, fingerprint)`` refresh with the enqueuing profile's scope; never
+    fetches here (D11/D42)."""
     name = str(provider or "").strip().lower()
     if name not in SUPPORTED:
         return
+    scope = _capture_scope()
     with _pending_lock:
         _pending_refreshes.add((name, fingerprint))
+        _pending_context[(name, fingerprint)] = scope
 
 
 def pending_refreshes() -> set:
@@ -1202,11 +1369,14 @@ def pending_refreshes() -> set:
         return set(_pending_refreshes)
 
 
-def _drain_pending() -> set:
+def _drain_pending() -> list:
     with _pending_lock:
-        items = set(_pending_refreshes)
+        items = list(_pending_refreshes)
         _pending_refreshes.clear()
-    return items
+        contexts = dict(_pending_context)
+        _pending_context.clear()
+    return [(provider, fingerprint, contexts.get((provider, fingerprint)))
+            for provider, fingerprint in items]
 
 
 class QuotaRefresher:
@@ -1232,6 +1402,8 @@ class QuotaRefresher:
 
     def start(self) -> "QuotaRefresher":
         with self._lock:
+            # A live - or still-exiting - worker is reused: a stop that timed out must never
+            # let a replacement start on top of it (D42 one-worker bound).
             if self._thread is not None and self._thread.is_alive():
                 return self
             self._stop.clear()
@@ -1243,10 +1415,15 @@ class QuotaRefresher:
         self._stop.set()
         with self._lock:
             thread = self._thread
-        if thread is not None:
+        # A finalizer may collect the last pool ON the worker thread; a thread cannot join
+        # itself, and it is already stopping, so leave the handle to clear on the next start.
+        if thread is not None and thread is not threading.current_thread():
             thread.join(timeout)
-        with self._lock:
-            self._thread = None
+            with self._lock:
+                # Retain the handle until the worker has TRULY exited, so a start() that races
+                # a timed-out stop cannot overlap a second worker.
+                if self._thread is thread and not thread.is_alive():
+                    self._thread = None
 
     @property
     def running(self) -> bool:
@@ -1261,29 +1438,60 @@ class QuotaRefresher:
             self._stop.wait(timeout=self._sleep_interval())
             if self._stop.is_set():
                 break
-            for provider, fingerprint in _drain_pending():
+            for provider, fingerprint, scope in _drain_pending():
                 if fingerprint is None:
                     continue
                 try:
-                    fetch_account_facts(provider, fingerprint, fetcher=self._fetcher)
+                    with _bind_scope(scope):
+                        fetch_account_facts(provider, fingerprint, fetcher=self._fetcher)
                 except Exception:  # noqa: BLE001
                     logger.debug("quota refresh %s/%s failed", provider, fingerprint, exc_info=True)
 
 
 # Pools that currently hold the process-wide refresher: the thread runs while ANY of them is
 # live and stops once the last one releases it, so one pool's teardown never kills another's
-# refreshing (D42). Weak so a transient load that nobody keeps does not pin the thread.
+# refreshing (D42). Ownership is dropped on an explicit release AND when a pool is garbage
+# collected, so a pool nobody keeps does not leave an orphan daemon fetching forever.
 _refresher_pools: "weakref.WeakSet" = weakref.WeakSet()
+_pool_owner_token: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+_owner_tokens: set = set()
+_owner_finalizers: dict = {}
+_owner_token_seq = itertools.count(1)
+
+
+def _release_owner(token: int, timeout: float = 2.0) -> None:
+    """Drop one pool's hold on the refresher; stop the worker once no owner remains."""
+    global _refresher
+    with _refresher_guard:
+        if token not in _owner_tokens:
+            return
+        _owner_tokens.discard(token)
+        finalizer = _owner_finalizers.pop(token, None)
+        if _owner_tokens:
+            return
+        refresher = _refresher
+    if finalizer is not None:
+        finalizer.detach()
+    if refresher is not None:
+        refresher.stop(timeout)
+        with _refresher_guard:
+            if _refresher is refresher and not refresher.running:
+                _refresher = None
 
 
 def start_refresher(*, pool=None, interval_s: int = REFRESH_INTERVAL_S,
                     fetcher: Optional[Callable] = None) -> QuotaRefresher:
     """Start (or return) the process-wide ``QuotaRefresher``. ``pool`` registers a live owner;
-    the thread stops only once every registered pool has released it. Idempotent."""
+    the thread stops only once every registered pool has released it (explicitly or by being
+    collected). Idempotent."""
     global _refresher
     with _refresher_guard:
-        if pool is not None:
+        if pool is not None and pool not in _pool_owner_token:
+            token = next(_owner_token_seq)
+            _pool_owner_token[pool] = token
+            _owner_tokens.add(token)
             _refresher_pools.add(pool)
+            _owner_finalizers[token] = weakref.finalize(pool, _release_owner, token)
         if _refresher is None:
             _refresher = QuotaRefresher(interval_s=interval_s, fetcher=fetcher)
         refresher = _refresher
@@ -1294,17 +1502,25 @@ def stop_refresher(timeout: float = 2.0, *, pool=None) -> None:
     """Release ``pool``'s hold on the refresher; the thread stops once no pool holds it. With no
     ``pool`` this is a forced process-wide stop."""
     global _refresher
+    if pool is not None:
+        with _refresher_guard:
+            token = _pool_owner_token.get(pool)
+        if token is None:
+            return
+        _release_owner(token, timeout)
+        return
     with _refresher_guard:
-        if pool is not None:
-            _refresher_pools.discard(pool)
-            if _refresher_pools:
-                return
-        else:
-            _refresher_pools.clear()
+        tokens = list(_owner_tokens)
+    for token in tokens:
+        _release_owner(token, timeout)
+    with _refresher_guard:
         refresher = _refresher
-        _refresher = None
     if refresher is not None:
         refresher.stop(timeout)
+        with _refresher_guard:
+            if _refresher is refresher and not refresher.running:
+                _refresher = None
+
 
 
 def is_refresher_running() -> bool:
