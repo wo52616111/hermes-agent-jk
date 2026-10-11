@@ -530,7 +530,8 @@ export function layoutQuotaGroups(
   activeProvider?: string | null,
   leadingSeparator = true,
   activeAccount?: string | null,
-  subRowsBudget?: number
+  subRowsBudget?: number,
+  allowNumberlessFallback = true
 ) {
   const activeIndex = groups.findIndex(group => group.provider === activeProvider)
   // Width the per-account sub-rows render at; 0 when this call renders no sub-rows.
@@ -643,9 +644,14 @@ export function layoutQuotaGroups(
   }
 
   // Ultra-narrow last resort for a trimmed per-account group: drop the inline fallback numbers
-  // (badge stays) so the group still renders instead of vanishing entirely.
-  for (let count = groups.length; count >= 1; count--) {
-    candidates.push(build(count, false, 'none', false, false))
+  // (badge stays) so the group still renders instead of vanishing entirely. A caller that must
+  // never hide a number that fits passes `allowNumberlessFallback = false`: a layout that only
+  // fits by dropping the numbers is then not treated as fitting, and the caller falls through to
+  // a wider layout instead.
+  if (allowNumberlessFallback) {
+    for (let count = groups.length; count >= 1; count--) {
+      candidates.push(build(count, false, 'none', false, false))
+    }
   }
 
   const chosen = candidates.find(layout => width(layout) <= budget) ?? []
@@ -1354,7 +1360,11 @@ export function StatusRule({
         activeQuotaGroup.provider,
         false,
         activeAccount,
-        capacityWidth
+        capacityWidth,
+        // The active column must not fit by dropping the serving account's numbers: when they
+        // don't fit here, leave it empty so useCapacityTable falls through to the wider
+        // non-table CapacityRow, which renders the same numbers.
+        false
       )
     : []
 

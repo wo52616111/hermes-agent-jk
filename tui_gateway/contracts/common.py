@@ -138,8 +138,8 @@ class Usage(OpenModel):
     account_usage_all: list[AccountUsageGroup] | None = None
     account_usage_active: str | None = None
     # The fingerprint of the credential THIS session is on (D19/D29) - the session-local marker the
-    # shared per-account view deliberately does not carry, so two sessions on different accounts do
-    # not fight over one flag. Falls back to the group's ``serving`` when unresolved.
+    # shared per-account view does not carry, so two sessions on different accounts do not fight
+    # over one flag. Falls back to the group's ``serving`` when unresolved.
     account_usage_active_account: str | None = None
 
 

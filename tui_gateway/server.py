@@ -2216,8 +2216,8 @@ def _account_usage_all_wire() -> list[dict]:
     """Every provider with stored quota, for the capacity row (status bar).
 
     Legacy providers come from ``quota_state.status_groups()`` unchanged; a provider with a
-    ``quota_aware`` per-profile view (D41) is replaced by its per-account group so a multi-account
-    pool no longer collapses to empty windows.
+    ``quota_aware`` per-profile view (D41) is replaced by its per-account group, which carries
+    every account's own windows.
     """
     try:
         from agent import quota_state
