@@ -85,10 +85,10 @@ def _usage_accounts_document(provider: str) -> list[dict]:
 def _subscription_group_from_view(provider: str, view: dict) -> dict:
     """A subscription group built from a ``quota_aware`` provider's per-profile view (D41).
 
-    A ``quota_aware`` provider no longer writes a legacy ``status_groups()`` snapshot (B1), so a
-    subscription that exists only as per-account facts has no group to attach to: build one here so
-    ``hermes usage --all-subscriptions`` never reports an empty list for a provider the gateway
-    renders. ``windows`` is the SERVING account's own - never a sum or an average (D14/D34).
+    ``status_groups()`` omits a ``quota_aware`` provider when its view has no windows; build the
+    group from the view then, so ``hermes usage --all-subscriptions`` never reports an empty list
+    for a provider the gateway renders. ``windows`` is the SERVING account's own - never a sum or
+    an average (D14/D34).
     """
     accounts = list(view.get("accounts") or [])
     by_fp = {a.get("fingerprint"): a for a in accounts}
@@ -173,8 +173,7 @@ def _cmd_usage_subscriptions(args: argparse.Namespace) -> int:
                 outcomes[provider] = quota_state.refresh(provider, stale_s=stale)
             except Exception as exc:  # noqa: BLE001 — report, never crash a router call
                 outcomes[provider] = f"error: {type(exc).__name__}"
-            # A provider with per-account views is refreshed per account (D20/D42): the legacy
-            # provider snapshot no longer owns its state.
+            # A provider with per-account views is refreshed per account (D20/D42).
             accounts = _refresh_accounts(provider)
             if accounts:
                 outcomes[provider] = f"{outcomes[provider]}; {accounts} accounts"
@@ -183,9 +182,9 @@ def _cmd_usage_subscriptions(args: argparse.Namespace) -> int:
         accounts = _usage_accounts_document(group["provider"])
         if accounts:
             group["accounts"] = accounts
-    # A provider whose state exists only as per-account facts (B1 stopped writing a legacy
-    # snapshot for quota_aware providers) has no status group above: add it from its view so the
-    # subscriptions array is never silently missing a provider the gateway renders.
+    # ``status_groups()`` omits a ``quota_aware`` provider when its view has no windows; build the
+    # group from the view so the subscriptions array is never silently missing a provider the
+    # gateway renders.
     known = {group["provider"] for group in groups}
     for provider in targets:
         if provider in known:

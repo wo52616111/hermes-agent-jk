@@ -125,7 +125,7 @@ def test_all_subscriptions_human_output_lists_each_account(qdir, monkeypatch, ca
 
 
 def test_all_subscriptions_reports_a_provider_with_only_per_account_facts(qdir, monkeypatch, capsys):
-    """A ``quota_aware`` provider never serves a legacy single-account snapshot (B1/D41): the
+    """A ``quota_aware`` provider never serves a legacy single-account snapshot (D41): the
     provider-level ``status_groups()`` entry, when present, carries the SERVING account's OWN view
     windows (never the other account's, never a stale snapshot) and is absent when the view has none.
     The CLI must still list the provider and its nested per-account records - built from its view -
@@ -164,4 +164,39 @@ def test_all_subscriptions_reports_a_provider_with_only_per_account_facts(qdir, 
     assert by_label["OPENCODE_GO_API_KEY"]["metered"] is True
     # The provider line carries the SERVING account's own windows, never a blend.
     assert {w["period"] for w in subs[PROVIDER]["windows"]} == {"5h"}
+    assert "sha256" not in json.dumps(doc)
+
+
+def test_all_subscriptions_builds_the_provider_group_from_the_view_when_status_groups_omits_it(
+    qdir, monkeypatch, capsys
+):
+    """``status_groups()`` omits a ``quota_aware`` provider whose view has NO windows (the serving
+    account read none). The CLI's fallback (``_subscription_group_from_view``) must still list the
+    provider and BOTH nested per-account records - never an empty ``subscriptions`` array while the
+    gateway renders the same accounts. This does NOT mock ``status_groups``: it is the only test
+    that reaches that fallback branch, so deleting it fails here."""
+    # The pool serves from the account that read NO windows, so the view carries no provider windows.
+    _store("sha256:bbb444555666", "OPENCODE_GO_API_KEY_2", [])
+    _store("sha256:aaa111222333", "OPENCODE_GO_API_KEY", [_window(period="7d", percent=100.0)])
+
+    view = qs.read_view(qs.current_profile(), PROVIDER)
+    assert view is not None
+    assert view["serving"] == "sha256:bbb444555666"
+    assert view["windows"] == []
+    # Premise: with no view windows there is no provider group for the fallback to attach to.
+    assert [g for g in qs.status_groups() if g["provider"] == PROVIDER] == []
+
+    from hermes_cli.subcommands.usage import cmd_usage
+
+    assert cmd_usage(_args()) == 0
+    doc = json.loads(capsys.readouterr().out)
+
+    subs = {g["provider"]: g for g in doc["subscriptions"]}
+    assert PROVIDER in subs
+    by_label = {a["label"]: a for a in subs[PROVIDER]["accounts"]}
+    assert set(by_label) == {"OPENCODE_GO_API_KEY_2", "OPENCODE_GO_API_KEY"}
+    assert by_label["OPENCODE_GO_API_KEY_2"]["state"] == "covered"
+    assert by_label["OPENCODE_GO_API_KEY"]["state"] == "overflow"
+    # Built from the view: the SERVING account's own (empty) windows, never a blend.
+    assert subs[PROVIDER]["windows"] == []
     assert "sha256" not in json.dumps(doc)
