@@ -13,6 +13,7 @@ D28/D47 refusal -> selection integration and the D44 repair/pin rules.
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -382,7 +383,7 @@ def test_D28_D47_refusal_while_overflow_removes_it_from_selection(qdir, quota_aw
     _facts("sha256:bbb", [_win(percent=5.0)])     # B covered
     pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
                   _entry("b", priority=1, fingerprint="sha256:bbb")])
-    # A is selected only because it outranks B by priority; with both non-covered? no - B is covered.
+    # A outranks B by priority, but B is the covered account.
     assert pool.select().id == "b"
     assert qs.record_refusal(PROVIDER, "sha256:aaa", state="overflow",
                              reset_at=NOW + timedelta(hours=2), now=NOW) is True
@@ -735,3 +736,183 @@ def test_missing_earliest_reset_first_defaults_true(qdir, quota_aware, monkeypat
     )
     ordered = [e.id for e in qsel.ordered_candidates([a, b], states, policy, NOW)]
     assert ordered == ["B", "A"]
+
+
+# ============================================================================
+# 9 (B2 fix round 1). Endpoint repair eligibility, turn-boundary endpoint
+#    siblings, the turn-context/aux credential agreement and the D45 forms.
+# ============================================================================
+
+
+def test_D44_repair_never_binds_a_cooling_or_non_leased_account(qdir, quota_aware):
+    """D44: the internal repair restricts the endpoint candidates to ELIGIBLE entries and
+    re-resolves the bound object from the lease the pool RETURNS. A cooling endpoint-mate (B)
+    is never repaired onto, and the leased account always equals the serving account."""
+    from tools.delegate_tool_child_run import _lease_child_credential
+    for fp, pct in [("sha256:aaa", 5), ("sha256:bbb", 5), ("sha256:ccc", 100)]:
+        _facts(fp, [_win(percent=pct)])
+    a = _entry("a", fingerprint="sha256:aaa", base_url="https://elsewhere.example/v1")
+    b = _entry("b", fingerprint="sha256:bbb")            # serves the endpoint but is cooling
+    b.last_status = "exhausted"
+    b.last_status_at = time.time()
+    b.last_error_reset_at = time.time() + 3600
+    c = _entry("c", fingerprint="sha256:ccc")            # the eligible endpoint-mate
+    pool = _pool([a, b, c])
+    bound = []
+    child = SimpleNamespace(provider=PROVIDER, base_url=SHARED_URL, _credential_pool=pool,
+                            _swap_credential=lambda e: bound.append(e.id) or True)
+    _pool_out, lease = _lease_child_credential(child)
+    assert lease == bound[-1] == "c"                     # never the cooling B; bound == leased
+    assert pool._active_leases.get("b", 0) == 0          # the cooling account is not leased
+
+
+def test_turn_boundary_finds_an_endpoint_matching_covered_sibling(qdir, quota_aware):
+    """D22: one endpoint-incompatible order head must not abort the whole check — a covered
+    sibling that serves the session's endpoint is still found and switched to."""
+    from agent.agent_runtime_helpers import quota_aware_turn_boundary
+    _facts("sha256:aaa", [_win(percent=100.0)])          # A overflow (the live binding)
+    _facts("sha256:bbb", [_win(percent=5.0)])            # B covered, ANOTHER endpoint
+    _facts("sha256:ccc", [_win(percent=5.0)])            # C covered, the SAME endpoint
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"),
+                  _entry("b", fingerprint="sha256:bbb", base_url="https://elsewhere.example/v1"),
+                  _entry("c", fingerprint="sha256:ccc", priority=1)])
+    agent = _Agent(pool, "a")
+    quota_aware_turn_boundary(agent)
+    assert agent.swaps == ["c"]
+    assert agent._credential_pool_entry_id == "c"
+
+
+def test_turn_context_publishes_the_post_boundary_credential_to_auxiliary(qdir, quota_aware):
+    """D22/sibling-path: the runtime main is published AFTER the quota-aware turn-boundary
+    switch, so the auxiliary routing pins the SAME final credential the main request uses —
+    compression/title calls must not keep billing the overflow account the main left."""
+    from tests.agent.test_turn_context import _FakeAgent, _build
+    from agent import auxiliary_client as aux
+    _facts("sha256:aaa", [_win(percent=100.0)])          # A overflow (the live binding)
+    _facts("sha256:bbb", [_win(percent=5.0)])            # B covered
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    agent = _FakeAgent()
+    agent.provider = agent.requested_provider = PROVIDER
+    agent.model = "glm-5"
+    agent.base_url = SHARED_URL
+    agent.api_key = "key-a"
+    agent._credential_pool = pool
+    agent._credential_pool_entry_id = "a"
+
+    def _swap(entry):
+        agent._credential_pool_entry_id = entry.id
+        agent.api_key = entry.access_token
+        return True
+
+    agent._swap_credential = _swap
+    try:
+        _build(agent)
+        client, _model, _provider = aux._resolve_auto_route(task="compression")
+        try:
+            assert agent.api_key == "key-b"
+            assert aux._runtime_main_value("api_key") == "key-b"
+            assert client.api_key == "key-b"             # aux pins the NEW credential
+        finally:
+            client.close()
+    finally:
+        aux.clear_runtime_main()
+
+
+def test_D45_index_target_form_resolves(qdir, quota_aware, monkeypatch):
+    """D45: a 1-based index names an account, so the config stays usable (no fill_first)."""
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: {"metered_overflow": ["1"]})
+    cp._POLICY_WARNED.clear()
+    a = _entry("a", label="Account A")
+    pool = _pool([a, _entry("b", label="Account B")])
+    assert pool.resolve_target("1")[1] is a
+    policy, usable = pool._quota_policy()
+    assert usable is True and policy.earliest_reset_first is True
+
+
+def test_D45_bare_var_matches_an_env_source_with_a_custom_label(qdir, quota_aware, monkeypatch):
+    """D45: a bare VAR is normalised to ``env:<VAR>`` and matches the entry's source, even
+    when the account carries a custom label."""
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block",
+                        lambda provider: {"metered_overflow": ["OPENCODE_GO_API_KEY"]})
+    cp._POLICY_WARNED.clear()
+    a = _entry("a", label="Account A")
+    a.source = "env:OPENCODE_GO_API_KEY"
+    pool = _pool([a, _entry("b", label="Account B")])
+    assert pool.resolve_target("OPENCODE_GO_API_KEY")[1] is a
+    assert pool._quota_policy()[1] is True
+
+
+def test_D45_entry_id_takes_precedence_over_a_label(qdir, quota_aware, monkeypatch):
+    """D45: an exact entry id wins over a colliding label — the config is not ambiguous."""
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: {"metered_overflow": ["a"]})
+    cp._POLICY_WARNED.clear()
+    a = _entry("a", label="Account A")
+    b = _entry("b", label="a")                           # b's label collides with a's id
+    pool = _pool([a, b])
+    assert pool.resolve_target("a")[1] is a              # id, not ambiguous
+    assert pool._quota_policy()[1] is True
+
+
+def test_D45_duplicate_label_is_ambiguous_while_the_index_form_resolves(qdir, quota_aware, monkeypatch):
+    """D45: two entries sharing a label make that LABEL ambiguous, but the 1-based index form
+    still resolves one of them — the collision must not force the whole config to fill_first."""
+    import agent.credential_pool as cp
+    cp._POLICY_WARNED.clear()
+    a = _entry("a", label="Dup")
+    b = _entry("b", label="Dup")
+    pool = _pool([a, b])
+    assert pool.resolve_target("Dup")[1] is None         # the shared label is ambiguous
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: {"metered_overflow": ["1"]})
+    assert pool.resolve_target("1")[1] is a              # the index form resolves it
+    assert pool._quota_policy()[1] is True               # ...so the config stays usable
+
+
+def test_D45_valid_index_config_keeps_covered_first(qdir, quota_aware, monkeypatch):
+    """A valid D45 config must NOT degrade to fill_first: covered-first still serves B, not
+    the priority-0 overflow A that fill_first would hand out."""
+    import agent.credential_pool as cp
+    monkeypatch.setattr(cp, "get_pool_policy_block", lambda provider: {"metered_overflow": ["1"]})
+    cp._POLICY_WARNED.clear()
+    _facts("sha256:aaa", [_win(percent=100.0)])          # A overflow, priority 0
+    _facts("sha256:bbb", [_win(percent=5.0)])            # B covered, priority 1
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    assert pool.select().id == "b"
+
+
+def test_D46b_warns_again_when_service_returns_to_metered(qdir, quota_aware, caplog):
+    """D46(b): the warning tracks the SERVED account and state, so overflow A -> covered B ->
+    overflow A warns twice (B reset the state); a per-overflow-id dedup would suppress it."""
+    _facts("sha256:aaa", [_win(percent=100.0)])          # A overflow
+    _facts("sha256:bbb", [_win(percent=100.0)], metered_exhausted_until=NOW.replace(year=2027))
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    with caplog.at_level(logging.WARNING):
+        assert pool.select().id == "a"                   # A overflow -> warn 1
+        _facts("sha256:bbb", [_win(percent=5.0)], metered_exhausted_until=None)
+        assert pool.select().id == "b"                   # B covered -> no warn
+        _facts("sha256:bbb", [_win(percent=100.0)], metered_exhausted_until=NOW.replace(year=2027))
+        assert pool.select().id == "a"                   # A overflow again -> warn 2
+    msgs = [r.message for r in caplog.records if "from its metered bucket" in r.message]
+    assert len(msgs) == 2
+
+
+def test_D46b_warns_on_every_transition_into_metered_service(qdir, quota_aware, caplog):
+    """D46(b): the warning tracks the SERVED account and state, so a covered account that
+    turns overflow warns each time it re-enters metered service (covered -> overflow ->
+    covered -> overflow warns twice); a per-overflow-id dedup would suppress the second."""
+    _facts("sha256:aaa", [_win(percent=5.0)])            # A covered
+    _facts("sha256:bbb", [_win(percent=100.0)], metered_exhausted_until=NOW.replace(year=2027))
+    pool = _pool([_entry("a", fingerprint="sha256:aaa"), _entry("b", fingerprint="sha256:bbb")])
+    with caplog.at_level(logging.WARNING):
+        assert pool.select().id == "a"                   # A covered -> no warn
+        _facts("sha256:aaa", [_win(percent=100.0)])      # A spent -> overflow
+        assert pool.select().id == "a"                   # state changed -> warn 1
+        _facts("sha256:aaa", [_win(percent=5.0)])        # A covered again
+        assert pool.select().id == "a"                   # no warn
+        _facts("sha256:aaa", [_win(percent=100.0)])      # A spent again
+        assert pool.select().id == "a"                   # re-entered metered -> warn 2
+    msgs = [r.message for r in caplog.records if "from its metered bucket" in r.message]
+    assert len(msgs) == 2

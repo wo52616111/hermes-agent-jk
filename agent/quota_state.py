@@ -1128,14 +1128,17 @@ def _policy_for(provider: str, policy: Optional[dict] = None) -> dict:
 
 
 def _target_matches(target: Any, entry: dict) -> bool:
-    raw = str(target or "").strip()
-    if not raw:
-        return False
-    label = str(entry.get("label") or "")
-    return raw in {
-        str(entry.get("entry_id") or ""), label, f"env:{label}",
-        str(entry.get("source") or ""),
-    }
+    """Whether *target* names the account described by *entry* (D45 forms, shared owner).
+
+    Classification only needs the FORMS (id / label / ``env:VAR`` / bare VAR); precedence
+    and ambiguity are the resolver's job (:func:`credential_pool_admin.resolve_entry_target`).
+    Delegating keeps one implementation, so a bare VAR naming an ``env:VAR`` source
+    classifies metered exactly as policy validation resolves it.
+    """
+    from agent.credential_pool_admin import target_names_identity
+    return target_names_identity(
+        target, entry.get("entry_id") or entry.get("id"), entry.get("label"), entry.get("source"),
+    )
 
 
 def _is_metered_facts(entries: list, provider: str, policy: dict) -> bool:
