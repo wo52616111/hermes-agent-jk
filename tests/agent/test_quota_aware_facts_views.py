@@ -8,8 +8,11 @@ for profile scope); nothing reads a source file's text.
 
 from __future__ import annotations
 
+import gc
 import json
+import threading
 import time
+import weakref
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -201,7 +204,7 @@ def test_read_view_two_profiles_different_configs_same_facts(qdir, monkeypatch):
     shared facts (D23/D33): the classification follows the READING profile's own config."""
     monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == "anthropic")
     _store(provider="anthropic", fp="sha256:spent", windows=[_facts_window(percent=100.0)],
-           entries=[{"profile": "alpha", "entry_id": "s", "label": "SPENT_KEY"}])
+           entries=[{"profile": p, "entry_id": p, "label": "SPENT_KEY"} for p in ("alpha", "beta")])
     facts_before = qs.read_account_facts("anthropic", "sha256:spent")
     configs = {
         "alpha": {"credential_pool_policy": {"anthropic": {"metered_overflow": ["SPENT_KEY"]}}},
@@ -292,7 +295,7 @@ def test_profile_isolation_different_policies_same_facts(qdir, quota_aware, monk
     monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == "anthropic")
     _store(provider="anthropic", fp="sha256:spent",
            windows=[_facts_window(percent=100.0)],
-           entries=[{"profile": "alpha", "entry_id": "s", "label": "SPENT_KEY"}])
+           entries=[{"profile": p, "entry_id": p, "label": "SPENT_KEY"} for p in ("alpha", "beta")])
     facts_before = qs.read_account_facts("anthropic", "sha256:spent")
     view_a = qs.update_view("alpha", "anthropic", now=NOW,
                             policy={"metered_overflow": ["SPENT_KEY"]})
@@ -687,7 +690,7 @@ def test_refresher_drains_the_per_account_queue(qdir, monkeypatch):
 
 
 # ============================================================================
-# 7 (B1 half). Capability and configuration (D15, D38, D46)
+# 7. Capability and configuration (D15, D38, D46)
 # ============================================================================
 
 def test_opencode_go_declares_capabilities():
@@ -739,7 +742,7 @@ def test_two_hermes_homes_two_profiles(tmp_path, monkeypatch, qdir):
 
 
 # ============================================================================
-# Round 1 (code-rt) acceptance tests - one per blocking finding
+# 10. Refresher bounds, attribution and lifecycle (D41, D42, D49)
 # ============================================================================
 
 def test_refresher_fetch_count_is_bounded_over_a_simulated_period(real_two_account_pool, monkeypatch):
@@ -989,3 +992,214 @@ def test_legacy_and_facts_paths_share_the_backoff_rule(qdir, monkeypatch):
     assert qs.fetch_account_facts(PROVIDER, "sha256:aaa",
                                   fetcher=lambda: (_ for _ in ()).throw(boom()), now=NOW) == "error"
     assert seen == [429, 429]
+
+
+# ============================================================================
+# 12. Reader/profile scope, attribution, lifecycle and concurrency (D26, D33, D41, D42, D47)
+# ============================================================================
+
+def test_view_accounts_are_reader_scoped(qdir, quota_aware):
+    """Reading profile beta sees ONLY beta's pool accounts, with beta's own entry identity and
+    metered classification; alpha's account and alpha's alias are never borrowed (D33)."""
+    _store(fp="sha256:shared", windows=[_facts_window(percent=100.0)], entries=[
+        {"profile": "alpha", "entry_id": "alpha-id", "label": "CUSHION", "source": "env:CUSHION"},
+        {"profile": "beta", "entry_id": "beta-id", "label": "NORMAL", "source": "env:NORMAL"}])
+    _store(fp="sha256:alpha-only",
+           entries=[{"profile": "alpha", "entry_id": "only", "label": "ONLY_ALPHA"}])
+    view = qs.read_view("beta", PROVIDER, now=NOW, policy={"metered_overflow": ["CUSHION"]})
+    shared = next(a for a in view["accounts"] if a["fingerprint"] == "sha256:shared")
+    assert (shared["entry_id"], shared["label"], shared["metered"]) == ("beta-id", "NORMAL", False)
+    assert not any(a["fingerprint"] == "sha256:alpha-only" for a in view["accounts"])
+
+
+def test_read_view_uses_named_profile_config(qdir, tmp_path, monkeypatch):
+    """read_view(profile, ...) resolves THAT profile's config for policy and strategy even when
+    another profile is ambient (D23/D33)."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    homes = {}
+    for name, targets in (("alpha", "[SPENT]"), ("beta", "[]")):
+        home = tmp_path / ".hermes" / "profiles" / name
+        home.mkdir(parents=True)
+        (home / "config.yaml").write_text(
+            "credential_pool_strategies:\n  opencode-go: quota_aware\n"
+            "credential_pool_policy:\n  opencode-go:\n    metered_overflow: " + targets + "\n")
+        homes[name] = home
+    _store(fp="sha256:shared", windows=[_facts_window(percent=100.0)],
+           entries=[{"profile": n, "entry_id": n, "label": "SPENT"} for n in homes])
+    monkeypatch.setenv("HERMES_HOME", str(homes["beta"]))
+    a = qs.read_view("alpha", PROVIDER, now=NOW)
+    b = qs.read_view("beta", PROVIDER, now=NOW)
+    assert a["accounts"][0]["state"] == "overflow"
+    assert b["accounts"][0]["state"] == "exhausted"
+
+
+def test_refresher_carries_enqueue_profile_scope(qdir, tmp_path, monkeypatch):
+    """A fingerprint queued by a NON-launch profile is fetched with THAT profile's home and
+    credential, never resolved in the launch profile (D42)."""
+    from hermes_constants import set_hermes_home_override, reset_hermes_home_override, get_hermes_home
+    from agent.secret_scope import set_secret_scope, reset_secret_scope, set_multiplex_active
+    from agent.credential_pool import load_pool
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    home_a = tmp_path / ".hermes"
+    home_b = home_a / "profiles" / "beta"
+    home_b.mkdir(parents=True)
+    home_a.joinpath("config.yaml").write_text("credential_pool_strategies:\n  opencode-go: fill_first\n")
+    home_b.joinpath("config.yaml").write_text("credential_pool_strategies:\n  opencode-go: quota_aware\n")
+    monkeypatch.setenv("HERMES_HOME", str(home_a))
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "k-launch-A")
+    monkeypatch.delenv("OPENCODE_GO_API_KEY_2", raising=False)
+    seen = []
+
+    def own(provider, *, api_key=None, base_url=None):
+        seen.append((str(get_hermes_home()), api_key))
+        return AccountUsageSnapshot(provider=provider, source="t", fetched_at=NOW, windows=())
+
+    def fallback(provider):
+        seen.append((str(get_hermes_home()), "DEFAULT_FALLBACK"))
+        return AccountUsageSnapshot(provider=provider, source="t", fetched_at=NOW, windows=())
+
+    monkeypatch.setattr(qs, "default_fetcher_for", own)
+    monkeypatch.setattr(qs, "default_fetcher", fallback)
+    monkeypatch.setattr(qs.QuotaRefresher, "_sleep_interval", lambda self: 0.05)
+    token_home = set_hermes_home_override(home_b)
+    token_scope = set_secret_scope({"OPENCODE_GO_API_KEY": "k-profile-B"})
+    set_multiplex_active(True)
+    try:
+        load_pool(PROVIDER)
+        pool = load_pool(PROVIDER)
+        entries = pool.entries()
+        assert len(entries) == 1 and entries[0].runtime_api_key == "k-profile-B"
+        deadline = time.monotonic() + 3
+        while not seen and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert seen, "the refresher never fetched the queued account"
+        assert all(home == str(home_b) and key == "k-profile-B" for home, key in seen)
+    finally:
+        qs.stop_refresher()
+        set_multiplex_active(False)
+        reset_secret_scope(token_scope)
+        reset_hermes_home_override(token_home)
+
+
+def test_explicit_unmatched_key_never_attributes_single_account(qdir, tmp_path, monkeypatch):
+    """An explicitly supplied credential matching no pool entry records NOTHING even when the
+    pool holds exactly one account: the contract forbids guessing (D26/D42)."""
+    from agent.credential_pool import load_pool
+    from agent import auxiliary_client as aux
+    home = tmp_path / ".hermes"
+    home.mkdir()
+    (home / "config.yaml").write_text("credential_pool_strategies:\n  opencode-go: quota_aware\n")
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("OPENCODE_GO_API_KEY", "k-pool")
+    monkeypatch.delenv("OPENCODE_GO_API_KEY_2", raising=False)
+    load_pool(PROVIDER)
+    pool = load_pool(PROVIDER)
+    assert len(pool.entries()) == 1 and pool.entries()[0].runtime_api_key == "k-pool"
+    client = _fake_aux_client(api_key="k-explicit-foreign", base_url=SHARED_URL)
+    monkeypatch.setattr(aux, "_get_cached_client", lambda *a, **k: (client, "glm-5"))
+    pending = _drive_and_pending(lambda: aux.call_llm(
+        task="title_generation", provider=PROVIDER, model="glm-5",
+        messages=[{"role": "user", "content": "hi"}]))
+    assert pending == set()
+
+
+def test_upgrade_does_not_serve_old_single_account_snapshot(qdir, monkeypatch):
+    """A legacy single-account snapshot written before the provider became quota_aware is never
+    published by status_groups/account_snapshot, and its bytes are preserved (D41)."""
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: False)
+    snapshot = AccountUsageSnapshot(provider=PROVIDER, source="prior", fetched_at=NOW,
+                                    windows=(AccountUsageWindow("Weekly", 99.0, NOW + timedelta(days=3)),))
+    assert qs.refresh(PROVIDER, fetcher=lambda p: snapshot, connected=lambda p: True,
+                      multi_account=lambda p: False, now=NOW) == "fetched"
+    legacy = qdir / "snapshot" / f"{PROVIDER}.json"
+    before = legacy.read_bytes()
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    assert qs.refresh(PROVIDER, now=NOW) == "quota_aware"
+    assert legacy.read_bytes() == before
+    groups = qs.status_groups(NOW, connected=lambda p: p == PROVIDER, multi_account=lambda p: False)
+    account = qs.account_snapshot(PROVIDER, NOW)
+    assert not any(g.get("windows") for g in groups)
+    assert account is None or not account.windows
+
+
+def test_concurrent_refresh_preserves_recorded_refusal(qdir, monkeypatch):
+    """A refresh that read facts before a refusal was recorded must not overwrite the refusal:
+    the per-fingerprint read-modify-write is serialized (D47)."""
+    _store(fp="sha256:aaa", windows=[_facts_window(percent=100.0)])
+    read_done = threading.Event()
+    release = threading.Event()
+    real_merge = qs._merge_facts_entries
+
+    def pause_after_read(existing, entries):
+        read_done.set()
+        release.wait(5)
+        return real_merge(existing, entries)
+
+    monkeypatch.setattr(qs, "_merge_facts_entries", pause_after_read)
+    results: dict = {}
+    worker = threading.Thread(target=lambda: qs.store_account_facts(
+        PROVIDER, "sha256:aaa", [_facts_window(percent=100.0)],
+        fetched_at=NOW.isoformat(), now=NOW))
+    refusal = threading.Thread(target=lambda: results.update(
+        recorded=qs.record_refusal(PROVIDER, "sha256:aaa", state="overflow",
+                                   reset_at=NOW + timedelta(hours=1), now=NOW)))
+    worker.start()
+    assert read_done.wait(3)          # the refresh has read facts, before any refusal exists
+    refusal.start()
+    # Wait until the refusal either lands (unserialized) or blocks on the shared record lock.
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if qs.read_account_facts(PROVIDER, "sha256:aaa")["metered_exhausted_until"]:
+            break
+        time.sleep(0.02)
+    release.set()
+    worker.join(5)
+    refusal.join(5)
+    assert results.get("recorded") is True
+    after = qs.read_account_facts(PROVIDER, "sha256:aaa")["metered_exhausted_until"]
+    assert after == (NOW + timedelta(hours=1)).isoformat()
+
+
+def test_refresher_stops_when_last_pool_is_collected(qdir, real_two_account_pool):
+    """Collecting the last live pool (no explicit release) stops the refresher daemon: ownership
+    is tied to live pools, so no orphan worker keeps fetching (D42)."""
+    from agent.credential_pool import load_pool
+    pool = load_pool(PROVIDER, quota_bootstrap=False)
+    ref = weakref.ref(pool)
+    assert qs.is_refresher_running()
+    del pool
+    deadline = time.monotonic() + 2
+    while (ref() is not None or qs.is_refresher_running()) and time.monotonic() < deadline:
+        gc.collect()
+        time.sleep(0.02)
+    assert ref() is None
+    assert not qs._refresher_pools
+    assert not qs.is_refresher_running()
+
+
+def test_timed_out_stop_does_not_allow_second_worker(qdir, monkeypatch):
+    """A stop that times out while a fetch is in flight must NOT let a replacement worker start:
+    at most one quota-refresher thread exists (D42)."""
+    entered = threading.Event()
+    release = threading.Event()
+    monkeypatch.setattr(qs, "_pool_entry", lambda *a: None)
+
+    def slow_fetch():
+        entered.set()
+        release.wait(6)
+        return None
+
+    qs.enqueue_refresh(PROVIDER, "sha256:aaa")
+    old = qs.start_refresher(interval_s=0.05, fetcher=slow_fetch)
+    assert entered.wait(3)
+    old_thread = old._thread
+    try:
+        qs.stop_refresher()
+        qs.start_refresher(interval_s=0.05, fetcher=lambda: None)
+        alive = [t for t in threading.enumerate() if t.name == "quota-refresher"]
+        assert len(alive) == 1
+    finally:
+        release.set()
+        if old_thread is not None:
+            old_thread.join(3)
+        qs.stop_refresher()

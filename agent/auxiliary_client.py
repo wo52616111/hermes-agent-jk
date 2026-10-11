@@ -8014,7 +8014,6 @@ def _call_llm_impl(
         def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
-                # The step's own client serves this rung, so its credential is the one to mark.
                 return _validate_llm_response(
                     _relay_sync_completion(*args, **kw), task,
                     provider=request_provider, base_url=req.base_info,
@@ -8167,7 +8166,6 @@ async def _async_call_llm_impl(
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)
             if kind == "call":
-                # The step's own client serves this rung, so its credential is the one to mark.
                 return _validate_llm_response(
                     await _relay_async_completion(*args, **kw), task,
                     provider=request_provider, base_url=req.base_info,
