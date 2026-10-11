@@ -1,6 +1,6 @@
 import { Box, type ScrollBoxHandle, stringWidth, Text } from '@hermes/ink'
 import { compactNumber } from '@hermes/shared/format'
-import type { AccountUsageGroup, Usage } from '@hermes/shared/gateway-events'
+import type { AccountUsageAccount, AccountUsageGroup, Usage } from '@hermes/shared/gateway-events'
 import { useStore } from '@nanostores/react'
 import { type ReactNode, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 import unicodeSpinners from 'unicode-animations'
@@ -336,6 +336,8 @@ const QUOTA_SKIPPED_PERIODS = new Set(['opus 7d', 'sonnet 7d'])
 const QUOTA_FRESH_AGE_S = 1 * 3600
 const QUOTA_NORMAL_AGE_S = 8 * 3600
 const QUOTA_WARN_AGE_S = 24 * 3600
+// An account read older than this shows its compact age (`·45m`) on its sub-row.
+const QUOTA_ACCOUNT_STALE_AGE_S = 30 * 60
 
 /** Compact age read-out for the staleness marker: `45m`, `2h`, `3d`. */
 export function formatAgeCompact(ageS: number) {
@@ -351,14 +353,93 @@ export function formatAgeCompact(ageS: number) {
 }
 
 /** Per-provider freshness marker (`◷ 45m`) or an error marker when no age is available. */
-export function quotaStaleMarker(group: Pick<AccountUsageGroup, 'age_s' | 'error'>) {
+export function quotaStaleMarker(group: Pick<AccountUsageGroup, 'age_s' | 'error' | 'multi_account'>) {
   const age = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
 
   if (age !== null) {
     return `◷ ${formatAgeCompact(age)}`
   }
 
+  // A multi-account pool has no single quota, so it ships the marker `{status: 0, message:
+  // "multi_account"}`. `status || 'err'` reads 0 as falsy and renders the literal `err` — say
+  // what it actually is instead. (A per-account view carries a real count on the label.)
+  if (group.multi_account) {
+    return '·multi'
+  }
+
   return group.error ? `·${group.error.status || 'err'}` : ''
+}
+
+/** Per-account sub-row marker: a 429 read, a failed read, or a stale age (`·45m`). */
+export function accountStaleMarker(
+  account: Pick<AccountUsageAccount, 'read_health' | 'age_s' | 'error_status'>
+): string {
+  if (account.error_status === 429) {
+    return '·429'
+  }
+
+  if (account.read_health === 'error') {
+    return '·err'
+  }
+
+  const age = typeof account.age_s === 'number' && Number.isFinite(account.age_s) ? account.age_s : null
+
+  return age !== null && age >= QUOTA_ACCOUNT_STALE_AGE_S ? `·${formatAgeCompact(age)}` : ''
+}
+
+/** `sha256:6e4e98…` → `6e4e98`; a label-less account still needs a stable short id. */
+export function shortFingerprint(fingerprint: string | null | undefined): string {
+  const raw = String(fingerprint ?? '')
+
+  if (!raw) {
+    return 'account'
+  }
+
+  const digest = raw.includes(':') ? raw.slice(raw.indexOf(':') + 1) : raw
+
+  return digest.slice(0, 6)
+}
+
+function quotaAccountStateColor(state: string, t: Theme): string {
+  if (state === 'exhausted') {
+    return t.color.error
+  }
+
+  if (state === 'overflow') {
+    return t.color.warn
+  }
+
+  return state === 'covered' ? t.color.statusGood : t.color.muted
+}
+
+/**
+ * The provider-line badge for a per-account group (D29): it speaks for THIS session's account
+ * (`activeAccount`), falling back to `serving`, and is never dropped while the group renders.
+ */
+function quotaAccountBadge(
+  group: AccountUsageGroup,
+  activeAccount?: string | null
+): { role: 'exhausted' | 'overflow'; text: string } | null {
+  const accounts = group.accounts
+
+  if (!accounts?.length) {
+    return null
+  }
+
+  const account =
+    accounts.find(a => a.fingerprint === activeAccount) ??
+    accounts.find(a => a.fingerprint === group.serving) ??
+    accounts[0]
+
+  if (account.state === 'overflow') {
+    return { role: 'overflow', text: ` overflow${account.metered ? '(metered)' : ''}` }
+  }
+
+  if (account.state === 'exhausted') {
+    return { role: 'exhausted', text: ' exhausted' }
+  }
+
+  return null
 }
 
 function quotaFreshnessColor(ageS: number, t: Theme) {
@@ -399,7 +480,7 @@ export interface QuotaSegment {
   text: string
 }
 
-type QuotaColorRole = 'active' | 'body' | 'freshness' | 'hint' | 'muted' | 'quota'
+type QuotaColorRole = 'active' | 'body' | 'exhausted' | 'freshness' | 'hint' | 'muted' | 'overflow' | 'quota'
 
 interface QuotaPiece {
   dim?: boolean
@@ -413,6 +494,10 @@ interface QuotaPiece {
  * Lay out the multi-provider quota groups into `budget` columns, degrading
  * progressively until it fits: drop reset countdowns, then the 5h windows,
  * then whole groups from the end.
+ *
+ * A group with `accounts[]` (a `quota_aware` provider's per-account view, D19) renders its
+ * provider line as `label ·N accounts` plus a state badge and pushes its windows to the
+ * per-account sub-rows (`layoutQuotaAccounts`) - never a sum or an average across accounts.
  */
 export function layoutQuotaGroups(
   groups: AccountUsageGroup[],
@@ -420,7 +505,8 @@ export function layoutQuotaGroups(
   t: Theme,
   now = Date.now(),
   activeProvider?: string | null,
-  leadingSeparator = true
+  leadingSeparator = true,
+  activeAccount?: string | null
 ) {
   const activeIndex = groups.findIndex(group => group.provider === activeProvider)
 
@@ -431,12 +517,14 @@ export function layoutQuotaGroups(
 
   type FiveHour = 'all' | 'active' | 'none'
 
-  const build = (count: number, resets: boolean, fiveHour: FiveHour) =>
+  const build = (count: number, resets: boolean, fiveHour: FiveHour, showCount: boolean) =>
     keep(count).map(({ gi, group }) => {
       const label = QUOTA_PROVIDER_LABELS[group.provider] ?? group.provider
       const marker = quotaStaleMarker(group)
       const freshnessAgeS = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
       const hasFreshnessAge = freshnessAgeS !== null
+      const accountCount = Array.isArray(group.accounts) ? group.accounts.length : 0
+      const countSuffix = showCount && accountCount > 1 ? ` ·${accountCount} accounts` : ''
 
       const separator = !leadingSeparator && gi === 0 ? '' : ' │'
 
@@ -446,12 +534,13 @@ export function layoutQuotaGroups(
           : separator
             ? [{ role: 'muted' as const, text: separator }]
             : []),
-        { role: gi === activeIndex ? 'active' : 'body', text: ` ${label}` }
+        { role: gi === activeIndex ? 'active' : 'body', text: ` ${label}${countSuffix}` }
       ]
 
       let windowCount = 0
 
-      for (const window of group.windows) {
+      // A per-account group shows its windows on the sub-rows, not inline.
+      for (const window of accountCount > 0 ? [] : group.windows) {
         if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
           continue
         }
@@ -476,7 +565,15 @@ export function layoutQuotaGroups(
         })
       }
 
-      if (marker && !hasFreshnessAge) {
+      // The provider-line badge speaks for THIS session's account (D29) and is never dropped
+      // while the group renders, so a narrow terminal that loses the sub-rows still sees it.
+      const badge = quotaAccountBadge(group, activeAccount)
+
+      if (badge) {
+        pieces.push({ role: badge.role, text: badge.text })
+      }
+
+      if (marker && !hasFreshnessAge && accountCount === 0) {
         pieces.push({ role: 'muted', text: marker })
       }
 
@@ -490,14 +587,22 @@ export function layoutQuotaGroups(
   const width = (layout: ReturnType<typeof build>) =>
     layout.reduce((sum, g) => sum + g.pieces.reduce((acc, p) => acc + stringWidth(p.text), 0), 0)
 
-  const candidates: ReturnType<typeof build>[] = [build(groups.length, true, 'all'), build(groups.length, false, 'all')]
+  const candidates: ReturnType<typeof build>[] = [
+    build(groups.length, true, 'all', true),
+    build(groups.length, false, 'all', true)
+  ]
 
   for (let count = groups.length; count >= 1; count--) {
-    candidates.push(build(count, false, 'active'))
+    candidates.push(build(count, false, 'active', true))
   }
 
   for (let count = groups.length; count >= 1; count--) {
-    candidates.push(build(count, false, 'none'))
+    candidates.push(build(count, false, 'none', true))
+  }
+
+  // Last resort: drop the account count (the provider-line badge stays).
+  for (let count = groups.length; count >= 1; count--) {
+    candidates.push(build(count, false, 'none', false))
   }
 
   const chosen = candidates.find(layout => width(layout) <= budget) ?? []
@@ -512,16 +617,122 @@ export function layoutQuotaGroups(
             ? quotaFreshnessColor(piece.freshnessAgeS ?? 0, t)
           : piece.role === 'body'
             ? t.color.text
-            : piece.role === 'hint'
+            : piece.role === 'overflow'
               ? t.color.warn
-              : piece.role === 'active'
-                ? t.color.text
-                : t.color.muted,
+              : piece.role === 'exhausted'
+                ? t.color.error
+                : piece.role === 'hint'
+                  ? t.color.warn
+                  : piece.role === 'active'
+                    ? t.color.text
+                    : t.color.muted,
       dim: piece.dim ?? (piece.role === 'muted' && pi > 0),
       key: `${gi}-${pi}`,
       text: piece.text
     }))
   )
+}
+
+export interface QuotaAccountRow {
+  /** True for the account THIS session is on (D29): rendered bold with a pointer. */
+  active: boolean
+  segments: QuotaSegment[]
+}
+
+/**
+ * One sub-row per account of a per-account group: label, effective state, its OWN windows and a
+ * stale/429 marker. The active account is bold. Degrades by dropping the other accounts' rows
+ * first, then the active account's lower-priority windows (D29).
+ */
+export function layoutQuotaAccounts(
+  group: AccountUsageGroup,
+  activeAccount: string | null,
+  budget: number,
+  t: Theme,
+  now = Date.now()
+): QuotaAccountRow[] {
+  const accounts = group.accounts ?? []
+
+  if (accounts.length === 0) {
+    return []
+  }
+
+  const activeFp = activeAccount ?? group.serving ?? null
+  const activeOnly = accounts.filter(account => account.fingerprint === activeFp)
+  const primary = activeOnly.length ? activeOnly : accounts.slice(0, 1)
+
+  const build = (items: AccountUsageAccount[], windows: 'all' | 'first' | 'none') =>
+    items.map((account): QuotaAccountRow => {
+      const isActive = account.fingerprint === activeFp
+      const label = account.label || shortFingerprint(account.fingerprint)
+      const state = account.state === 'overflow' && account.metered ? 'overflow(metered)' : account.state
+
+      const segments: QuotaSegment[] = [
+        {
+          color: t.color.muted,
+          dim: !isActive,
+          key: 'ptr',
+          text: isActive ? '  ▸ ' : '    '
+        },
+        {
+          bold: isActive,
+          color: isActive ? t.color.text : t.color.muted,
+          dim: !isActive,
+          key: 'label',
+          text: label
+        },
+        {
+          color: quotaAccountStateColor(account.state, t),
+          dim: !isActive,
+          key: 'state',
+          text: `  ${state}`
+        }
+      ]
+
+      const visible = (account.windows ?? []).filter(window => !QUOTA_SKIPPED_PERIODS.has(window.period))
+      const chosen = windows === 'none' ? [] : windows === 'first' ? visible.slice(0, 1) : visible
+      let first = true
+
+      for (const window of chosen) {
+        const used = Math.max(0, Math.min(100, Math.round(Number(window.used_percent) || 0)))
+        const periodLabel = QUOTA_PERIOD_LABELS[window.period] ?? window.period
+        const reset = formatResetRemaining(window.reset_at, now)
+
+        segments.push({
+          color: t.color.muted,
+          dim: !isActive,
+          key: `sep-${window.period}`,
+          text: first ? '  ' : '·'
+        })
+        segments.push({
+          color: quotaColor(used, t),
+          dim: !isActive,
+          key: `win-${window.period}`,
+          text: `${periodLabel} ${used}%${reset ? ` ↻ ${reset}` : ''}`
+        })
+        first = false
+      }
+
+      const marker = accountStaleMarker(account)
+
+      if (marker) {
+        segments.push({ color: t.color.muted, dim: !isActive, key: 'marker', text: ` ${marker}` })
+      }
+
+      return { active: isActive, segments }
+    })
+
+  const width = (rows: QuotaAccountRow[]) =>
+    rows.reduce((sum, row) => sum + row.segments.reduce((acc, segment) => acc + stringWidth(segment.text), 0), 0)
+
+  const candidates = [
+    build(accounts, 'all'),
+    build(primary, 'all'),
+    build(primary, 'first'),
+    build(primary, 'none')
+  ]
+
+  return candidates.find(rows => width(rows) <= budget) ?? candidates[candidates.length - 1] ?? []
 }
 
 // Fixed label gutter (`─ ctx` / `─ other`) so both capacity rows start their content in one column.
@@ -566,6 +777,7 @@ function CapacityRow({
   cols,
   contextMark,
   activeProvider,
+  activeAccount,
   ctxLabel,
   quotaGroups = [],
   quotaWindows,
@@ -574,6 +786,8 @@ function CapacityRow({
 }: {
   /** Provider of the running session; its group label is highlighted and never dropped. */
   activeProvider?: string | null
+  /** Fingerprint of the account this session is on, for the provider-line badge (D29). */
+  activeAccount?: string | null
   bar?: string
   barColor: string
   /** Terminal width; the quota segments degrade to fit. Unbounded when omitted. */
@@ -599,7 +813,7 @@ function CapacityRow({
   }
 
   const quota: QuotaSegment[] = quotaGroups.length
-    ? layoutQuotaGroups(quotaGroups, budget, t, Date.now(), activeProvider)
+    ? layoutQuotaGroups(quotaGroups, budget, t, Date.now(), activeProvider, true, activeAccount)
     : quotaWindows.flatMap(window => {
         const used = Math.max(0, Math.min(100, Math.round(window.used_percent)))
         const reset = formatResetRemaining(window.reset_at)
@@ -1061,11 +1275,19 @@ export function StatusRule({
   const tableLeftWidth = Math.max(ctxCellWidth, otherCellWidth) + 1
   const tableRightBudget = Math.max(0, capacityWidth - tableLeftWidth - stringWidth('│'))
 
+  const activeAccount = usage.account_usage_active_account ?? null
+
   const activeTableQuota = activeQuotaGroup
-    ? layoutQuotaGroups([activeQuotaGroup], tableRightBudget, t, now, activeQuotaGroup.provider, false)
+    ? layoutQuotaGroups([activeQuotaGroup], tableRightBudget, t, now, activeQuotaGroup.provider, false, activeAccount)
     : []
 
   const remainingOtherQuota = layoutQuotaGroups(secondaryQuotaGroups.slice(1), tableRightBudget, t, now, null, false)
+
+  // Per-account sub-rows for the active provider (D19/D29): each account's OWN windows and state,
+  // the session's account bold. Absent when the active group has no per-account view.
+  const accountRows = activeQuotaGroup
+    ? layoutQuotaAccounts(activeQuotaGroup, activeAccount, capacityWidth, t, now)
+    : []
 
   const useCapacityTable =
     !!ctxLabel && !!activeQuotaGroup && otherLeadCell.length > 0 && activeTableQuota.length > 0
@@ -1257,6 +1479,7 @@ export function StatusRule({
       />
     ) : (
       <CapacityRow
+        activeAccount={activeAccount}
         activeProvider={usage.account_usage_active}
         bar={bar}
         barColor={barColor}
@@ -1298,11 +1521,18 @@ export function StatusRule({
     )
   ) : null
 
+  const accountRowNodes = accountRows.map((row, rowIndex) => (
+    <Box flexDirection="row" height={1} key={`quota-account-${rowIndex}`} overflow="hidden">
+      {quotaTextNodes(row.segments.map(segment => ({ ...segment, key: `q${rowIndex}-${segment.key}` })))}
+    </Box>
+  ))
+
   return (
     <>
       {statusRow}
       {capacityRow}
       {secondaryCapacityRow}
+      {accountRowNodes}
     </>
   )
 }
