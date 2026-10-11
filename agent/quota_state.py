@@ -481,7 +481,14 @@ def _rolled(window: dict, now: datetime) -> dict:
 
 
 def read_snapshot(provider: str, now: Optional[datetime] = None) -> Optional[dict]:
-    """Snapshot as stored, with windows past their reset rolled forward to 0%."""
+    """Snapshot as stored, with windows past their reset rolled forward to 0%.
+
+    A quota_aware provider owns per-account facts/views, so it never answers with the legacy
+    single-account snapshot an earlier build left behind: that snapshot presents one account's
+    usage as the whole subscription's, and nothing refreshes it any more (D41). The stored bytes
+    stay readable through :func:`_read_raw` for callers that need the raw store."""
+    if _is_quota_aware(str(provider or "").strip().lower()):
+        return None
     snap = _read_raw(provider)
     if snap is None:
         return None
@@ -490,6 +497,8 @@ def read_snapshot(provider: str, now: Optional[datetime] = None) -> Optional[dic
 
 
 def read_all(now: Optional[datetime] = None) -> list[dict]:
+    """Every stored snapshot with windows, in ``SUPPORTED`` order. A quota_aware provider is never
+    listed: its per-account view is the only source for it (D41)."""
     out = []
     for provider in SUPPORTED:
         snap = read_snapshot(provider, now)

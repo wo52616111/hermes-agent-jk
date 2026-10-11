@@ -1069,6 +1069,36 @@ def test_read_view_uses_named_profile_config(qdir, tmp_path, monkeypatch):
     assert b["accounts"][0]["state"] == "exhausted"
 
 
+def test_public_legacy_readers_never_serve_a_quota_aware_snapshot(qdir, tmp_path, monkeypatch):
+    """D41 / criterion 3: once a provider is configured quota_aware, the PUBLIC legacy readers must
+    not serve the single-account snapshot an earlier build left behind -- it presents one account's
+    usage as the whole subscription's and nothing refreshes it. The stored bytes stay in place, so
+    switching the strategy back finds them (the raw store keeps that view)."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    config = home / "config.yaml"
+    config.write_text("credential_pool_strategies:\n  opencode-go: fill_first\n")
+
+    def fetch(provider):
+        return AccountUsageSnapshot(
+            provider=provider, source="test", fetched_at=NOW,
+            windows=(AccountUsageWindow(label="Current week", used_percent=99.0, reset_at=None),))
+
+    assert qs.refresh(PROVIDER, fetcher=fetch, now=NOW) == "fetched"
+    stored = qs.read_snapshot(PROVIDER, NOW)
+    assert stored is not None and stored["windows"][0]["used_percent"] == 99.0
+
+    config.write_text("credential_pool_strategies:\n  opencode-go: quota_aware\n")
+    assert qs.refresh(PROVIDER, fetcher=fetch, now=NOW) == "quota_aware"
+    assert qs.read_snapshot(PROVIDER, NOW) is None
+    assert qs.read_all(NOW) == []
+    assert qs.account_snapshot(PROVIDER, now=NOW) is None
+    raw = qs._read_raw(PROVIDER)
+    assert raw is not None and raw["windows"][0]["used_percent"] == 99.0
+
+
 def test_refresher_carries_enqueue_profile_scope(qdir, tmp_path, monkeypatch):
     """A fingerprint queued by a NON-launch profile is fetched with THAT profile's home and
     credential, never resolved in the launch profile (D42)."""
