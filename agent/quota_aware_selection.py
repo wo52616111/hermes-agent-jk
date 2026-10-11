@@ -34,6 +34,12 @@ CLASS = {COVERED: 0, UNKNOWN: 1, OVERFLOW: 2, EXHAUSTED: 3}
 MODE_SESSION_START = "session_start"
 MODE_TURN_BOUNDARY = "turn_boundary"
 
+# D39 (matches D5's config example): ``earliest_reset_first`` is TRUE when the policy block
+# omits it. Named and exported so the default is explicit and visible rather than a literal
+# hidden in the resolver; the alternative (treating a missing flag as False) would silently
+# disable the same-priority drain tie-break the user asked for.
+EARLIEST_RESET_FIRST_DEFAULT = True
+
 
 @dataclass(frozen=True)
 class SelectionState:
@@ -52,7 +58,7 @@ UNKNOWN_STATE = SelectionState()
 class Policy:
     """The ordering-shaped half of ``credential_pool_policy`` (D5/D39)."""
 
-    earliest_reset_first: bool = True
+    earliest_reset_first: bool = EARLIEST_RESET_FIRST_DEFAULT
 
 
 def _id_of(entry: Any) -> Optional[str]:

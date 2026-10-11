@@ -620,6 +620,16 @@ def _provider_supports_per_account(provider: str) -> bool:
         return False
 
 
+def _provider_bills_when_plan_spent(provider: str) -> bool:
+    """True when the provider's plan silently overflows to metered billing (D38/D46)."""
+    try:
+        from providers import get_provider_profile
+        profile = get_provider_profile(provider)
+        return bool(getattr(profile, "bills_when_plan_spent", False))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def get_pool_policy_block(provider: str) -> dict:
     """The raw ``credential_pool_policy.<provider>`` block, or {} when absent (D5/D30)."""
     config = _load_config_safe()
@@ -659,6 +669,53 @@ def _warn_policy_once(provider: str, reason: str, message: str) -> None:
                    provider, message)
 
 
+def _warn_config_ineffective_once(provider: str, message: str) -> None:
+    """Warning D46(a): the metered configuration did not take effect.
+
+    Emitted at most ONCE per provider per load (the same ``_POLICY_WARNED`` set the degrade
+    warnings use, under a dedicated key), so it is never repeated on every selection and is
+    never rate-limited away.
+    """
+    key = (str(provider or ""), "metered_config_ineffective")
+    if key in _POLICY_WARNED:
+        return
+    _POLICY_WARNED.add(key)
+    logger.warning("credential pool: %s configuration did not take effect — %s", provider, message)
+
+
+def _metered_config_warning(
+    provider: str, entries: List[PooledCredential], block: dict,
+) -> Optional[str]:
+    """D46(a): the 'configuration did not take effect' message for a billing-capable provider.
+
+    Returns ``None`` when the configuration took effect (a configured ``metered_overflow``
+    list that names its accounts) or the provider does not bill after the plan is spent.
+    Two trigger cases, both once per provider per load:
+
+    * a configured list exists but does not name an account (unmatched / ambiguous target), or
+    * no ``metered_overflow`` is configured at all.
+
+    The message names the account(s) that will classify metered anyway and the configured
+    targets, so an unconfigured, mistyped or stale target can never produce silent spending.
+    """
+    if not _provider_bills_when_plan_spent(provider):
+        return None
+    targets = block.get("metered_overflow")
+    if isinstance(targets, list) and _policy_targets_resolve(targets, entries):
+        return None  # a correctly configured list names its accounts; nothing to warn about
+    if targets is None:
+        configured = "not configured"
+    elif not isinstance(targets, list):
+        configured = f"malformed ({targets!r})"
+    else:
+        configured = "[" + ", ".join(str(t) for t in targets) + "]" if targets else "[]"
+    labels = ", ".join(sorted({
+        (getattr(e, "label", None) or getattr(e, "id", "") or "?") for e in entries
+    })) or "(none)"
+    return (f"provider bills after the plan is spent, but metered_overflow is {configured}; "
+            f"account(s) {labels} classify metered anyway")
+
+
 def resolve_selection_policy(
     provider: str, entries: List[PooledCredential],
 ) -> Tuple[Any, bool]:
@@ -671,12 +728,18 @@ def resolve_selection_policy(
     """
     from agent import quota_aware_selection as qsel
 
+    block = get_pool_policy_block(provider)
+    # D46(a): a billing-capable provider whose metered_overflow did not take effect warns
+    # once per provider per load - independent of any fill_first degradation below.
+    config_warning = _metered_config_warning(provider, entries, block)
+    if config_warning:
+        _warn_config_ineffective_once(provider, config_warning)
+
     if not _provider_supports_per_account(provider):
         _warn_policy_once(provider, "no_capability",
                           "provider does not expose per-account usage")
         return qsel.Policy(), False
 
-    block = get_pool_policy_block(provider)
     targets = block.get("metered_overflow")
     if targets is not None and not isinstance(targets, list):
         _warn_policy_once(provider, "bad_targets",
@@ -687,7 +750,7 @@ def resolve_selection_policy(
                           "a metered_overflow target is unresolvable or ambiguous")
         return qsel.Policy(), False
 
-    earliest = block.get("earliest_reset_first", True)
+    earliest = block.get("earliest_reset_first", qsel.EARLIEST_RESET_FIRST_DEFAULT)
     return qsel.Policy(earliest_reset_first=bool(earliest)), True
 
 
