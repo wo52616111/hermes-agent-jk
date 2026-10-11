@@ -31,17 +31,16 @@ class _Owner:
 
 
 class _PoolWith:
-    """A stand-in pool whose entries report the given live credential fingerprints."""
-
-    def __init__(self, *fingerprints):
-        self._entries = [
-            SimpleNamespace(last_status="ok", access_token="t",
-                            extra={"secret_fingerprint": fingerprint})
-            for fingerprint in fingerprints
-        ]
+    def __init__(self, *entries):
+        self._entries = list(entries)
 
     def entries(self):
         return list(self._entries)
+
+
+def _live_entry(fingerprint, token):
+    return SimpleNamespace(last_status="ok", access_token=token,
+                           extra={} if fingerprint is None else {"secret_fingerprint": fingerprint})
 
 
 def _live_refresher_threads():
@@ -1149,7 +1148,8 @@ def test_the_legacy_snapshot_keeps_the_provider_status_marker(qdir, tmp_path, mo
 def test_a_read_without_a_pool_filters_by_the_profiles_live_credentials(qdir, quota_aware, monkeypatch):
     """The TUI/CLI read path carries no pool, so membership comes from the reading profile's own
     credential state; a rotated-away account is not painted there either (D41)."""
-    monkeypatch.setattr(qs, "default_live_fingerprints", lambda provider: {"sha256:live"})
+    monkeypatch.setattr(qs, "default_live_fingerprints",
+                        lambda provider: ({"sha256:live"}, {"sha256:live"}))
     _store(fp="sha256:live", windows=[_facts_window(percent=10.0)])
     _store(fp="sha256:retired", windows=[_facts_window(percent=90.0)],
            entries=[{"profile": "default", "entry_id": "old", "label": "OLD"}])
@@ -1168,7 +1168,8 @@ def test_the_view_keeps_only_the_accounts_the_pool_currently_holds(qdir, quota_a
     for index in range(12):
         live = f"sha256:live-{index:02d}"
         _store(fp=live, windows=[_facts_window(percent=12.0)])
-        qs.update_view("default", PROVIDER, now=NOW, pool=_PoolWith(live))
+        qs.update_view("default", PROVIDER, now=NOW,
+                       pool=_PoolWith(_live_entry(live, f"key-material-{index:02d}")))
         written = qs._read_view_raw("default", PROVIDER)
         sizes.append(qs.view_path("default", PROVIDER).stat().st_size)
 
@@ -1176,8 +1177,62 @@ def test_the_view_keeps_only_the_accounts_the_pool_currently_holds(qdir, quota_a
     assert [a["fingerprint"] for a in written["accounts"]] == ["sha256:live-11"]
     assert sizes[-1] == sizes[0]
     assert len(qs.list_account_facts(PROVIDER)) == 12
-    view = qs.read_view("default", PROVIDER, now=NOW, pool=_PoolWith("sha256:live-11"))
+    view = qs.read_view("default", PROVIDER, now=NOW,
+                        pool=_PoolWith(_live_entry("sha256:live-11", "key-material-11")))
     assert view is not None and view["serving"] == "sha256:live-11"
+
+
+def test_a_live_entry_owns_its_account_before_the_store_writes_its_fingerprint(qdir, quota_aware):
+    """A credential that was just added bills already while its persisted fingerprint is still
+    unwritten. Its current secret then names an account the store cannot match to any stored facts,
+    so the whole membership is unknown and NOTHING may be hidden - least of all the account the new
+    credential owns (D41)."""
+    from agent.credential_persistence import fingerprint_secret_value
+    second = fingerprint_secret_value("second-secret")
+    _store(fp="sha256:first", windows=[_facts_window(percent=10.0)])
+    _store(fp=str(second), windows=[_facts_window(percent=20.0)],
+           entries=[{"profile": "default", "entry_id": "second", "label": "SECOND"}])
+    pool = _PoolWith(_live_entry("sha256:first", "first-secret"), _live_entry(None, "second-secret"))
+    view = qs.read_view("default", PROVIDER, now=NOW, pool=pool)
+    assert view is not None
+    assert sorted(a["fingerprint"] for a in view["accounts"]) == sorted(["sha256:first", str(second)])
+
+
+def test_a_rotated_credential_keeps_the_identity_its_facts_are_keyed_by(qdir, quota_aware):
+    """While the store still carries the previous key's fingerprint, that identity is what the
+    account's stored facts and serving window are keyed by: it must survive the filter until the
+    metadata catches up with the key that now bills."""
+    _store(fp="sha256:old-identity", windows=[_facts_window(percent=30.0)])
+    view = qs.read_view("default", PROVIDER, now=NOW,
+                        pool=_PoolWith(_live_entry("sha256:old-identity", "rotated-secret")))
+    assert view is not None
+    assert [a["fingerprint"] for a in view["accounts"]] == ["sha256:old-identity"]
+    assert view["serving"] == "sha256:old-identity"
+
+
+def test_a_rotated_name_is_served_under_the_identity_the_credential_bills_with(qdir, quota_aware):
+    """While the store still carries the previous key's name, that name stays a live identity of the
+    account, but the account is served under the one its credential bills with today (D41)."""
+    from agent.credential_persistence import fingerprint_secret_value
+    changed = str(fingerprint_secret_value("changed-key"))
+    _store(fp="sha256:previous-name", windows=[_facts_window(percent=30.0)])
+    _store(fp=changed, windows=[_facts_window(percent=12.0)],
+           entries=[{"profile": "default", "entry_id": "next", "label": "NEXT"}])
+    pool = _PoolWith(_live_entry("sha256:previous-name", "changed-key"))
+    view = qs.read_view("default", PROVIDER, now=NOW, pool=pool)
+    assert view is not None
+    assert sorted(a["fingerprint"] for a in view["accounts"]) == sorted(["sha256:previous-name", changed])
+    assert view["serving"] == changed
+
+
+def test_an_unresolvable_live_entry_keeps_the_stored_accounts_visible(qdir, quota_aware):
+    """A live entry the store can neither name nor read a secret from is not evidence that the other
+    stored accounts are retired: a partial set must not blank the panel (D41)."""
+    _store(fp="sha256:kept", windows=[_facts_window(percent=10.0)])
+    pool = _PoolWith(SimpleNamespace(last_status="ok", access_token="", extra={}))
+    view = qs.read_view("default", PROVIDER, now=NOW, pool=pool)
+    assert view is not None
+    assert [a["fingerprint"] for a in view["accounts"]] == ["sha256:kept"]
 
 
 def test_the_live_fingerprint_hook_resolves_without_bootstrapping(qdir, monkeypatch):
@@ -1189,10 +1244,12 @@ def test_the_live_fingerprint_hook_resolves_without_bootstrapping(qdir, monkeypa
 
     def fake_load_pool(provider, *, quota_bootstrap=True):
         seen.append((provider, quota_bootstrap))
-        return _PoolWith("sha256:live")
+        return _PoolWith(_live_entry("sha256:live", "live-secret"))
 
     monkeypatch.setattr(credential_pool, "load_pool", fake_load_pool)
-    assert provider_quota_live_fingerprints(" OPENCODE-GO ") == {"sha256:live"}
+    from agent.credential_persistence import fingerprint_secret_value
+    billed = str(fingerprint_secret_value("live-secret"))
+    assert provider_quota_live_fingerprints(" OPENCODE-GO ") == ({"sha256:live", billed}, {billed})
     assert seen == [(PROVIDER, False)]
 
     def boom(provider, **kwargs):
@@ -1202,17 +1259,21 @@ def test_the_live_fingerprint_hook_resolves_without_bootstrapping(qdir, monkeypa
     assert provider_quota_live_fingerprints(PROVIDER) is None
 
 
-def test_live_entry_fingerprints_skips_retired_credentials():
-    from types import SimpleNamespace
-    from agent.account_usage import live_entry_fingerprints
+def test_live_entry_fingerprints_names_every_live_identity_and_refuses_partial_sets():
+    from agent.account_usage import live_entry_fingerprints, live_entry_identities
+    from agent.credential_persistence import fingerprint_secret_value
     from agent.credential_pool import STATUS_DEAD
-    entries = [
-        SimpleNamespace(last_status="ok", access_token="t", extra={"secret_fingerprint": "sha256:live"}),
-        SimpleNamespace(last_status=STATUS_DEAD, access_token="t", extra={"secret_fingerprint": "sha256:dead"}),
-        SimpleNamespace(last_status="ok", access_token=None, extra={"secret_fingerprint": "sha256:empty"}),
-    ]
-    assert live_entry_fingerprints(entries) == {"sha256:live"}
+    healing = SimpleNamespace(last_status="ok", access_token="rotated",
+                              extra={"secret_fingerprint": "sha256:stored"})
+    dead = SimpleNamespace(last_status=STATUS_DEAD, access_token="gone",
+                           extra={"secret_fingerprint": "sha256:dead"})
+    rotated = str(fingerprint_secret_value("rotated"))
+    assert live_entry_identities([healing]) == ({"sha256:stored", rotated}, {rotated})
+    assert live_entry_fingerprints([healing, dead]) == {"sha256:stored", rotated}
     assert live_entry_fingerprints([]) is None
+    unnamed = SimpleNamespace(last_status="ok", access_token="bill-me", extra={})
+    assert live_entry_fingerprints([unnamed]) is None
+    assert live_entry_fingerprints([unnamed, healing]) is None
 
 
 def test_refresher_carries_enqueue_profile_scope(qdir, tmp_path, monkeypatch):

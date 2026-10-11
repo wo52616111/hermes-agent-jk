@@ -357,7 +357,7 @@ def default_multi_account(provider: str) -> bool:
     return provider_quota_multi_account(provider)
 
 
-def default_live_fingerprints(provider: str) -> Optional[set]:
+def default_live_fingerprints(provider: str) -> Optional[tuple[set, set]]:
     from agent.account_usage import provider_quota_live_fingerprints
     return provider_quota_live_fingerprints(provider)
 
@@ -537,7 +537,7 @@ def _route_hint(groups: list[dict], now: datetime) -> Optional[str]:
     return None
 
 
-_connected_cache: dict[str, tuple[float, tuple, bool, bool, Optional[set]]] = {}
+_connected_cache: dict[str, tuple[float, tuple, bool, bool, Optional[tuple[set, set]]]] = {}
 CONNECTED_CACHE_S = 300
 
 
@@ -583,10 +583,11 @@ def _credential_signature() -> tuple:
     return tuple(out)
 
 
-def _credential_state(provider: str, now: datetime) -> tuple[bool, bool, Optional[set]]:
+def _credential_state(provider: str, now: datetime) -> tuple[bool, bool, Optional[tuple[set, set]]]:
     """``(connected, multi_account, live_fingerprints)`` from local credentials (no network), cached
     because the status bar reads every turn; a credential file change invalidates it, the time bound
-    caps it. ``live_fingerprints`` is None when the store cannot say which accounts are retired (D41)."""
+    caps it. ``live_fingerprints`` is ``(every identity, the ones a current secret names)``, and None
+    when the store cannot say which accounts are retired (D41)."""
     sig = _credential_signature()
     hit = _connected_cache.get(provider)
     if hit and hit[1] == sig and now.timestamp() - hit[0] < CONNECTED_CACHE_S:
@@ -1171,7 +1172,7 @@ def _profile_entry(facts: dict, profile: str) -> dict:
     return {}
 
 
-def _pick_serving(facts_list: list, by_fp: dict, stored_serving, pool, now: datetime):
+def _pick_serving(facts_list: list, by_fp: dict, stored_serving, pool, now: datetime, billed=()):
     fps = [f.get("fingerprint") for f in facts_list if f.get("fingerprint")]
     if stored_serving in fps:
         return stored_serving
@@ -1185,21 +1186,31 @@ def _pick_serving(facts_list: list, by_fp: dict, stored_serving, pool, now: date
         except Exception:
             order = fps
     covered = [fp for fp in order if by_fp.get(fp, {}).get("state") == "covered"]
-    return (covered or order or [None])[0]
+    # D41: a name the credential used before a key change is still a live identity of the account,
+    # but the account is SERVED under the identity its credential bills with today.
+    current = [fp for fp in order if fp in billed]
+    for candidates in (current, order):
+        picked = [fp for fp in candidates if fp in covered] or candidates
+        if picked:
+            return picked[0]
+    return None
 
 
-def _live_accounts(provider: str, pool, now: datetime) -> Optional[set]:
-    """The fingerprints the READING profile currently bills for ``provider`` (D41): the live pool when
-    the read carries one - every selection path does - else the local credential state, which the
-    status bar already reads each turn. None means "cannot tell which accounts are retired"."""
+def _live_accounts(provider: str, pool, now: datetime) -> tuple[Optional[set], set]:
+    """``(every identity the READING profile's live credentials answer to for ``provider``, the ones
+    their CURRENT secrets name)`` (D41): the live pool when the read carries one - every selection
+    path does - else the local credential state, which the status bar already reads each turn. An
+    unknown membership is ``(None, set())``: nothing may be hidden on a guess."""
+    identities = None
     if pool is not None:
         try:
-            from agent.account_usage import live_entry_fingerprints
-            return live_entry_fingerprints(pool.entries())
+            from agent.account_usage import live_entry_identities
+            identities = live_entry_identities(pool.entries())
         except Exception:  # noqa: BLE001
             logger.debug("quota live accounts from the pool failed for %s", provider, exc_info=True)
-            return None
-    return _credential_state(provider, now)[2]
+    else:
+        identities = _credential_state(provider, now)[2]
+    return identities if identities else (None, set())
 
 
 def _compose_view(
@@ -1211,7 +1222,7 @@ def _compose_view(
         strategy = _STRATEGY_QUOTA_AWARE if _is_quota_aware(provider) else "fill_first"
         # Resolved under the reading profile's own home: a cross-profile read must filter by THAT
         # profile's live credentials, not the ambient process's (D23/D33/D41).
-        live = _live_accounts(provider, pool, now)
+        live, billed = _live_accounts(provider, pool, now)
     accounts: list[dict] = []
     states = {"covered": 0, "overflow": 0, "exhausted": 0}
     by_fp: dict = {}
@@ -1267,7 +1278,7 @@ def _compose_view(
             by_fp[fp] = record
         if state in states:
             states[state] += 1
-    serving = _pick_serving(scoped, by_fp, (stored or {}).get("serving"), pool, now)
+    serving = _pick_serving(scoped, by_fp, (stored or {}).get("serving"), pool, now, billed)
     previous_serving = (stored or {}).get("serving")
     history = list((stored or {}).get("history") or [])
     serving_since = (stored or {}).get("serving_since")
