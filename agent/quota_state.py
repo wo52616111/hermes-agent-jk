@@ -21,12 +21,16 @@ import fcntl
 import json
 import logging
 import os
+import queue
+import random
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
+
+from agent import quota_aware_state as qstate
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,14 @@ BACKOFF_ERR_CAP_S = 1800
 LOCK_WAIT_S = 20.0
 HISTORY_MAX_BYTES = 4 * 1024 * 1024
 
-# Display label -> canonical period; window length by period.
+# Display label -> canonical period; window length by period. Unmapped labels are preserved
+# as their own period (D25) rather than dropping the window.
 _PERIOD = {
     "session": "5h", "current session": "5h", "5h": "5h", "rolling window": "5h",
     "weekly": "7d", "current week": "7d", "7d": "7d",
     "monthly": "monthly",
     "opus week": "opus 7d", "sonnet week": "sonnet 7d",
+    "api key quota": "api key quota",
 }
 _SECONDS = {"5h": 5 * 3600, "7d": 7 * 86400, "opus 7d": 7 * 86400, "sonnet 7d": 7 * 86400}
 
@@ -159,8 +165,14 @@ def quota_provider(provider: Optional[str], base_url: Optional[str] = None) -> s
 
 
 def mark_called(provider: Optional[str], now: Optional[datetime] = None, *,
-                base_url: Optional[str] = None) -> None:
-    """Record that a billed API call just went to ``provider`` (throttled, never raises)."""
+                base_url: Optional[str] = None, fingerprint: Optional[str] = None,
+                api_key: Optional[str] = None, entry_id: Optional[str] = None) -> None:
+    """Record that a billed API call just went to ``provider`` (throttled, never raises).
+
+    The served entry's credential ``fingerprint`` (D42 attribution) is carried by all three
+    billed-call paths. Callers pass whatever they cheaply know (``api_key`` / ``entry_id`` /
+    ``base_url``); when none resolves to a fingerprint the call is still marked dirty.
+    """
     name = quota_provider(provider, base_url)
     if name not in SUPPORTED:
         return
@@ -179,6 +191,13 @@ def mark_called(provider: Optional[str], now: Optional[datetime] = None, *,
             os.utime(path, (ts, ts))
     except OSError:
         logger.debug("quota dirty mark failed for %s", name, exc_info=True)
+    # Attribution: name the account that actually served so the refresher drains the right
+    # (provider, fingerprint) queue entry (D42).
+    resolved = fingerprint
+    if resolved is None:
+        resolved = served_fingerprint(name, api_key=api_key, entry_id=entry_id, base_url=base_url)
+    if resolved:
+        enqueue_refresh(name, resolved)
 
 
 def _dirty_at(provider: str) -> Optional[datetime]:
@@ -197,14 +216,19 @@ def _windows_from_snapshot(snapshot) -> list[dict]:
         if w.get("limit_window_seconds"):
             codex_seconds[int(w["limit_window_seconds"])] = True
     for w in getattr(snapshot, "windows", ()) or ():
-        period = _PERIOD.get(str(w.label).strip().lower())
-        if not period or w.used_percent is None:
+        if w.used_percent is None:
             continue
+        label = str(w.label).strip().lower()
+        # Preserve unmapped labels (e.g. OpenRouter's "API key quota") as their own period
+        # instead of dropping the window (D25).
+        period = _PERIOD.get(label, label)
         reset = w.reset_at
         seconds = _SECONDS.get(period)
         if period == "monthly" and reset is not None:
             seconds = int((reset - _month_before(reset)).total_seconds())
+        status = getattr(w, "status", None)
         out.append({"period": period, "used_percent": float(w.used_percent),
+                    "status": (str(status).strip() or None) if status is not None else None,
                     "reset_at": reset.isoformat() if reset else None, "window_seconds": seconds})
     return out
 
@@ -258,12 +282,38 @@ def default_fetcher(provider: str):
     return fetch_account_usage_checked(provider)
 
 
+def default_fetcher_for(provider: str, *, api_key: Optional[str] = None,
+                        base_url: Optional[str] = None):
+    """Fetch ONE account's usage through the provider hook with that account's own credential."""
+    from agent.account_usage import fetch_account_usage_checked
+    return fetch_account_usage_checked(provider, base_url=base_url, api_key=api_key)
+
+
+def _account_fetcher(provider: str, fingerprint: str) -> Callable:
+    """Resolve the pool entry carrying *fingerprint* and fetch with ITS credential, so a
+    per-entry refresh reads the right account's usage; falls back to the provider fetcher."""
+    try:
+        from agent.credential_pool import load_pool
+        for entry in load_pool(provider).entries():
+            if entry.extra.get("secret_fingerprint") == fingerprint:
+                api_key = entry.runtime_api_key
+                base_url = entry.runtime_base_url
+                return lambda: default_fetcher_for(provider, api_key=api_key, base_url=base_url)
+    except Exception:  # noqa: BLE001
+        logger.debug("per-entry fetcher resolution failed for %s/%s", provider, fingerprint, exc_info=True)
+    return lambda: default_fetcher(provider)
+
+
 def default_connected(provider: str) -> bool:
     from agent.account_usage import provider_quota_connected
     return provider_quota_connected(provider)
 
 
 def default_multi_account(provider: str) -> bool:
+    # A quota_aware provider keeps per-account facts/views; the legacy "collapse to one
+    # unknown window list" must never apply to it (D41).
+    if _is_quota_aware(provider):
+        return False
     from agent.account_usage import provider_quota_multi_account
     return provider_quota_multi_account(provider)
 
@@ -273,7 +323,13 @@ MULTI_ACCOUNT_ERROR = {"status": 0, "message": "multi_account"}
 
 def _store_multi_account(provider: str, now: datetime) -> None:
     """A pool of several accounts has no single quota; store it as unknown (no windows) so
-    routers reading the snapshot never mistake one account's usage for the subscription's."""
+    routers reading the snapshot never mistake one account's usage for the subscription's.
+
+    A provider on the ``quota_aware`` strategy is exempt: its per-account facts + per-profile
+    view own the state, and collapsing it to an empty window list is exactly the emptiness this
+    change removes (D41)."""
+    if _is_quota_aware(provider):
+        return
     prev = _read_raw(provider) or {}
     if prev.get("multi_account") and not prev.get("windows"):
         return
@@ -607,3 +663,574 @@ def bootstrap_connected(connected: Optional[Callable[[str], bool]] = None) -> di
                 logger.debug("quota bootstrap %s failed", provider, exc_info=True)
                 out[provider] = f"error: {exc}"
     return out
+
+
+# ============================================================================
+# Quota-aware credential selection: per-account FACTS + per-profile VIEWS (D13, D23, D33,
+# D34, D35, D41) + the QuotaRefresher (D42). Facts are shared across profiles; views are
+# derived per profile and never blend accounts.
+# ============================================================================
+
+REFRESH_INTERVAL_S = 60
+STALE_S = 600
+VIEW_TTL_S = REFRESH_INTERVAL_S
+REFRESH_JITTER = 0.2
+
+_STRATEGY_QUOTA_AWARE = "quota_aware"
+
+_UNSET = object()
+
+
+def _is_quota_aware(provider: str) -> bool:
+    """True when this provider's configured pool strategy is ``quota_aware``."""
+    try:
+        from agent.credential_pool import get_pool_strategy
+        return get_pool_strategy(provider) == _STRATEGY_QUOTA_AWARE
+    except Exception:
+        return False
+
+
+def current_profile() -> str:
+    """Name of the profile this process runs as (``default`` when unset/unknown)."""
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        return get_active_profile_name() or "default"
+    except Exception:
+        return "default"
+
+
+def _safe_fp(fingerprint: str) -> str:
+    """A fingerprint is ``sha256:...`` (contains a colon); sanitize it for a filename."""
+    return str(fingerprint or "").replace(":", "_").replace("/", "_")
+
+
+# ---------------------------------------------------------------- facts (shared)
+
+def accounts_root() -> Path:
+    return quota_dir() / "accounts"
+
+
+def account_facts_path(provider: str, fingerprint: str) -> Path:
+    return accounts_root() / provider / f"{_safe_fp(fingerprint)}.json"
+
+
+def read_account_facts(provider: str, fingerprint: str) -> Optional[dict]:
+    try:
+        return json.loads(account_facts_path(provider, fingerprint).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def list_account_facts(provider: str) -> list[dict]:
+    out: list[dict] = []
+    directory = accounts_root() / provider
+    try:
+        names = sorted(directory.iterdir())
+    except OSError:
+        return out
+    for path in names:
+        if path.suffix != ".json":
+            continue
+        try:
+            out.append(json.loads(path.read_text()))
+        except (OSError, ValueError):
+            continue
+    return out
+
+
+def write_account_facts(provider: str, fingerprint: str, data: dict) -> Path:
+    """Persist one account's FACTS record (atomic). Never writes policy-shaped values."""
+    path = account_facts_path(provider, fingerprint)
+    _write_json_atomic(path, data)
+    return path
+
+
+def _merge_facts_entries(existing: Optional[dict], entries: Optional[list]) -> list:
+    merged: list[dict] = list((existing or {}).get("entries") or [])
+    seen = {(e.get("profile"), e.get("entry_id"), e.get("label")) for e in merged}
+    for entry in entries or []:
+        key = (entry.get("profile"), entry.get("entry_id"), entry.get("label"))
+        if key not in seen:
+            merged.append(dict(entry))
+            seen.add(key)
+    return merged
+
+
+def store_account_facts(
+    provider: str, fingerprint: str, windows: list, *, entries: Optional[list] = None,
+    fetched_at: Optional[str] = None, attempted_at: Optional[str] = None,
+    error: Optional[dict] = None, backoff_until: Optional[str] = None,
+    metered_exhausted_until: Any = _UNSET, now: Optional[datetime] = None,
+) -> Path:
+    """Write the FACTS record for one credential fingerprint.
+
+    FACTS ONLY (D23): windows + status, when it was fetched/attempted, the last error and its
+    backoff, ``metered_exhausted_until``, and the pool entries seen for this fingerprint. No
+    ``state`` / ``serving`` / ``states`` / history / ``metered`` - those are per-reader (D33).
+    """
+    now = now or _utc_now()
+    existing = read_account_facts(provider, fingerprint) or {}
+    if metered_exhausted_until is _UNSET:
+        metered_exhausted_until = existing.get("metered_exhausted_until")
+    elif isinstance(metered_exhausted_until, datetime):
+        metered_exhausted_until = metered_exhausted_until.isoformat()
+    record = {
+        "provider": provider,
+        "fingerprint": fingerprint,
+        "entries": _merge_facts_entries(existing, entries),
+        "windows": list(windows or []),
+        "metered_exhausted_until": metered_exhausted_until,
+        "fetched_at": fetched_at if fetched_at is not None else existing.get("fetched_at"),
+        "attempted_at": attempted_at or now.isoformat(),
+        "error": error,
+        "backoff_until": backoff_until,
+    }
+    return write_account_facts(provider, fingerprint, record)
+
+
+def fetch_account_facts(
+    provider: str, fingerprint: str, *, entries: Optional[list] = None,
+    fetcher: Optional[Callable] = None, now: Optional[datetime] = None,
+) -> str:
+    """Per-entry fetch API: fetch ONE credential's usage and store its FACTS record.
+
+    Returns ``fetched`` | ``error`` | ``unsupported``. Never called on a request path (D11);
+    the refresher and explicit ``--refresh`` drive it. The default fetcher is the provider's
+    own usage hook, which for ``opencode-go`` honours an explicit credential.
+    """
+    name = str(provider or "").strip().lower()
+    now = now or _utc_now()
+    if name not in SUPPORTED:
+        return "unsupported"
+    prev = read_account_facts(name, fingerprint) or {}
+    try:
+        snapshot = (fetcher or _account_fetcher(name, fingerprint))()
+    except Exception as exc:  # noqa: BLE001 — classified, never swallowed silently
+        err = QuotaFetchError.from_exception(name, exc)
+        if err.status == 429:
+            wait = min(BACKOFF_CAP_S, err.retry_after_s or BACKOFF_429_DEFAULT_S)
+        else:
+            prev_wait = int(((prev.get("error") or {}) or {}).get("backoff_s") or 0)
+            wait = min(BACKOFF_ERR_CAP_S, prev_wait * 2 if prev_wait else BACKOFF_ERR_START_S)
+        store_account_facts(
+            name, fingerprint, prev.get("windows") or [], entries=entries,
+            attempted_at=now.isoformat(),
+            error={"status": err.status, "message": err.message, "backoff_s": wait},
+            backoff_until=(now + timedelta(seconds=wait)).isoformat(), now=now,
+        )
+        return "error"
+    windows = _windows_from_snapshot(snapshot) if snapshot is not None else []
+    store_account_facts(
+        name, fingerprint, windows, entries=entries,
+        fetched_at=now.isoformat(), attempted_at=now.isoformat(),
+        error=None, backoff_until=None, now=now,
+    )
+    return "fetched"
+
+
+def record_refusal(
+    provider: str, fingerprint: str, *, state: str, reset_at: Any = None,
+    now: Optional[datetime] = None, backoff_s: Optional[int] = None,
+) -> bool:
+    """Record a metered-cushion refusal (D28/D47, round-5 unified rule).
+
+    A rate-limit/quota-class refusal observed while the account was classified ``overflow``
+    (it was serving as the metered cushion) sets ``metered_exhausted_until`` EVEN when the
+    stored plan windows already look spent - that is the motivating case. A refusal while the
+    account was classified ``covered`` is a PLAN refusal and sets nothing.
+    """
+    now = now or _utc_now()
+    if str(state or "") != "overflow":
+        return False
+    facts = read_account_facts(provider, fingerprint)
+    if facts is None:
+        return False
+    until = _dt(reset_at) if reset_at else None
+    if until is None:
+        until = now + timedelta(seconds=backoff_s or BACKOFF_429_DEFAULT_S)
+    facts["metered_exhausted_until"] = until.isoformat()
+    write_account_facts(provider, fingerprint, facts)
+    return True
+
+
+# ---------------------------------------------------------------- attribution (D42)
+
+def served_fingerprint(
+    provider: Optional[str], *, api_key: Optional[str] = None,
+    entry_id: Optional[str] = None, base_url: Optional[str] = None,
+) -> Optional[str]:
+    """The credential fingerprint of the entry that ACTUALLY served, resolved from the pool's
+    real serving state (D26/D36/D42).
+
+    ``base_url`` is deliberately NOT a discriminator: real opencode-go accounts share ONE
+    base_url, so matching on it would silently attribute the wrong account (or, when shared,
+    resolve to nothing). Resolution order is the stable ``entry_id`` (carried by the turn
+    path), then a unique ``api_key`` match, then the pool's current entry - the one the
+    session is bound to / last leased. When nothing resolves a UNIQUE account the result is
+    ``None`` ("unknown"): a caller must record no fingerprint rather than guess a wrong one.
+    Never raises.
+    """
+    name = quota_provider(provider, base_url)
+    if name not in SUPPORTED:
+        return None
+    try:
+        from agent.credential_pool import load_pool
+        pool = load_pool(name)
+        entries = pool.entries()
+    except Exception:
+        return None
+    if entry_id:
+        for entry in entries:
+            if entry.id == entry_id:
+                return entry.extra.get("secret_fingerprint") or None
+    if api_key:
+        fps = {
+            entry.extra.get("secret_fingerprint")
+            for entry in entries
+            if getattr(entry, "runtime_api_key", None) == api_key
+            and entry.extra.get("secret_fingerprint")
+        }
+        if len(fps) == 1:
+            return next(iter(fps))
+    # The pool's real serving state: the entry the session is currently bound to.
+    try:
+        current = pool.current()
+    except Exception:
+        current = None
+    if current is not None:
+        return current.extra.get("secret_fingerprint") or None
+    # A single-account pool is unambiguous even before any selection has been recorded.
+    known = [e.extra.get("secret_fingerprint") for e in entries if e.extra.get("secret_fingerprint")]
+    if len(known) == 1:
+        return known[0]
+    return None
+
+
+# ---------------------------------------------------------------- views (per profile)
+
+def views_root() -> Path:
+    return quota_dir() / "views"
+
+
+def view_path(profile: str, provider: str) -> Path:
+    return views_root() / (profile or "default") / f"{provider}.json"
+
+
+def _read_view_raw(profile: str, provider: str) -> Optional[dict]:
+    try:
+        return json.loads(view_path(profile, provider).read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def write_view(profile: str, provider: str, view: dict) -> Path:
+    path = view_path(profile, provider)
+    _write_json_atomic(path, view)
+    return path
+
+
+def _provider_profile(provider: str):
+    try:
+        from providers import get_provider_profile
+        return get_provider_profile(provider)
+    except Exception:
+        return None
+
+
+def _policy_for(provider: str, policy: Optional[dict] = None) -> dict:
+    if isinstance(policy, dict):
+        return policy
+    try:
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly() or {}
+        blocks = config.get("credential_pool_policy")
+        block = blocks.get(provider) if isinstance(blocks, dict) else None
+        return block if isinstance(block, dict) else {}
+    except Exception:
+        return {}
+
+
+def _target_matches(target: Any, entry: dict) -> bool:
+    raw = str(target or "").strip()
+    if not raw:
+        return False
+    label = str(entry.get("label") or "")
+    return raw in {
+        str(entry.get("entry_id") or ""), label, f"env:{label}",
+        str(entry.get("source") or ""),
+    }
+
+
+def _is_metered_facts(facts: dict, provider: str, policy: dict) -> bool:
+    """D38: metered when a configured target matches, OR when the provider bills after the
+    plan is spent."""
+    targets = policy.get("metered_overflow") if isinstance(policy, dict) else None
+    if isinstance(targets, list):
+        for entry in facts.get("entries") or []:
+            if any(_target_matches(t, entry) for t in targets):
+                return True
+    profile = _provider_profile(provider)
+    return bool(getattr(profile, "bills_when_plan_spent", False))
+
+
+def _read_health(facts: dict, now: datetime) -> str:
+    if facts.get("error"):
+        return "error"
+    fetched = _dt(facts.get("fetched_at"))
+    if fetched is None:
+        return "stale" if facts.get("attempted_at") else "unknown"
+    return "stale" if (now - fetched).total_seconds() > STALE_S else "ok"
+
+
+def _first_entry(facts: dict) -> dict:
+    entries = facts.get("entries") or []
+    return entries[0] if entries else {}
+
+
+def _pick_serving(facts_list: list, by_fp: dict, stored_serving, pool, now: datetime):
+    fps = [f.get("fingerprint") for f in facts_list if f.get("fingerprint")]
+    if stored_serving in fps:
+        return stored_serving
+    order = fps
+    if pool is not None:
+        try:
+            priority = {
+                e.extra.get("secret_fingerprint"): e.priority for e in pool.entries()
+            }
+            order = sorted(fps, key=lambda fp: priority.get(fp, 1 << 30))
+        except Exception:
+            order = fps
+    covered = [fp for fp in order if by_fp.get(fp, {}).get("state") == "covered"]
+    return (covered or order or [None])[0]
+
+
+def _compose_view(
+    profile: str, provider: str, stored: Optional[dict], *, now: datetime,
+    policy: Optional[dict], pool,
+) -> dict:
+    policy = _policy_for(provider, policy)
+    accounts: list[dict] = []
+    states = {"covered": 0, "overflow": 0, "exhausted": 0}
+    by_fp: dict = {}
+    facts_list = list_account_facts(provider)
+    for facts in facts_list:
+        fp = facts.get("fingerprint")
+        windows = [_rolled(w, now) for w in facts.get("windows") or []]
+        # D23: every policy-shaped value is derived HERE, at read time, from THIS profile's
+        # CURRENT config + the stored facts - never reused from a previously-written view.
+        # Editing ``credential_pool_policy`` must change the next read with no rewrite, so a
+        # stored ``metered`` is a pure cache for display, not an input to classification. Two
+        # profiles with different policies therefore read different states from the SAME facts.
+        metered = _is_metered_facts(facts, provider, policy)
+        state = qstate.account_state(
+            windows, metered=metered,
+            metered_exhausted_until=facts.get("metered_exhausted_until"), now=now,
+        )
+        fetched = _dt(facts.get("fetched_at"))
+        entry = _first_entry(facts)
+        record = {
+            "fingerprint": fp,
+            "label": entry.get("label"),
+            "entry_id": entry.get("entry_id"),
+            "state": state,
+            "metered": metered,
+            "read_health": _read_health(facts, now),
+            "windows": windows,
+            "fetched_at": facts.get("fetched_at"),
+            "age_s": int((now - fetched).total_seconds()) if fetched else None,
+            "attempted_at": facts.get("attempted_at"),
+            "last_error": (facts.get("error") or {}).get("message"),
+            "backoff_until": facts.get("backoff_until"),
+            "recovery_at": qstate.effective_recovery(
+                windows, facts.get("metered_exhausted_until"), now
+            ).isoformat(),
+        }
+        accounts.append(record)
+        if fp is not None:
+            by_fp[fp] = record
+        if state in states:
+            states[state] += 1
+    serving = _pick_serving(facts_list, by_fp, (stored or {}).get("serving"), pool, now)
+    previous_serving = (stored or {}).get("serving")
+    history = list((stored or {}).get("history") or [])
+    serving_since = (stored or {}).get("serving_since")
+    if previous_serving != serving or serving_since is None:
+        # The series restarts when serving changes: chaining two accounts' samples is not a
+        # valid time series (D35).
+        history = []
+        serving_since = now.isoformat()
+    return {
+        "provider": provider,
+        "strategy": _STRATEGY_QUOTA_AWARE if _is_quota_aware(provider) else "fill_first",
+        "serving": serving,
+        "serving_since": serving_since,
+        "windows": by_fp.get(serving, {}).get("windows", []),
+        "history": history,
+        "accounts": accounts,
+        "states": states,
+    }
+
+
+def read_view(
+    profile: str, provider: str, *, now: Optional[datetime] = None,
+    policy: Optional[dict] = None, pool=None,
+) -> Optional[dict]:
+    """The ONE profile-scoped reader (D41) used by selection, the TUI snapshot and the CLI.
+
+    Returns the derived view for a provider on ``quota_aware`` (or one that already has a view
+    file), with per-account state recomputed at read time FROM THIS PROFILE'S CURRENT CONFIG
+    (D23): a policy edit is visible on the very next read, with no rewrite. Returns None for any
+    other provider so the caller falls back to the legacy ``snapshot/<provider>.json`` path
+    unchanged (D33).
+    """
+    name = str(provider or "").strip().lower()
+    if name not in SUPPORTED:
+        return None
+    now = now or _utc_now()
+    stored = _read_view_raw(profile, name)
+    if stored is None and not _is_quota_aware(name):
+        return None
+    return _compose_view(profile, name, stored, now=now, policy=policy, pool=pool)
+
+
+def update_view(
+    profile: str, provider: str, *, now: Optional[datetime] = None,
+    policy: Optional[dict] = None, pool=None,
+) -> dict:
+    """Recompute the per-profile view from facts + this profile's policy, append a history
+    sample for the current serving account, and persist it (D41)."""
+    name = str(provider or "").strip().lower()
+    now = now or _utc_now()
+    stored = _read_view_raw(profile, name)
+    view = _compose_view(profile, name, stored, now=now, policy=policy, pool=pool)
+    if view.get("serving"):
+        view["history"] = list(view.get("history") or []) + [{
+            "t": now.isoformat(),
+            "fingerprint": view["serving"],
+            "windows": view.get("windows") or [],
+        }]
+    write_view(profile, name, view)
+    return view
+
+
+# ---------------------------------------------------------------- refresher (D42)
+
+_pending_lock = threading.Lock()
+_pending_refreshes: set = set()
+_refresher: Optional["QuotaRefresher"] = None
+_refresher_guard = threading.Lock()
+
+
+def enqueue_refresh(provider: str, fingerprint: Optional[str] = None) -> None:
+    """Queue a ``(provider, fingerprint)`` refresh; never fetches here (D11/D42)."""
+    name = str(provider or "").strip().lower()
+    if name not in SUPPORTED:
+        return
+    with _pending_lock:
+        _pending_refreshes.add((name, fingerprint))
+    refresher = _refresher
+    if refresher is not None:
+        refresher.wake()
+
+
+def pending_refreshes() -> set:
+    """Snapshot of queued ``(provider, fingerprint)`` refresh requests (test/observability)."""
+    with _pending_lock:
+        return set(_pending_refreshes)
+
+
+def _drain_pending() -> set:
+    with _pending_lock:
+        items = set(_pending_refreshes)
+        _pending_refreshes.clear()
+    return items
+
+
+class QuotaRefresher:
+    """One lightweight thread owned by the pool; drains the ``(provider, fingerprint)`` queue.
+
+    Started lazily with the pool and stopped with it. Never entered from a request path
+    (D11/D42): callers only ever enqueue. Accounts in endpoint backoff are skipped by the
+    fetcher's own backoff arithmetic; their staleness is visible via ``age_s``/``read_health``.
+    """
+
+    def __init__(self, *, interval_s: int = REFRESH_INTERVAL_S, jitter: float = REFRESH_JITTER,
+                 fetcher: Optional[Callable] = None) -> None:
+        self.interval_s = interval_s
+        self.jitter = jitter
+        self._fetcher = fetcher
+        self._stop = threading.Event()
+        self._wake = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        self._lock = threading.Lock()
+
+    def _sleep_interval(self) -> float:
+        spread = self.interval_s * self.jitter
+        return max(0.05, self.interval_s + random.uniform(-spread, spread))
+
+    def start(self) -> "QuotaRefresher":
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return self
+            self._stop.clear()
+            self._wake.clear()
+            self._thread = threading.Thread(target=self._run, name="quota-refresher", daemon=True)
+            self._thread.start()
+        return self
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self._stop.set()
+        self._wake.set()
+        with self._lock:
+            thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+        with self._lock:
+            self._thread = None
+
+    @property
+    def running(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def wake(self) -> None:
+        self._wake.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            self._wake.wait(timeout=self._sleep_interval())
+            self._wake.clear()
+            if self._stop.is_set():
+                break
+            for provider, fingerprint in _drain_pending():
+                if fingerprint is None:
+                    continue
+                try:
+                    fetch_account_facts(provider, fingerprint, fetcher=self._fetcher)
+                except Exception:  # noqa: BLE001
+                    logger.debug("quota refresh %s/%s failed", provider, fingerprint, exc_info=True)
+
+
+def start_refresher(*, interval_s: int = REFRESH_INTERVAL_S, fetcher: Optional[Callable] = None) -> QuotaRefresher:
+    """Start (or return) the process-wide ``QuotaRefresher``. Idempotent."""
+    global _refresher
+    with _refresher_guard:
+        if _refresher is None:
+            _refresher = QuotaRefresher(interval_s=interval_s, fetcher=fetcher)
+        refresher = _refresher
+    return refresher.start()
+
+
+def stop_refresher(timeout: float = 2.0) -> None:
+    """Stop the process-wide refresher (pool teardown)."""
+    global _refresher
+    with _refresher_guard:
+        refresher = _refresher
+        _refresher = None
+    if refresher is not None:
+        refresher.stop(timeout)
+
+
+def is_refresher_running() -> bool:
+    refresher = _refresher
+    return bool(refresher is not None and refresher.running)

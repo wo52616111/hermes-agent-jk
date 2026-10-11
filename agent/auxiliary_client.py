@@ -3798,7 +3798,9 @@ def _retry_same_provider_sync(*, resolved_provider: str, resolved_api_mode: Opti
         task=task, resolved_provider=resolved_provider, resolved_api_mode=resolved_api_mode, async_mode=False, **prep,
     )
     return _validate_llm_response(
-        _relay_sync_completion(retry_client, retry_kwargs, provider=resolved_provider, api_mode=resolved_api_mode), task,
+        _relay_sync_completion(retry_client, retry_kwargs, provider=resolved_provider, api_mode=resolved_api_mode),
+        task, provider=resolved_provider, base_url=prep.get("resolved_base_url"),
+        api_key=getattr(retry_client, "api_key", None),
     )
 
 
@@ -3810,7 +3812,8 @@ async def _retry_same_provider_async(*, resolved_provider: str, resolved_api_mod
     return await asyncio.to_thread(
         _validate_llm_response,
         await _relay_async_completion(retry_client, retry_kwargs, provider=resolved_provider, api_mode=resolved_api_mode),
-        task,
+        task, provider=resolved_provider, base_url=prep.get("resolved_base_url"),
+        api_key=getattr(retry_client, "api_key", None),
     )
 
 
@@ -4144,7 +4147,8 @@ def _call_fallback_candidate_sync(
                     force_stream=_provider_requires_stream(dest.provider, dest.base_url),
                 ),
             ),
-            task,
+            task, provider=dest.provider, base_url=dest.base_url,
+            api_key=getattr(client, "api_key", None),
         )
     from agent.auxiliary_fallback_recovery import send_with_parameter_rungs
 
@@ -4196,7 +4200,8 @@ async def _call_fallback_candidate_async(
         return await asyncio.to_thread(
             _validate_llm_response,
             await _relay_async_completion(client, request_kwargs, provider=dest.provider, api_mode=dest.api_mode),
-            task,
+            task, provider=dest.provider, base_url=dest.base_url,
+            api_key=getattr(client, "api_key", None),
         )
     from agent.auxiliary_fallback_recovery import send_with_parameter_rungs_async
 
@@ -6801,6 +6806,7 @@ def _build_call_kwargs(
 
 def _validate_llm_response(
     response: Any, task: Optional[str] = None, provider: Optional[str] = None, base_url: Optional[str] = None,
+    api_key: Optional[str] = None,
 ) -> Any:
     """Validate the .choices[0].message shape (fail fast, not a downstream AttributeError).
 
@@ -6811,7 +6817,8 @@ def _validate_llm_response(
     See #7264.
     Recording is best-effort and never affects validation. *provider*/*base_url* are optional accounting
     hints — fallback-path calls omit them and the row keeps the model (read from the response itself) with
-    an empty route. See #23270.
+    an empty route. See #23270. *api_key* (D42) is the served account's credential, threaded by the
+    caller that resolved the runtime so quota attribution names the account that ACTUALLY served.
     """
     if response is None:
         raise RuntimeError(
@@ -6819,7 +6826,7 @@ def _validate_llm_response(
         )
     response = _unwrap_data_envelope(response, task)
     from agent.aux_accounting import record_aux_usage
-    record_aux_usage(response, task, provider=provider, base_url=base_url)
+    record_aux_usage(response, task, provider=provider, base_url=base_url, api_key=api_key)
     # Adapter SimpleNamespace responses are fine — they have .choices[0].message.
     try:
         choices = response.choices
@@ -8181,6 +8188,11 @@ def _call_llm_impl(
             return client.chat.completions.create(**kwargs)
         return _relay_sync_stream(client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode)
 
+    # D42: the credential of the client that actually serves this call, threaded into every
+    # primary/transient-retry validation so quota attribution names the account that served.
+    validate_kw = {"provider": request_provider, "base_url": req.base_info,
+                   "api_key": getattr(client, "api_key", None)}
+
     def _primary(**validate_kw: Any) -> Any:
         # Retry on the same provider for a transient transport blip (connection reset / streaming-close /
         # incomplete chunked read / 5xx / 408) before the except-chain below escalates to provider/model
@@ -8209,7 +8221,7 @@ def _call_llm_impl(
         # transient blips before escalating to fallback — a dropped connection shouldn't
         # abandon a healthy provider (matters for pinned MoA advisors).
         try:
-            return _primary(provider=request_provider, base_url=req.base_info)
+            return _primary(**validate_kw)
         except Exception as transient_err:
             if not _should_retry_same_provider(task, transient_err, ""):
                 raise
@@ -8222,7 +8234,7 @@ def _call_llm_impl(
                             task or "call", _attempt, _max_transient_retries, _backoff, _last_transient)
                 time.sleep(_backoff)
                 try:
-                    return _primary()
+                    return _primary(**validate_kw)
                 except Exception as retry_transient:
                     if not _is_transient_transport_error(retry_transient):
                         raise
@@ -8351,6 +8363,10 @@ async def _async_call_llm_impl(
         extra_headers=None, api_mode=None, route_info=route_info,
     )
     client, kwargs, request_provider = req.client, req.kwargs, req.request_provider
+    # D42: the credential of the client that actually serves this call, threaded into every
+    # primary/transient-retry validation so quota attribution names the account that served.
+    validate_kw = {"provider": request_provider, "base_url": req.base_info,
+                   "api_key": getattr(client, "api_key", None)}
     try:
         # Retry ONCE on the same provider for a transient blip before fallback (see call_llm()).
         # (PR #16587)
@@ -8368,14 +8384,14 @@ async def _async_call_llm_impl(
                     create=_acreate),
                 task, **validate_kw)
         try:
-            return await _primary(provider=request_provider, base_url=req.base_info)
+            return await _primary(**validate_kw)
         except Exception as transient_err:
             # The async Codex adapter wraps the sync stream via to_thread: same TimeoutError here.
             if not _should_retry_same_provider(task, transient_err, " (async)"):
                 raise
             logger.info("Auxiliary %s (async): transient transport error; retrying "
                         "once on the same provider before fallback: %s", task or "call", transient_err)
-            return await _primary()
+            return await _primary(**validate_kw)
     except Exception as first_err:
         async def _perform(step: _LadderStep) -> Any:
             kind, args, kw = _ladder_step_call(step, req, retry_kwargs, candidate_kwargs)

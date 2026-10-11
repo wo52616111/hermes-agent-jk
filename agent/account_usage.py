@@ -36,6 +36,9 @@ class AccountUsageWindow:
     # ``model``: the window caps only one model family (Anthropic Opus/Sonnet weekly) and can
     # never imply the account itself is out of quota.
     scope: str = "account"
+    # Provider's own window state marker (e.g. opencode-go's "rate-limited"). Outranks
+    # ``used_percent`` when deciding a window is spent (spec D2/D25); None means "no marker".
+    status: Optional[str] = None
 
 
 @dataclass(frozen=True)
