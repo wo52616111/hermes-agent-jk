@@ -39,6 +39,10 @@ class AccountUsageGroupWindow(Result):
     used_percent: float
     reset_at: str | None = None
     rolled: bool | None = None
+    # The provider's own window marker (e.g. opencode-go's "rate-limited"); outranks used_percent
+    # when deciding a window is spent (spec D2/D25). Absent on the legacy status-group windows.
+    status: str | None = None
+    window_seconds: int | None = None
 
 
 class AccountUsageError(Result):
@@ -46,8 +50,48 @@ class AccountUsageError(Result):
     message: str = ""
 
 
+class AccountUsageStates(Result):
+    """Per-class account counts for a ``quota_aware`` provider's per-profile view (D14/D41)."""
+
+    covered: int = 0
+    overflow: int = 0
+    exhausted: int = 0
+
+
+class AccountUsageAccount(Result):
+    """One credential in a ``quota_aware`` provider's per-profile view (``agent/quota_state.py::read_view``).
+
+    ``state`` (covered/overflow/exhausted, spec D1) and ``read_health`` (ok/stale/error, D26) are
+    separate: an unreadable account keeps its effective state and is never ``unknown`` merely
+    because a read failed. Windows are this account's own - never a sum or an average (D14/D34).
+    """
+
+    fingerprint: str
+    label: str | None = None
+    entry_id: str | None = None
+    state: str
+    metered: bool = False
+    read_health: str
+    windows: list[AccountUsageGroupWindow]
+    fetched_at: str | None = None
+    age_s: int | None = None
+    attempted_at: str | None = None
+    last_error: str | None = None
+    # The failed read's HTTP status (429 rotates), surfaced so the UI can mark an account whose
+    # last read was rate-limited without parsing ``last_error``.
+    error_status: int | None = None
+    backoff_until: str | None = None
+    recovery_at: str | None = None
+
+
 class AccountUsageGroup(Result):
-    """One subscription's quota from the shared cross-process state (``agent/quota_state.py``)."""
+    """One subscription's quota from the shared cross-process state (``agent/quota_state.py``).
+
+    A ``quota_aware`` provider's group is built from its per-profile view (D41): ``windows`` is the
+    serving account's own windows and ``accounts[]`` carries every credential's own windows, state
+    and ``read_health`` - no blended number. ``serving`` is the fingerprint that last served (D34);
+    it is a fact, never a per-session "active" flag (that lives in ``Usage.account_usage_active_account``).
+    """
 
     provider: str
     fetched_at: str | None = None
@@ -57,6 +101,11 @@ class AccountUsageGroup(Result):
     windows: list[AccountUsageGroupWindow]
     hint: str | None = None
     multi_account: bool | None = None
+    accounts: list[AccountUsageAccount] | None = None
+    serving: str | None = None
+    serving_since: str | None = None
+    states: AccountUsageStates | None = None
+    strategy: str | None = None
 
 
 class Usage(OpenModel):
@@ -88,6 +137,10 @@ class Usage(OpenModel):
     account_usage: AccountUsage | None = None
     account_usage_all: list[AccountUsageGroup] | None = None
     account_usage_active: str | None = None
+    # The fingerprint of the credential THIS session is on (D19/D29) - the session-local marker the
+    # shared per-account view deliberately does not carry, so two sessions on different accounts do
+    # not fight over one flag. Falls back to the group's ``serving`` when unresolved.
+    account_usage_active_account: str | None = None
 
 
 class ProjectRef(Result):
@@ -304,8 +357,9 @@ class EmptyPayload(Payload):
 
 
 __all__ = [
-    "TERMINAL_SUBAGENT_STATUSES", "AccountOwner", "AccountUsage", "AccountUsageError", "AccountUsageGroup",
-    "AccountUsageGroupWindow", "AccountUsageWindow", "ConnectorOwner",
+    "TERMINAL_SUBAGENT_STATUSES", "AccountOwner", "AccountUsage", "AccountUsageAccount",
+    "AccountUsageError", "AccountUsageGroup", "AccountUsageGroupWindow", "AccountUsageStates",
+    "AccountUsageWindow", "ConnectorOwner",
     "EmptyPayload", "EmptyResult", "McpServerStatus",
     "MessageReaction", "OkResult", "OpenModel", "PendingApproval",
     "ProfileParams", "ProjectRef", "SessionLiveInfo", "SessionOwner", "SessionParams", "StatusResult", "StoredSessionRow",

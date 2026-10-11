@@ -4102,6 +4102,152 @@
         "title": "AccountUsage",
         "type": "object"
       },
+      "AccountUsageAccount": {
+        "additionalProperties": false,
+        "description": "One credential in a ``quota_aware`` provider's per-profile view (``agent/quota_state.py::read_view``).\n\n``state`` (covered/overflow/exhausted, spec D1) and ``read_health`` (ok/stale/error, D26) are\nseparate: an unreadable account keeps its effective state and is never ``unknown`` merely\nbecause a read failed. Windows are this account's own - never a sum or an average (D14/D34).",
+        "properties": {
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Label"
+          },
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Entry Id"
+          },
+          "state": {
+            "title": "State",
+            "type": "string"
+          },
+          "metered": {
+            "default": false,
+            "title": "Metered",
+            "type": "boolean"
+          },
+          "read_health": {
+            "title": "Read Health",
+            "type": "string"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/AccountUsageGroupWindow"
+            },
+            "title": "Windows",
+            "type": "array"
+          },
+          "fetched_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Fetched At"
+          },
+          "age_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Age S"
+          },
+          "attempted_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Attempted At"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Last Error"
+          },
+          "error_status": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error Status"
+          },
+          "backoff_until": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Backoff Until"
+          },
+          "recovery_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Recovery At"
+          }
+        },
+        "required": [
+          "fingerprint",
+          "state",
+          "read_health",
+          "windows"
+        ],
+        "title": "AccountUsageAccount",
+        "type": "object"
+      },
       "AccountUsageError": {
         "additionalProperties": false,
         "properties": {
@@ -4123,7 +4269,7 @@
       },
       "AccountUsageGroup": {
         "additionalProperties": false,
-        "description": "One subscription's quota from the shared cross-process state (``agent/quota_state.py``).",
+        "description": "One subscription's quota from the shared cross-process state (``agent/quota_state.py``).\n\nA ``quota_aware`` provider's group is built from its per-profile view (D41): ``windows`` is the\nserving account's own windows and ``accounts[]`` carries every credential's own windows, state\nand ``read_health`` - no blended number. ``serving`` is the fingerprint that last served (D34);\nit is a fact, never a per-session \"active\" flag (that lives in ``Usage.account_usage_active_account``).",
         "properties": {
           "provider": {
             "title": "Provider",
@@ -4206,6 +4352,68 @@
             ],
             "default": null,
             "title": "Multi Account"
+          },
+          "accounts": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AccountUsageAccount"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Accounts"
+          },
+          "serving": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Serving"
+          },
+          "serving_since": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Serving Since"
+          },
+          "states": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountUsageStates"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "strategy": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Strategy"
           }
         },
         "required": [
@@ -4249,6 +4457,30 @@
             ],
             "default": null,
             "title": "Rolled"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Status"
+          },
+          "window_seconds": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Window Seconds"
           }
         },
         "required": [
@@ -4256,6 +4488,29 @@
           "used_percent"
         ],
         "title": "AccountUsageGroupWindow",
+        "type": "object"
+      },
+      "AccountUsageStates": {
+        "additionalProperties": false,
+        "description": "Per-class account counts for a ``quota_aware`` provider's per-profile view (D14/D41).",
+        "properties": {
+          "covered": {
+            "default": 0,
+            "title": "Covered",
+            "type": "integer"
+          },
+          "overflow": {
+            "default": 0,
+            "title": "Overflow",
+            "type": "integer"
+          },
+          "exhausted": {
+            "default": 0,
+            "title": "Exhausted",
+            "type": "integer"
+          }
+        },
+        "title": "AccountUsageStates",
         "type": "object"
       },
       "AccountUsageWindow": {
@@ -29227,6 +29482,18 @@
             "default": null,
             "title": "Account Usage Active"
           },
+          "account_usage_active_account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active Account"
+          },
           "credits_lines": {
             "anyOf": [
               {
@@ -33608,6 +33875,18 @@
             ],
             "default": null,
             "title": "Account Usage Active"
+          },
+          "account_usage_active_account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active Account"
           }
         },
         "title": "Usage",

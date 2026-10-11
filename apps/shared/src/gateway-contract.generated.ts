@@ -582,6 +582,7 @@ export interface Usage {
   account_usage?: AccountUsage | null
   account_usage_all?: AccountUsageGroup[] | null
   account_usage_active?: string | null
+  account_usage_active_account?: string | null
   [key: string]: unknown
 }
 /** The active provider's quota snapshot as the TUI capacity row renders it. */
@@ -596,7 +597,7 @@ export interface AccountUsageWindow {
   used_percent: number
   reset_at?: string | null
 }
-/** One subscription's quota from the shared cross-process state (``agent/quota_state.py``). */
+/** One subscription's quota from the shared cross-process state (``agent/quota_state.py``). A ``quota_aware`` provider's group is built from its per-profile view (D41): ``windows`` is the serving account's own windows and ``accounts[]`` carries every credential's own windows, state and ``read_health`` - no blended number. ``serving`` is the fingerprint that last served (D34); it is a fact, never a per-session "active" flag (that lives in ``Usage.account_usage_active_account``). */
 export interface AccountUsageGroup {
   provider: string
   fetched_at?: string | null
@@ -606,6 +607,11 @@ export interface AccountUsageGroup {
   windows: AccountUsageGroupWindow[]
   hint?: string | null
   multi_account?: boolean | null
+  accounts?: AccountUsageAccount[] | null
+  serving?: string | null
+  serving_since?: string | null
+  states?: AccountUsageStates | null
+  strategy?: string | null
 }
 export interface AccountUsageError {
   status: number
@@ -616,6 +622,31 @@ export interface AccountUsageGroupWindow {
   used_percent: number
   reset_at?: string | null
   rolled?: boolean | null
+  status?: string | null
+  window_seconds?: number | null
+}
+/** One credential in a ``quota_aware`` provider's per-profile view (``agent/quota_state.py::read_view``). ``state`` (covered/overflow/exhausted, spec D1) and ``read_health`` (ok/stale/error, D26) are separate: an unreadable account keeps its effective state and is never ``unknown`` merely because a read failed. Windows are this account's own - never a sum or an average (D14/D34). */
+export interface AccountUsageAccount {
+  fingerprint: string
+  label?: string | null
+  entry_id?: string | null
+  state: string
+  metered?: boolean
+  read_health: string
+  windows: AccountUsageGroupWindow[]
+  fetched_at?: string | null
+  age_s?: number | null
+  attempted_at?: string | null
+  last_error?: string | null
+  error_status?: number | null
+  backoff_until?: string | null
+  recovery_at?: string | null
+}
+/** Per-class account counts for a ``quota_aware`` provider's per-profile view (D14/D41). */
+export interface AccountUsageStates {
+  covered?: number
+  overflow?: number
+  exhausted?: number
 }
 export interface McpServerStatus {
   name?: string
@@ -3026,6 +3057,7 @@ export interface SessionUsageResult {
   account_usage?: AccountUsage | null
   account_usage_all?: AccountUsageGroup[] | null
   account_usage_active?: string | null
+  account_usage_active_account?: string | null
   credits_lines?: string[] | null
   [key: string]: unknown
 }

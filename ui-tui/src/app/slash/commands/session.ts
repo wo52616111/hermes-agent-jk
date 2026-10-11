@@ -690,6 +690,7 @@ export const sessionCommands: SlashCommand[] = [
               account_usage: r.account_usage,
               account_usage_all: r.account_usage_all,
               account_usage_active: r.account_usage_active,
+              account_usage_active_account: r.account_usage_active_account,
               active_subagents: r.active_subagents,
               calls: r.calls ?? 0,
               compressions: r.compressions,
