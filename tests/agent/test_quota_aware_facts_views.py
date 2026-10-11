@@ -1280,22 +1280,22 @@ def test_release_vs_register_race_keeps_the_refresher_published(qdir, monkeypatc
     the still-published refresher: the live owner keeps a running worker, a later owner reuses
     it (no second worker), and no orphan worker outlives every owner.
 
-    Deterministic interleaving (no reliance on the scheduler): the last owner's ``stop()`` is
-    held after it completes but before its guard re-check, while owner B is held after it grabs
-    the refresher reference but before it calls ``start()``."""
+    Deterministic interleaving (no reliance on the scheduler): the last owner's release signals
+    its stop under the guard but joins outside it, so the race window is between that join
+    returning and the guard re-check, while owner B is held inside ``start()``."""
     owner_a = _Owner()
     qs.start_refresher(pool=owner_a, interval_s=0.05, fetcher=lambda: None)
     refresher_obj = qs._refresher
     assert qs.is_refresher_running()
 
     a_stopped, a_go, b_parked, b_go = (threading.Event() for _ in range(4))
-    real_stop, real_start = qs.QuotaRefresher.stop, qs.QuotaRefresher.start
+    real_wait, real_start = qs.QuotaRefresher.wait_stopped, qs.QuotaRefresher.start
 
-    def gated_stop(self, timeout=2.0):
-        result = real_stop(self, timeout)
+    def gated_wait(self, timeout=2.0):
+        result = real_wait(self, timeout)
         if threading.current_thread().name == "releaser":
             a_stopped.set()
-            a_go.wait(5)              # hold AFTER stop() returns, BEFORE the guard re-check
+            a_go.wait(5)              # hold AFTER the join, BEFORE the guard re-check
         return result
 
     def gated_start(self):
@@ -1304,7 +1304,7 @@ def test_release_vs_register_race_keeps_the_refresher_published(qdir, monkeypatc
             b_go.wait(5)              # hold AFTER grabbing the refresher ref, BEFORE start()
         return real_start(self)
 
-    monkeypatch.setattr(qs.QuotaRefresher, "stop", gated_stop)
+    monkeypatch.setattr(qs.QuotaRefresher, "wait_stopped", gated_wait)
     monkeypatch.setattr(qs.QuotaRefresher, "start", gated_start)
     releaser = threading.Thread(target=lambda: qs.stop_refresher(pool=owner_a), name="releaser")
     releaser.start()
@@ -1348,10 +1348,65 @@ def test_release_vs_register_race_keeps_the_refresher_published(qdir, monkeypatc
     finally:
         a_go.set()
         b_go.set()
-        monkeypatch.setattr(qs.QuotaRefresher, "stop", real_stop)
+        monkeypatch.setattr(qs.QuotaRefresher, "wait_stopped", real_wait)
         monkeypatch.setattr(qs.QuotaRefresher, "start", real_start)
         if refresher_obj is not None:
             refresher_obj.stop(1.0)   # reach any worker the race left unpublished
+        qs.stop_refresher()
+        if owner_b_thread is not None:
+            owner_b_thread.join(2)
+        releaser.join(2)
+        for t in _live_refresher_threads():
+            t.join(1)
+
+
+def test_last_release_signals_the_stop_under_the_lifecycle_guard(qdir, monkeypatch):
+    """D42: the last owner's stop DECISION and its stop SIGNAL happen inside the one guard that
+    registration+``start()`` also take, so no registration can land between them and start into a
+    worker the release then kills. The guard is held at the signal here: a concurrent registration
+    must not complete until the signal is issued, and the registering owner must end up holding a
+    live worker."""
+    owner_a = _Owner()
+    qs.start_refresher(pool=owner_a, interval_s=0.05, fetcher=lambda: None)
+    assert qs.is_refresher_running()
+
+    at_signal, signal_go, b_done = (threading.Event() for _ in range(3))
+    real_request_stop = qs.QuotaRefresher.request_stop
+
+    def gated_request_stop(self):
+        if threading.current_thread().name == "last-releaser":
+            at_signal.set()
+            signal_go.wait(5)          # hold BETWEEN the last-owner decision and the signal
+        return real_request_stop(self)
+
+    monkeypatch.setattr(qs.QuotaRefresher, "request_stop", gated_request_stop)
+    releaser = threading.Thread(target=lambda: qs.stop_refresher(pool=owner_a), name="last-releaser")
+    owner_b_thread = None
+    try:
+        releaser.start()
+        assert at_signal.wait(5)
+        owner_b = _Owner()
+        owner_b_thread = threading.Thread(
+            target=lambda: (qs.start_refresher(pool=owner_b, interval_s=0.05, fetcher=lambda: None),
+                            b_done.set()),
+            name="owner-b")
+        owner_b_thread.start()
+        time.sleep(0.3)
+        assert not b_done.is_set(), \
+            "a registration completed between the last owner's decision and its stop signal"
+        signal_go.set()
+        owner_b_thread.join(5)
+        releaser.join(5)
+        assert b_done.is_set()
+        assert len(qs._owner_tokens) == 1
+        assert qs.is_refresher_running(), "the registering owner was left with no worker"
+        deadline = time.monotonic() + 2
+        while len(_live_refresher_threads()) > 1 and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert len(_live_refresher_threads()) == 1, "a second worker was built for one process"
+    finally:
+        signal_go.set()
+        monkeypatch.setattr(qs.QuotaRefresher, "request_stop", real_request_stop)
         qs.stop_refresher()
         if owner_b_thread is not None:
             owner_b_thread.join(2)

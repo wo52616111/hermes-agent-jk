@@ -1437,9 +1437,15 @@ class QuotaRefresher:
             self._thread.start()
         return self
 
-    def stop(self, timeout: float = 2.0) -> None:
+    def request_stop(self) -> None:
+        """Signal the worker to leave WITHOUT waiting for it. The caller joins through
+        :meth:`wait_stopped` after dropping the lifecycle guard, so a worker-side pool finalizer
+        that needs that guard can never deadlock against this stop (D42)."""
         with self._lock:
             self._stop.set()
+
+    def wait_stopped(self, timeout: float = 2.0) -> None:
+        with self._lock:
             thread = self._thread
         # A finalizer may collect the last pool ON the worker thread; a thread cannot join
         # itself, and it is already stopping, so leave the handle to clear on the next start.
@@ -1450,6 +1456,10 @@ class QuotaRefresher:
                 # a timed-out stop cannot overlap a second worker.
                 if self._thread is thread and not thread.is_alive():
                     self._thread = None
+
+    def stop(self, timeout: float = 2.0) -> None:
+        self.request_stop()
+        self.wait_stopped(timeout)
 
     def _exit_pending(self) -> bool:
         """Under ``_lock``: True once a stop is pending, recording that this worker is leaving
@@ -1505,10 +1515,18 @@ def _release_owner(token: int, timeout: float = 2.0) -> None:
         if _owner_tokens:
             return
         refresher = _refresher
+        # Signal the stop under the SAME guard that serializes registration+start(): a registering
+        # owner then either still sees this hold (so no stop happens at all) or reaches its start()
+        # after the signal, where start() clears the pending stop and keeps the worker alive.
+        # Signalling outside this guard would let a registration land in between, and this release
+        # would then kill the worker that new owner had just started (D42). The join stays outside
+        # the guard so a worker-side pool finalizer waiting for that guard cannot deadlock.
+        if refresher is not None:
+            refresher.request_stop()
     if finalizer is not None:
         finalizer.detach()
     if refresher is not None:
-        refresher.stop(timeout)
+        refresher.wait_stopped(timeout)
         with _refresher_guard:
             # Re-check under the guard, which also serializes every registration+start(): an
             # owner that registered while this stop ran has already started this refresher, so
@@ -1556,8 +1574,13 @@ def stop_refresher(timeout: float = 2.0, *, pool=None) -> None:
         _release_owner(token, timeout)
     with _refresher_guard:
         refresher = _refresher
+        # Forced stop: signal under the same guard a registration+start uses, so a concurrent
+        # registration cannot land between the signal and the join and be left on a worker this
+        # stop then kills (D42).
+        if refresher is not None:
+            refresher.request_stop()
     if refresher is not None:
-        refresher.stop(timeout)
+        refresher.wait_stopped(timeout)
         with _refresher_guard:
             if _refresher is refresher and not refresher.running and not _owner_tokens:
                 _refresher = None
