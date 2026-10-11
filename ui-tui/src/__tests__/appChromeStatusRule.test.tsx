@@ -8,7 +8,7 @@ import {
   quotaStaleMarker,
   StatusRule
 } from '../components/appChrome.js'
-import type { AccountUsageGroup } from '../gatewayTypes.js'
+import type { AccountUsageAccount, AccountUsageGroup } from '../gatewayTypes.js'
 import { DEFAULT_THEME } from '../theme.js'
 
 type ReactNodeLike = React.ReactNode
@@ -189,6 +189,47 @@ const group = (overrides: Partial<AccountUsageGroup> & Pick<AccountUsageGroup, '
   ...overrides
 })
 
+const account = (
+  overrides: Partial<AccountUsageAccount> & Pick<AccountUsageAccount, 'fingerprint' | 'state'>
+): AccountUsageAccount => ({
+  label: null,
+  entry_id: null,
+  metered: false,
+  read_health: 'ok',
+  windows: [],
+  fetched_at: '2026-08-28T09:59:30Z',
+  age_s: null,
+  attempted_at: null,
+  last_error: null,
+  error_status: null,
+  backoff_until: null,
+  recovery_at: null,
+  ...overrides
+})
+
+// The user's live shape: two Go accounts, the pool serving from bbbbbb (fresh), aaaaaa overflow.
+const goAccounts: AccountUsageAccount[] = [
+  account({
+    fingerprint: 'sha256:bbbbbb',
+    label: 'OPENCODE_GO_API_KEY_2',
+    state: 'covered',
+    windows: [
+      { period: '5h', used_percent: 1, reset_at: null },
+      { period: '7d', used_percent: 0, reset_at: null }
+    ]
+  }),
+  account({
+    fingerprint: 'sha256:aaaaaa',
+    label: 'OPENCODE_GO_API_KEY',
+    metered: true,
+    state: 'overflow',
+    windows: [
+      { period: '7d', used_percent: 100, reset_at: null },
+      { period: 'monthly', used_percent: 86, reset_at: null }
+    ]
+  })
+]
+
 const ALL_GROUPS: AccountUsageGroup[] = [
   group({
     provider: 'anthropic',
@@ -220,6 +261,43 @@ const joined = (segments: QuotaSegment[]) => segments.map(s => s.text).join('')
 // Render the CapacityRow element (second StatusRule child) to its flat text.
 const capacityText = (row: React.ReactElement<any>) =>
   textContent((row.type as (p: unknown) => ReactNodeLike)(row.props))
+
+// Flat text of every StatusRule child row. The capacity rows are components whose own children are
+// computed inside, so textContent alone would miss them — render each to its flat text.
+const renderRows = (element: React.ReactElement<any>) =>
+  React.Children.toArray(element.props.children)
+    .map(row => {
+      const r = row as React.ReactElement<any>
+      const isCapacity = r.props && ('quotaGroups' in r.props || 'rightQuota' in r.props)
+
+      return isCapacity ? textContent((r.type as (p: unknown) => ReactNodeLike)(r.props)) : textContent(r)
+    })
+    .join('\n')
+
+// The user's live narrow-terminal shape: the active provider is the 2-account Go pool, its
+// sub-rows too wide for the terminal, so the row must fall back to the SERVING account's own
+// numbers. Each call site that supplies that fallback is pinned by a test below.
+const goPool = (overrides: Partial<AccountUsageGroup> = {}) =>
+  group({
+    provider: 'opencode-go',
+    age_s: 0,
+    accounts: goAccounts,
+    multi_account: true,
+    serving: 'sha256:bbbbbb',
+    strategy: 'quota_aware',
+    ...overrides
+  })
+
+const anthropic = (overrides: Partial<AccountUsageGroup> = {}) =>
+  group({
+    provider: 'anthropic',
+    age_s: 0,
+    windows: [
+      { period: '5h', used_percent: 17, reset_at: null },
+      { period: '7d', used_percent: 40, reset_at: null }
+    ],
+    ...overrides
+  })
 
 describe('StatusRule multi-provider quota (account_usage_all)', () => {
   it('uses body text for every provider label while retaining active-provider emphasis', () => {
@@ -473,6 +551,175 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     expect(secondary).not.toMatch(/^─ other {2}/)
     expect(primary.indexOf('│')).toBe(secondary.indexOf('│'))
     expect(primary.indexOf('50k/200k')).toBe(secondary.indexOf('codex'))
+
+    vi.useRealTimers()
+  })
+
+  it('keeps a non-active multi-account group numbers on its row when its sub-rows are not rendered', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // The active provider is anthropic, so go (multi-account) sits on the OTHER row and its
+    // per-account sub-rows are NOT rendered. The row must carry the SERVING account's own
+    // numbers (bbbbbb: 5h 1%, 7d 0%) - never a sum, never the other account's, never invisible.
+    const element = StatusRule({
+      ...baseProps,
+      cols: 160,
+      usage: {
+        ...baseProps.usage,
+        account_usage_active: 'anthropic',
+        account_usage_all: [
+          group({
+            provider: 'anthropic',
+            windows: [{ period: '5h', used_percent: 17, reset_at: '2026-08-28T13:00:00Z' }]
+          }),
+          group({
+            provider: 'opencode-go',
+            accounts: goAccounts,
+            multi_account: true,
+            serving: 'sha256:bbbbbb',
+            strategy: 'quota_aware'
+          })
+        ]
+      }
+    })
+
+    const rows = React.Children.toArray(element.props.children)
+    const other = capacityText(rows[2] as React.ReactElement<any>)
+
+    expect(other).toContain('5h 1%')
+    expect(other).toContain('7d 0%')
+    expect(other).not.toContain('100%')
+    expect(other).not.toContain('86%')
+    expect(other).not.toContain('2 accounts')
+    expect(other).not.toContain('err')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the serving account numbers whenever the non-table row fits them (narrow sweep)', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // The aligned table's right column is far narrower than the full row. At cols 39-50 it can
+    // only "fit" by dropping go's windows, yet the non-table row fits `◷ 0m go 5h 1%·7d 0%` at
+    // the same width - so the numbers must never go invisible.
+    const missing: number[] = []
+
+    for (const cols of [38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50]) {
+      const text = renderRows(
+        StatusRule({
+          ...baseProps,
+          cols,
+          usage: {
+            ...baseProps.usage,
+            account_usage_all: [goPool(), anthropic()],
+            account_usage_active: 'opencode-go',
+            account_usage_active_account: 'sha256:bbbbbb'
+          }
+        })
+      )
+
+      if (!text.includes('5h 1%') || !text.includes('7d 0%') || text.includes('2 accounts')) {
+        missing.push(cols)
+      }
+    }
+
+    expect(missing).toEqual([])
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the serving account numbers on the all-providers row when no provider is active', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // account_usage_active=null: the primary CapacityRow renders every group and NO sub-rows are
+    // rendered, so its subRowsBudget must be 0 to force the serving account's numbers inline.
+    const rows = React.Children.toArray(
+      StatusRule({
+        ...baseProps,
+        cols: 160,
+        usage: {
+          ...baseProps.usage,
+          account_usage_all: [goPool(), anthropic()],
+          account_usage_active: null
+        }
+      }).props.children
+    )
+
+    const primary = capacityText(rows[1] as React.ReactElement<any>)
+
+    expect(primary).toContain('5h 1%')
+    expect(primary).toContain('7d 0%')
+    expect(primary).not.toContain('2 accounts')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the third-place pool numbers in the table right column', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // active anthropic, codex 2nd, go pool 3rd: go lands in the table's right column via
+    // remainingOtherQuota, whose subRowsBudget must be 0 (no sub-rows for other providers).
+    const rows = React.Children.toArray(
+      StatusRule({
+        ...baseProps,
+        cols: 160,
+        usage: {
+          ...baseProps.usage,
+          account_usage_all: [
+            anthropic(),
+            group({
+              provider: 'openai-codex',
+              age_s: 0,
+              windows: [
+                { period: '5h', used_percent: 5, reset_at: null },
+                { period: '7d', used_percent: 9, reset_at: null }
+              ]
+            }),
+            goPool()
+          ],
+          account_usage_active: 'anthropic'
+        }
+      }).props.children
+    )
+
+    const secondary = capacityText(rows[2] as React.ReactElement<any>)
+
+    expect(secondary).toContain('5h 1%')
+    expect(secondary).toContain('7d 0%')
+    expect(secondary).not.toContain('2 accounts')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the pool numbers on the non-table secondary row when there is no context', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    // No ctx: no table, so the secondary CapacityRow renders the pool with subRowsBudget 0 (no
+    // sub-rows for other providers) and must carry the serving account's numbers.
+    const rows = React.Children.toArray(
+      StatusRule({
+        ...baseProps,
+        cols: 160,
+        usage: {
+          ...baseProps.usage,
+          context_max: null,
+          total: 0,
+          account_usage_all: [anthropic(), goPool()],
+          account_usage_active: 'anthropic'
+        }
+      }).props.children
+    )
+
+    const secondary = capacityText(rows[2] as React.ReactElement<any>)
+
+    expect(secondary).toContain('5h 1%')
+    expect(secondary).toContain('7d 0%')
+    expect(secondary).not.toContain('2 accounts')
 
     vi.useRealTimers()
   })
