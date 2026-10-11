@@ -799,3 +799,36 @@ def provider_quota_multi_account(provider: str) -> bool:
     except Exception:
         logger.debug("quota multi-account check failed for %s", name, exc_info=True)
     return False
+
+
+def live_entry_fingerprints(entries) -> Optional[set]:
+    """Fingerprints of the pool entries a reader may still paint as the profile's own accounts.
+
+    A DEAD entry or one without a token is a credential the profile cannot bill with, so the identity
+    that produced its stored facts does not own them (D41). None when nothing is live: there is then
+    no evidence any stored account is retired, and callers filtering a view keep what they have
+    instead of blanking the panel.
+    """
+    from agent.credential_pool import STATUS_DEAD
+    live = set()
+    for entry in entries or []:
+        if getattr(entry, "last_status", None) == STATUS_DEAD or not getattr(entry, "access_token", None):
+            continue
+        fingerprint = (getattr(entry, "extra", None) or {}).get("secret_fingerprint")
+        if fingerprint:
+            live.add(str(fingerprint))
+    return live or None
+
+
+def provider_quota_live_fingerprints(provider: str) -> Optional[set]:
+    """``provider``'s live credential fingerprints from the local pool (no network).
+
+    A read-only resolution load: membership must not bootstrap the quota state that asked for it.
+    """
+    name = str(provider or "").strip().lower()
+    try:
+        from agent.credential_pool import load_pool
+        return live_entry_fingerprints(load_pool(name, quota_bootstrap=False).entries())
+    except Exception:
+        logger.debug("quota live-fingerprint check failed for %s", name, exc_info=True)
+        return None

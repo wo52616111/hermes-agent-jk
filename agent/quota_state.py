@@ -357,6 +357,11 @@ def default_multi_account(provider: str) -> bool:
     return provider_quota_multi_account(provider)
 
 
+def default_live_fingerprints(provider: str) -> Optional[set]:
+    from agent.account_usage import provider_quota_live_fingerprints
+    return provider_quota_live_fingerprints(provider)
+
+
 MULTI_ACCOUNT_ERROR = {"status": 0, "message": "multi_account"}
 
 
@@ -532,7 +537,7 @@ def _route_hint(groups: list[dict], now: datetime) -> Optional[str]:
     return None
 
 
-_connected_cache: dict[str, tuple[float, tuple, bool, bool]] = {}
+_connected_cache: dict[str, tuple[float, tuple, bool, bool, Optional[set]]] = {}
 CONNECTED_CACHE_S = 300
 
 
@@ -578,13 +583,14 @@ def _credential_signature() -> tuple:
     return tuple(out)
 
 
-def _credential_state(provider: str, now: datetime) -> tuple[bool, bool]:
-    """``(connected, multi_account)`` from local credentials (no network), cached because the status
-    bar reads every turn; a credential file change invalidates it, the time bound caps it."""
+def _credential_state(provider: str, now: datetime) -> tuple[bool, bool, Optional[set]]:
+    """``(connected, multi_account, live_fingerprints)`` from local credentials (no network), cached
+    because the status bar reads every turn; a credential file change invalidates it, the time bound
+    caps it. ``live_fingerprints`` is None when the store cannot say which accounts are retired (D41)."""
     sig = _credential_signature()
     hit = _connected_cache.get(provider)
     if hit and hit[1] == sig and now.timestamp() - hit[0] < CONNECTED_CACHE_S:
-        return hit[2], hit[3]
+        return hit[2], hit[3], hit[4]
     try:
         connected = bool(default_connected(provider))
     except Exception:  # noqa: BLE001
@@ -595,8 +601,14 @@ def _credential_state(provider: str, now: datetime) -> tuple[bool, bool]:
     except Exception:  # noqa: BLE001
         logger.debug("quota multi-account check failed for %s", provider, exc_info=True)
         multi = False
-    _connected_cache[provider] = (now.timestamp(), sig, connected, multi)
-    return connected, multi
+    live = None
+    if connected:
+        try:
+            live = default_live_fingerprints(provider)
+        except Exception:  # noqa: BLE001
+            logger.debug("quota live-fingerprint check failed for %s", provider, exc_info=True)
+    _connected_cache[provider] = (now.timestamp(), sig, connected, multi, live)
+    return connected, multi, live
 
 
 def _connected_cached(provider: str, now: datetime) -> bool:
@@ -677,7 +689,8 @@ def account_snapshot(provider: str, now: Optional[datetime] = None):
             return None
         windows = tuple(
             AccountUsageWindow(label=str(_PERIOD_LABEL.get(w.get("period"), w.get("period")) or ""),
-                               used_percent=w.get("used_percent"), reset_at=_dt(w.get("reset_at")))
+                               used_percent=w.get("used_percent"), reset_at=_dt(w.get("reset_at")),
+                               status=w.get("status"))
             for w in windows_raw)
         return AccountUsageSnapshot(provider=name, source="quota_state", fetched_at=now, windows=windows)
     try:
@@ -696,7 +709,7 @@ def account_snapshot(provider: str, now: Optional[datetime] = None):
         return None
     windows = tuple(
         AccountUsageWindow(label=_PERIOD_LABEL.get(w["period"], w["period"]), used_percent=w.get("used_percent"),
-                           reset_at=_dt(w.get("reset_at")))
+                           reset_at=_dt(w.get("reset_at")), status=w.get("status"))
         for w in snap["windows"])
     err = snap.get("error")
     details = (f"Last fetch failed ({err.get('status')}); showing data from {snap.get('fetched_at')}",) if err else ()
@@ -1175,6 +1188,20 @@ def _pick_serving(facts_list: list, by_fp: dict, stored_serving, pool, now: date
     return (covered or order or [None])[0]
 
 
+def _live_accounts(provider: str, pool, now: datetime) -> Optional[set]:
+    """The fingerprints the READING profile currently bills for ``provider`` (D41): the live pool when
+    the read carries one - every selection path does - else the local credential state, which the
+    status bar already reads each turn. None means "cannot tell which accounts are retired"."""
+    if pool is not None:
+        try:
+            from agent.account_usage import live_entry_fingerprints
+            return live_entry_fingerprints(pool.entries())
+        except Exception:  # noqa: BLE001
+            logger.debug("quota live accounts from the pool failed for %s", provider, exc_info=True)
+            return None
+    return _credential_state(provider, now)[2]
+
+
 def _compose_view(
     profile: str, provider: str, stored: Optional[dict], *, now: datetime,
     policy: Optional[dict], pool,
@@ -1182,6 +1209,9 @@ def _compose_view(
     with _profile_bound(profile):
         policy = _policy_for(provider, policy)
         strategy = _STRATEGY_QUOTA_AWARE if _is_quota_aware(provider) else "fill_first"
+        # Resolved under the reading profile's own home: a cross-profile read must filter by THAT
+        # profile's live credentials, not the ambient process's (D23/D33/D41).
+        live = _live_accounts(provider, pool, now)
     accounts: list[dict] = []
     states = {"covered": 0, "overflow": 0, "exhausted": 0}
     by_fp: dict = {}
@@ -1194,6 +1224,12 @@ def _compose_view(
         # it. A record tagged solely with other profiles is theirs, not this profile's; an
         # untagged record has no known owner and stays visible.
         if entries and not mine:
+            continue
+        # D41: ownership is current, not historical. A fingerprint missing from the live pool is a
+        # credential that was rotated away - its facts stay on disk for whoever else owns them, but
+        # this profile must not paint them as its own usage, and the view file cannot grow with every
+        # key the profile has ever used.
+        if live is not None and fp is not None and fp not in live:
             continue
         scoped.append(facts)
         windows = [_rolled(w, now) for w in facts.get("windows") or []]

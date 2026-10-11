@@ -30,6 +30,20 @@ class _Owner:
     """A bare, hashable, weak-referenceable stand-in for a live quota_aware pool."""
 
 
+class _PoolWith:
+    """A stand-in pool whose entries report the given live credential fingerprints."""
+
+    def __init__(self, *fingerprints):
+        self._entries = [
+            SimpleNamespace(last_status="ok", access_token="t",
+                            extra={"secret_fingerprint": fingerprint})
+            for fingerprint in fingerprints
+        ]
+
+    def entries(self):
+        return list(self._entries)
+
+
 def _live_refresher_threads():
     return [t for t in threading.enumerate() if t.name == "quota-refresher" and t.is_alive()]
 
@@ -42,6 +56,9 @@ def qdir(tmp_path, monkeypatch):
     monkeypatch.setattr(qs, "default_fetcher", lambda provider: pytest.fail("real fetch"))
     monkeypatch.setattr(qs, "default_connected", lambda provider: True)
     monkeypatch.setattr(qs, "default_multi_account", lambda provider: False)
+    # No credential store here, so nothing can say which accounts are retired: the view keeps every
+    # stored account. Membership filtering is exercised where a real pool exists.
+    monkeypatch.setattr(qs, "default_live_fingerprints", lambda provider: None)
     monkeypatch.setattr(qs, "credential_files", lambda: [])
     qs._last_touch.clear()
     qs._connected_cache.clear()
@@ -95,9 +112,7 @@ def test_status_rate_limited_wins_over_low_percent():
 
 def test_status_wins_over_percent_both_directions():
     future = NOW + timedelta(days=3)
-    # status says ok even though percent >= 100 -> not spent
     assert st.window_spent({"used_percent": 100.0, "status": "ok", "reset_at": future.isoformat()}, NOW) is False
-    # no status -> percent is the fallback
     assert st.window_spent({"used_percent": 100.0, "status": None, "reset_at": future.isoformat()}, NOW) is True
     assert st.window_spent({"used_percent": 42.0, "status": None, "reset_at": future.isoformat()}, NOW) is False
 
@@ -146,7 +161,6 @@ def test_refusal_recording_rule_both_directions(qdir):
     """D28/D47 unified: recorded when the account was ``overflow`` at refusal time; a refusal
     while ``covered`` records nothing."""
     _store(fp="sha256:aaa", windows=[_facts_window(percent=100.0)])
-    # covered -> nothing recorded
     assert qs.record_refusal(PROVIDER, "sha256:aaa", state="covered",
                              reset_at=NOW + timedelta(hours=1), now=NOW) is False
     assert qs.read_account_facts(PROVIDER, "sha256:aaa")["metered_exhausted_until"] is None
@@ -1097,6 +1111,108 @@ def test_public_legacy_readers_never_serve_a_quota_aware_snapshot(qdir, tmp_path
     assert qs.account_snapshot(PROVIDER, now=NOW) is None
     raw = qs._read_raw(PROVIDER)
     assert raw is not None and raw["windows"][0]["used_percent"] == 99.0
+
+
+def test_the_public_snapshot_keeps_the_provider_status_marker(qdir, quota_aware):
+    """Criterion 5: the provider's own window marker survives the snapshot boundary. A window the
+    provider calls ``rate-limited`` is spent whatever its percentage says, so dropping the field on
+    the way out would turn an exhausted account into a percentage-only, still-available one (D2/D25)."""
+    _store(fp="sha256:live", windows=[_facts_window(period="7d", percent=91.0, status="rate-limited")])
+    snapshot = qs.account_snapshot(PROVIDER, now=NOW)
+    assert snapshot is not None
+    assert snapshot.windows[0].status == "rate-limited"
+    assert st.window_spent(snapshot.windows[0], NOW) is True
+
+
+def test_the_legacy_snapshot_keeps_the_provider_status_marker(qdir, tmp_path, monkeypatch):
+    """The same boundary on the fill_first path: one serializer serves both, so the marker must not
+    survive a quota_aware read and vanish on the legacy one."""
+    monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
+    home = tmp_path / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    (home / "config.yaml").write_text("credential_pool_strategies:\n  opencode-go: fill_first\n")
+
+    def fetch(provider):
+        return AccountUsageSnapshot(
+            provider=provider, source="test", fetched_at=NOW,
+            windows=(AccountUsageWindow(label="Current week", used_percent=91.0,
+                                        reset_at=NOW + timedelta(days=3), status="rate-limited"),))
+
+    assert qs.refresh(PROVIDER, fetcher=fetch, now=NOW) == "fetched"
+    snapshot = qs.account_snapshot(PROVIDER, now=NOW)
+    assert snapshot is not None
+    assert snapshot.windows[0].status == "rate-limited"
+    assert st.window_spent(snapshot.windows[0], NOW) is True
+
+
+def test_a_read_without_a_pool_filters_by_the_profiles_live_credentials(qdir, quota_aware, monkeypatch):
+    """The TUI/CLI read path carries no pool, so membership comes from the reading profile's own
+    credential state; a rotated-away account is not painted there either (D41)."""
+    monkeypatch.setattr(qs, "default_live_fingerprints", lambda provider: {"sha256:live"})
+    _store(fp="sha256:live", windows=[_facts_window(percent=10.0)])
+    _store(fp="sha256:retired", windows=[_facts_window(percent=90.0)],
+           entries=[{"profile": "default", "entry_id": "old", "label": "OLD"}])
+    view = qs.read_view("default", PROVIDER, now=NOW)
+    assert view is not None
+    assert [a["fingerprint"] for a in view["accounts"]] == ["sha256:live"]
+    assert view["serving"] == "sha256:live"
+
+
+def test_the_view_keeps_only_the_accounts_the_pool_currently_holds(qdir, quota_aware):
+    """D41/criterion 10: rotating the credential leaves the retired account in the shared facts (it
+    is stored history, not this profile's to delete) but out of the view, and the view file stops
+    growing with the number of keys the profile has ever used."""
+    written = None
+    sizes = []
+    for index in range(12):
+        live = f"sha256:live-{index:02d}"
+        _store(fp=live, windows=[_facts_window(percent=12.0)])
+        qs.update_view("default", PROVIDER, now=NOW, pool=_PoolWith(live))
+        written = qs._read_view_raw("default", PROVIDER)
+        sizes.append(qs.view_path("default", PROVIDER).stat().st_size)
+
+    assert written is not None
+    assert [a["fingerprint"] for a in written["accounts"]] == ["sha256:live-11"]
+    assert sizes[-1] == sizes[0]
+    assert len(qs.list_account_facts(PROVIDER)) == 12
+    view = qs.read_view("default", PROVIDER, now=NOW, pool=_PoolWith("sha256:live-11"))
+    assert view is not None and view["serving"] == "sha256:live-11"
+
+
+def test_the_live_fingerprint_hook_resolves_without_bootstrapping(qdir, monkeypatch):
+    """Resolving membership must not re-enter the quota bootstrap that asked for it: the pool is
+    loaded read-only, and a store that cannot be read says "unknown" rather than raising (D42)."""
+    import agent.credential_pool as credential_pool
+    from agent.account_usage import provider_quota_live_fingerprints
+    seen = []
+
+    def fake_load_pool(provider, *, quota_bootstrap=True):
+        seen.append((provider, quota_bootstrap))
+        return _PoolWith("sha256:live")
+
+    monkeypatch.setattr(credential_pool, "load_pool", fake_load_pool)
+    assert provider_quota_live_fingerprints(" OPENCODE-GO ") == {"sha256:live"}
+    assert seen == [(PROVIDER, False)]
+
+    def boom(provider, **kwargs):
+        raise RuntimeError("no store")
+
+    monkeypatch.setattr(credential_pool, "load_pool", boom)
+    assert provider_quota_live_fingerprints(PROVIDER) is None
+
+
+def test_live_entry_fingerprints_skips_retired_credentials():
+    from types import SimpleNamespace
+    from agent.account_usage import live_entry_fingerprints
+    from agent.credential_pool import STATUS_DEAD
+    entries = [
+        SimpleNamespace(last_status="ok", access_token="t", extra={"secret_fingerprint": "sha256:live"}),
+        SimpleNamespace(last_status=STATUS_DEAD, access_token="t", extra={"secret_fingerprint": "sha256:dead"}),
+        SimpleNamespace(last_status="ok", access_token=None, extra={"secret_fingerprint": "sha256:empty"}),
+    ]
+    assert live_entry_fingerprints(entries) == {"sha256:live"}
+    assert live_entry_fingerprints([]) is None
 
 
 def test_refresher_carries_enqueue_profile_scope(qdir, tmp_path, monkeypatch):
