@@ -1285,7 +1285,14 @@ export function StatusRule({
     : null
 
   const primaryQuotaGroups = activeQuotaGroup ? [activeQuotaGroup] : quotaGroups
+
+  // The active pool's own account keeps the row next to ctx; its REMAINING accounts follow every
+  // other provider, so the second row stays "other providers first" and a pool never pushes an
+  // unrelated provider out of its place.
+  // Wire order comes from the backend (LABEL_ORDER), so the pool's remaining accounts sit wherever
+  // the provider itself sits - nothing here reorders them.
   const secondaryQuotaGroups = activeQuotaGroup ? quotaGroups.filter(group => group !== activeQuotaGroup) : []
+
   const quotaWindows = quotaGroups.length ? [] : (usage.account_usage?.windows ?? [])
   const capacityPrefix = ctxLabel ? `─ ctx ${ctxLabel}` : quotaGroups.length || quotaWindows.length ? '─ usage' : ''
   const showCapacityRow = !!capacityPrefix
@@ -1322,8 +1329,35 @@ export function StatusRule({
 
   const remainingOtherQuota = layoutQuotaGroups(secondaryQuotaGroups.slice(1), tableRightBudget, t, now, null, false)
 
+  // The table's right column is far narrower than a single full-width row, and which group happens
+  // to lead the left column changes that budget. So the table may engage only when it shows at
+  // least the window numbers the single-row fallback would show at the same terminal width:
+  // otherwise the fallback keeps the session's numbers visible and the aligned look must lose (D43).
+  const fallbackActiveQuota = activeQuotaGroup
+    ? layoutQuotaGroups(
+        [activeQuotaGroup],
+        // The fallback row pays its own prefix: the context label, the bar it can still fit and
+        // the separator. Probing at the raw width is therefore an upper bound of that budget, so
+        // this guard can only close the table - never miss a case where it would hide numbers.
+        capacityWidth,
+        t,
+        now,
+        activeQuotaGroup.provider,
+        false
+      )
+    : []
+
+  // Each rendered window contributes exactly one `NN%` piece; the state badge and the freshness
+  // marker carry none, so counting them counts the windows.
+  const windowNumbers = (segments: QuotaSegment[]) =>
+    segments.reduce((sum, segment) => sum + (segment.text.match(/%/g)?.length ?? 0), 0)
+
   const useCapacityTable =
-    !!ctxLabel && !!activeQuotaGroup && otherLeadCell.length > 0 && activeTableQuota.length > 0
+    !!ctxLabel &&
+    !!activeQuotaGroup &&
+    otherLeadCell.length > 0 &&
+    activeTableQuota.length > 0 &&
+    windowNumbers(activeTableQuota) >= windowNumbers(fallbackActiveQuota)
 
   const handleSessionCountClick = (event: { stopImmediatePropagation?: () => void }) => {
     event.stopImmediatePropagation?.()
