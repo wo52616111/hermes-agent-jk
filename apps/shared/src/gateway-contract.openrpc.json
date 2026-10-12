@@ -5046,6 +5046,18 @@
             "default": null,
             "title": "Multi Account"
           },
+          "multi_account_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Multi Account Count"
+          },
           "accounts": {
             "anyOf": [
               {
