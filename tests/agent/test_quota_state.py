@@ -366,6 +366,40 @@ def test_cli_json_marks_multi_account_as_unknown(qdir, monkeypatch, capsys):
     assert subs["openai-codex"]["windows"] and not subs["openai-codex"].get("multi_account")
 
 
+def test_multi_account_pool_stores_and_exposes_the_live_account_count(qdir, monkeypatch):
+    """The legacy pool snapshot names its live account count so the footer can say `·2 accounts`
+    instead of collapsing to a literal `err`; it still carries NO account's own windows."""
+    monkeypatch.setattr(qs, "default_multi_account", lambda p: p == "anthropic")
+    monkeypatch.setattr(qs, "default_live_fingerprints",
+                        lambda p: ({"sha256:a", "sha256:b"}, {"sha256:b"}))
+    qs._connected_cache.clear()
+    assert qs.refresh("anthropic", fetcher=_Fetcher()) == "multi_account"
+
+    stored = qs.read_snapshot("anthropic")
+    assert stored["multi_account"] is True
+    assert stored["multi_account_count"] == 2
+    assert stored["windows"] == []
+
+    group = next(g for g in qs.status_groups() if g["provider"] == "anthropic")
+    assert group["multi_account"] is True
+    assert group["multi_account_count"] == 2
+    # Never one account's windows dressed up as the subscription's.
+    assert group["windows"] == []
+
+
+def test_multi_account_pool_without_live_fingerprints_omits_the_count(qdir, monkeypatch):
+    """When the credential store cannot name the pool's accounts the count is omitted, never guessed."""
+    monkeypatch.setattr(qs, "default_multi_account", lambda p: p == "anthropic")
+    monkeypatch.setattr(qs, "default_live_fingerprints", lambda p: None)
+    qs._connected_cache.clear()
+    assert qs.refresh("anthropic", fetcher=_Fetcher()) == "multi_account"
+
+    assert "multi_account_count" not in qs.read_snapshot("anthropic")
+
+    group = next(g for g in qs.status_groups() if g["provider"] == "anthropic")
+    assert group["multi_account_count"] is None
+
+
 def test_connected_cache_follows_credential_file_changes(qdir, monkeypatch, tmp_path):
     import os
     qs.refresh("anthropic", fetcher=_Fetcher())

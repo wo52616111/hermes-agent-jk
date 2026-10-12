@@ -607,6 +607,7 @@ export interface AccountUsageGroup {
   windows: AccountUsageGroupWindow[]
   hint?: string | null
   multi_account?: boolean | null
+  multi_account_count?: number | null
   accounts?: AccountUsageAccount[] | null
   serving?: string | null
   serving_since?: string | null

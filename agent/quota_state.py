@@ -377,10 +377,16 @@ def _store_multi_account(provider: str, now: datetime) -> None:
     prev = _read_raw(provider) or {}
     if prev.get("multi_account") and not prev.get("windows"):
         return
-    _write_json_atomic(_path("snapshot", provider, ".json"), {
+    payload = {
         "provider": provider, "fetched_at": None, "attempted_at": now.isoformat(),
         "windows": [], "error": None, "backoff_until": None, "multi_account": True,
-    })
+    }
+    # Name the pool's size from the live credentials so the status bar can say `·2 accounts`
+    # instead of a bare unknown. Omit the field entirely when the store cannot name the accounts.
+    live = default_live_fingerprints(provider)
+    if live is not None:
+        payload["multi_account_count"] = len(live[0])
+    _write_json_atomic(_path("snapshot", provider, ".json"), payload)
 
 
 def refresh(provider: str, *, fetcher: Optional[Callable] = None,
@@ -629,9 +635,12 @@ def status_groups(now: Optional[datetime] = None,
         if not is_connected(provider):
             continue
         if is_multi(provider):
+            snap = _read_raw(provider) or {}
+            count = snap.get("multi_account_count")
             groups.append({"provider": provider, "fetched_at": None, "age_s": None,
                            "error": dict(MULTI_ACCOUNT_ERROR), "backoff_until": None,
-                           "windows": [], "hint": None, "multi_account": True})
+                           "windows": [], "hint": None, "multi_account": True,
+                           "multi_account_count": count if isinstance(count, int) else None})
             continue
         if _is_quota_aware(provider):
             # D41: a quota_aware provider owns per-account facts/views. A legacy single-account

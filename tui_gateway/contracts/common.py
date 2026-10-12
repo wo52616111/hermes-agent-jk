@@ -101,6 +101,10 @@ class AccountUsageGroup(Result):
     windows: list[AccountUsageGroupWindow]
     hint: str | None = None
     multi_account: bool | None = None
+    # Live account count for a multi-account pool with no per-account view (legacy snapshot path);
+    # None when the credential store cannot name the pool's accounts. Lets the footer name the pool
+    # (`·2 accounts`) instead of collapsing it to a literal `err`.
+    multi_account_count: int | None = None
     accounts: list[AccountUsageAccount] | None = None
     serving: str | None = None
     serving_since: str | None = None
