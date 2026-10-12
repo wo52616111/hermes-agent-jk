@@ -555,13 +555,13 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     vi.useRealTimers()
   })
 
-  it('keeps a non-active multi-account group numbers on its row when its sub-rows are not rendered', () => {
+  it('expands a non-active multi-account pool into one row per account, each with its own numbers', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(NOW))
 
-    // The active provider is anthropic, so go (multi-account) sits on the OTHER row and its
-    // per-account sub-rows are NOT rendered. The row must carry the SERVING account's own
-    // numbers (bbbbbb: 5h 1%, 7d 0%) - never a sum, never the other account's, never invisible.
+    // The active provider is anthropic, so go (multi-account) sits on the OTHER row. It expands
+    // into go:1 (bbbbbb: 5h 1%, 7d 0%) and go:2 (aaaaaa: 7d 100%, mo 86%) - one row per account,
+    // each with its OWN numbers, never a collapsed `2 accounts` line and never `err`.
     const element = StatusRule({
       ...baseProps,
       cols: 160,
@@ -587,11 +587,14 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     const rows = React.Children.toArray(element.props.children)
     const other = capacityText(rows[2] as React.ReactElement<any>)
 
+    expect(other).toContain('go:1')
     expect(other).toContain('5h 1%')
     expect(other).toContain('7d 0%')
-    expect(other).not.toContain('100%')
-    expect(other).not.toContain('86%')
+    expect(other).toContain('go:2')
+    expect(other).toContain('7d 100%')
+    expect(other).toContain('mo 86%')
     expect(other).not.toContain('2 accounts')
+    expect(other).not.toContain('multi')
     expect(other).not.toContain('err')
 
     vi.useRealTimers()
