@@ -1,0 +1,333 @@
+import React from 'react'
+import { describe, expect, it, vi } from 'vitest'
+
+import { expandAccountGroups, layoutQuotaGroups, type QuotaSegment, StatusRule } from '../components/appChrome.js'
+import type { AccountUsageAccount, AccountUsageGroup } from '../gatewayTypes.js'
+import { DEFAULT_THEME } from '../theme.js'
+
+type ReactNodeLike = React.ReactNode
+
+const textContent = (node: ReactNodeLike): string => {
+  if (node === null || node === undefined || typeof node === 'boolean') {
+    return ''
+  }
+
+  if (typeof node === 'string' || typeof node === 'number') {
+    return String(node)
+  }
+
+  if (Array.isArray(node)) {
+    return node.map(textContent).join('')
+  }
+
+  if (React.isValidElement(node)) {
+    return textContent(node.props.children)
+  }
+
+  return ''
+}
+
+const joined = (segments: QuotaSegment[]) => segments.map(s => s.text).join('')
+
+const NOW = Date.parse('2026-08-28T10:00:00Z')
+
+const account = (
+  overrides: Partial<AccountUsageAccount> & Pick<AccountUsageAccount, 'fingerprint' | 'state'>
+): AccountUsageAccount => ({
+  label: 'OPENCODE_GO_API_KEY',
+  entry_id: null,
+  metered: false,
+  read_health: 'ok',
+  windows: [],
+  fetched_at: '2026-08-28T09:59:30Z',
+  age_s: null,
+  attempted_at: null,
+  last_error: null,
+  error_status: null,
+  backoff_until: null,
+  recovery_at: null,
+  ...overrides
+})
+
+// The user's live shape: two Go accounts, one fresh/covered and one weekly-spent/metered.
+const goGroup = (overrides: Partial<AccountUsageGroup> = {}): AccountUsageGroup => ({
+  provider: 'opencode-go',
+  fetched_at: '2026-08-28T09:59:30Z',
+  age_s: null,
+  error: null,
+  backoff_until: null,
+  windows: [],
+  hint: null,
+  multi_account: true,
+  serving: 'sha256:bbbbbb',
+  serving_since: '2026-08-28T09:00:00Z',
+  states: { covered: 1, overflow: 1, exhausted: 0 },
+  strategy: 'quota_aware',
+  accounts: [
+    account({
+      fingerprint: 'sha256:bbbbbb',
+      label: 'OPENCODE_GO_API_KEY_2',
+      state: 'covered',
+      windows: [
+        { period: '5h', used_percent: 1, reset_at: null },
+        { period: '7d', used_percent: 0, reset_at: null }
+      ]
+    }),
+    account({
+      fingerprint: 'sha256:aaaaaa',
+      label: 'OPENCODE_GO_API_KEY',
+      state: 'overflow',
+      metered: true,
+      windows: [
+        { period: '7d', used_percent: 100, reset_at: null },
+        { period: 'monthly', used_percent: 86, reset_at: null }
+      ]
+    })
+  ],
+  ...overrides
+})
+
+const baseProps = {
+  bgCount: 0,
+  busy: false,
+  cols: 200,
+  cwdLabel: '~/repo',
+  liveSessionCount: 0,
+  model: 'opus-4.8',
+  sessionStartedAt: null,
+  status: 'ready',
+  statusColor: DEFAULT_THEME.color.ok,
+  t: DEFAULT_THEME,
+  turnStartedAt: null,
+  usage: {
+    calls: 1,
+    input: 1,
+    output: 1,
+    context_max: 200_000,
+    context_percent: 25,
+    context_used: 50_000,
+    total: 50_000
+  },
+  voiceLabel: ''
+}
+
+// Flat text of every StatusRule child row. The capacity rows are components whose own children are
+// computed inside, so textContent alone would miss them — render each to its flat text.
+const renderRows = (element: React.ReactElement<any>) =>
+  React.Children.toArray(element.props.children)
+    .map(row => {
+      const r = row as React.ReactElement<any>
+      const isCapacity = r.props && ('quotaGroups' in r.props || 'rightQuota' in r.props)
+
+      return isCapacity ? textContent((r.type as (p: unknown) => ReactNodeLike)(r.props)) : textContent(r)
+    })
+    .join('\n')
+
+// `ctxLabel`-free usage keeps the primary/secondary rows as plain `CapacityRow`s (a capacity
+// Table appears only with a context cell), so each row's `quotaGroups` prop stays inspectable.
+const noCtxUsage = (overrides: Record<string, unknown> = {}) => ({
+  account_usage_all: [goGroup()],
+  account_usage_active: 'opencode-go',
+  account_usage_active_account: 'sha256:bbbbbb',
+  calls: 0,
+  context_max: null,
+  context_percent: null,
+  context_used: null,
+  input: 0,
+  output: 0,
+  total: 0,
+  ...overrides
+})
+
+describe('expandAccountGroups', () => {
+  it('splits a multi-account group into one labelled row per account, in wire (priority) order', () => {
+    const rows = expandAccountGroups([goGroup()])
+
+    expect(rows).toHaveLength(2)
+    expect(rows.map(row => row.quotaLabel)).toEqual(['go:1', 'go:2'])
+    expect(rows.map(row => row.provider)).toEqual(['opencode-go', 'opencode-go'])
+    expect(rows.every(row => row.accounts?.length === 0)).toBe(true)
+    expect(rows.every(row => row.multi_account === null)).toBe(true)
+    // Each synthetic row carries THAT account's own windows, never a blend.
+    expect(rows[0]!.windows).toEqual([
+      { period: '5h', used_percent: 1, reset_at: null },
+      { period: '7d', used_percent: 0, reset_at: null }
+    ])
+    expect(rows[1]!.windows).toEqual([
+      { period: '7d', used_percent: 100, reset_at: null },
+      { period: 'monthly', used_percent: 86, reset_at: null }
+    ])
+    expect(rows[0]!.quotaAccount?.fingerprint).toBe('sha256:bbbbbb')
+    expect(rows[1]!.quotaAccount?.fingerprint).toBe('sha256:aaaaaa')
+  })
+
+  it('passes a 0- or 1-account group through unchanged, adding or dropping nothing', () => {
+    const single = goGroup({ accounts: [goGroup().accounts![0]!] })
+    const legacy: AccountUsageGroup = { ...goGroup(), provider: 'openai-codex', accounts: undefined }
+
+    const out = expandAccountGroups([single, legacy])
+
+    expect(out).toHaveLength(2)
+    expect(out[0]).toBe(single)
+    expect(out[1]).toBe(legacy)
+  })
+})
+
+describe('layoutQuotaGroups expanded rows', () => {
+  it('renders one labelled row per account with its own numbers and badge, never `·multi`', () => {
+    const rows = expandAccountGroups([goGroup()])
+    const text = joined(layoutQuotaGroups(rows, 9999, DEFAULT_THEME, NOW, 'opencode-go'))
+
+    expect(text).toContain('go:1')
+    expect(text).toContain('go:2')
+    expect(text).toContain('5h 1%')
+    expect(text).toContain('7d 0%')
+    expect(text).toContain('7d 100%')
+    expect(text).toContain('mo 86%')
+    // The overflow account keeps its own badge; the offset account says nothing.
+    expect(text).toContain('overflow(metered)')
+    expect(text).not.toContain('multi')
+    expect(text).not.toContain('2 accounts')
+    expect(text).not.toContain('err')
+  })
+
+  it('marks the account the row speaks for, never the provider line, for a read error', () => {
+    const rows = expandAccountGroups([
+      goGroup({
+        accounts: [
+          account({
+            fingerprint: 'sha256:aaaaaa',
+            state: 'covered',
+            read_health: 'error',
+            error_status: 429,
+            windows: [{ period: '7d', used_percent: 40, reset_at: null }]
+          })
+        ]
+      })
+    ])
+
+    expect(joined(layoutQuotaGroups(rows, 9999, DEFAULT_THEME, NOW))).toContain('·429')
+  })
+
+  it('drops later account rows before earlier ones when entries must go', () => {
+    const three = goGroup({
+      accounts: [
+        account({ fingerprint: 'sha256:bbbbbb', state: 'covered', windows: [{ period: '7d', used_percent: 1, reset_at: null }] }),
+        account({ fingerprint: 'sha256:aaaaaa', state: 'overflow', windows: [{ period: '7d', used_percent: 100, reset_at: null }] }),
+        account({ fingerprint: 'sha256:cccccc', state: 'exhausted', windows: [{ period: '7d', used_percent: 100, reset_at: null }] })
+      ]
+    })
+
+    const secondary = expandAccountGroups([three]).slice(1) // go:2, go:3
+    const budget = joined(layoutQuotaGroups([secondary[0]!], 9999, DEFAULT_THEME, NOW)).length
+    const text = joined(layoutQuotaGroups(secondary, budget, DEFAULT_THEME, NOW))
+
+    expect(text).toContain('go:2')
+    expect(text).not.toContain('go:3')
+  })
+})
+
+describe('legacy multi-account fallback', () => {
+  it('renders `·N accounts` for a pool with no per-account data, never `·multi` or `err`', () => {
+    const legacy: AccountUsageGroup = {
+      ...goGroup(),
+      provider: 'opencode-go',
+      accounts: undefined,
+      multi_account: true,
+      multi_account_count: 2,
+      fetched_at: null
+    }
+
+    const text = joined(layoutQuotaGroups([legacy], 9999, DEFAULT_THEME, NOW, 'opencode-go'))
+
+    expect(text).toContain('·2 accounts')
+    expect(text).not.toContain('·multi')
+    expect(text).not.toContain('err')
+  })
+
+  it('omits the marker when the pool size is unknown', () => {
+    const legacy: AccountUsageGroup = {
+      ...goGroup(),
+      accounts: undefined,
+      multi_account: true,
+      multi_account_count: null,
+      windows: [{ period: '7d', used_percent: 5, reset_at: null }]
+    }
+
+    const text = joined(layoutQuotaGroups([legacy], 9999, DEFAULT_THEME, NOW, 'opencode-go'))
+
+    expect(text).toContain('7d 5%')
+    expect(text).not.toContain('accounts')
+    expect(text).not.toContain('·multi')
+  })
+})
+
+describe('StatusRule expanded multi-account pool', () => {
+  it('renders one row per account, each with its own numbers, and no `multi` / sub-rows', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const element = StatusRule({ ...baseProps, cols: 200, usage: { ...baseProps.usage, ...noCtxUsage() } })
+    const rendered = renderRows(element)
+
+    expect(rendered).toContain('go:1')
+    expect(rendered).toContain('go:2')
+    expect(rendered).toContain('5h 1%')
+    expect(rendered).toContain('7d 0%')
+    expect(rendered).toContain('7d 100%')
+    expect(rendered).toContain('mo 86%')
+    expect(rendered).not.toContain('multi')
+    expect(rendered).not.toContain('err')
+    // No per-account sub-rows: status + primary capacity + secondary capacity only.
+    expect(React.Children.toArray(element.props.children)).toHaveLength(3)
+
+    vi.useRealTimers()
+  })
+
+  it('gives the session-active account the prime cell and keeps the other at its wire position', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const element = StatusRule({
+      ...baseProps,
+      cols: 200,
+      usage: { ...baseProps.usage, ...noCtxUsage({ account_usage_active_account: 'sha256:aaaaaa' }) }
+    })
+
+    const rows = React.Children.toArray(element.props.children)
+    const prime = rows[1] as React.ReactElement<any>
+    const secondary = rows[2] as React.ReactElement<any>
+
+    const labels = (row: React.ReactElement<any>) =>
+      row.props.quotaGroups.map((group: AccountUsageGroup & { quotaLabel?: string }) => group.quotaLabel)
+
+    // aaaaaa is accounts[1] → `go:2` is the session's account; it owns the prime cell.
+    expect(labels(prime)).toEqual(['go:2'])
+    // The other account keeps its wire position below.
+    expect(labels(secondary)).toEqual(['go:1'])
+
+    vi.useRealTimers()
+  })
+
+  it('never drops the session account while later entries drop from the end', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const anthropic = { ...goGroup(), provider: 'anthropic', accounts: undefined, multi_account: null, windows: [{ period: '7d', used_percent: 3, reset_at: null }] }
+
+    const element = StatusRule({
+      ...baseProps,
+      cols: 28,
+      usage: { ...baseProps.usage, ...noCtxUsage({ account_usage_all: [goGroup(), anthropic] }) }
+    })
+
+    const rendered = renderRows(element)
+
+    // The session's own account row survives at the narrow width even as the trailing entries go.
+    expect(rendered).toContain('go:1')
+    expect(rendered).toContain('5h 1%')
+    expect(rendered).not.toContain('go:2')
+
+    vi.useRealTimers()
+  })
+})
