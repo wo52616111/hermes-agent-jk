@@ -362,6 +362,14 @@ def default_live_fingerprints(provider: str) -> Optional[tuple[set, set]]:
     return provider_quota_live_fingerprints(provider)
 
 
+def default_account_count(provider: str) -> Optional[int]:
+    """The live account count for ``provider`` (None when the store cannot name the accounts), using
+    the SAME account rule as ``default_multi_account`` so the footer's `·N accounts` can never
+    disagree with the multi-account decision (D50)."""
+    from agent.account_usage import provider_quota_account_count
+    return provider_quota_account_count(provider)
+
+
 MULTI_ACCOUNT_ERROR = {"status": 0, "message": "multi_account"}
 
 
@@ -375,17 +383,21 @@ def _store_multi_account(provider: str, now: datetime) -> None:
     if _is_quota_aware(provider):
         return
     prev = _read_raw(provider) or {}
+    # Name the pool's size from the live credentials so the status bar can say `·2 accounts`
+    # instead of a bare unknown. The count is RECOMPUTED every refresh and an existing snapshot is
+    # repaired in place: a pool that grew, shrank, or was first stored by an older build (no count)
+    # must not keep a stale or missing size (D50). An unreadable store leaves a known count alone
+    # rather than clobbering it with an omission.
+    count = default_account_count(provider)
     if prev.get("multi_account") and not prev.get("windows"):
-        return
+        if count is None or prev.get("multi_account_count") == count:
+            return
     payload = {
         "provider": provider, "fetched_at": None, "attempted_at": now.isoformat(),
         "windows": [], "error": None, "backoff_until": None, "multi_account": True,
     }
-    # Name the pool's size from the live credentials so the status bar can say `·2 accounts`
-    # instead of a bare unknown. Omit the field entirely when the store cannot name the accounts.
-    live = default_live_fingerprints(provider)
-    if live is not None:
-        payload["multi_account_count"] = len(live[0])
+    if count is not None:
+        payload["multi_account_count"] = count
     _write_json_atomic(_path("snapshot", provider, ".json"), payload)
 
 
@@ -543,7 +555,7 @@ def _route_hint(groups: list[dict], now: datetime) -> Optional[str]:
     return None
 
 
-_connected_cache: dict[str, tuple[float, tuple, bool, bool, Optional[tuple[set, set]]]] = {}
+_connected_cache: dict[str, tuple[float, tuple, bool, bool, Optional[tuple[set, set]], Optional[int]]] = {}
 CONNECTED_CACHE_S = 300
 
 
@@ -589,15 +601,17 @@ def _credential_signature() -> tuple:
     return tuple(out)
 
 
-def _credential_state(provider: str, now: datetime) -> tuple[bool, bool, Optional[tuple[set, set]]]:
-    """``(connected, multi_account, live_fingerprints)`` from local credentials (no network), cached
-    because the status bar reads every turn; a credential file change invalidates it, the time bound
-    caps it. ``live_fingerprints`` is ``(every identity, the ones a current secret names)``, and None
-    when the store cannot say which accounts are retired (D41)."""
+def _credential_state(provider: str, now: datetime) -> tuple[bool, bool, Optional[tuple[set, set]], Optional[int]]:
+    """``(connected, multi_account, live_fingerprints, account_count)`` from local credentials (no
+    network), cached because the status bar reads every turn; a credential file change invalidates
+    it, the time bound caps it. ``live_fingerprints`` is ``(every identity, the ones a current
+    secret names)``, and None when the store cannot say which accounts are retired (D41).
+    ``account_count`` is the live account count (D50), None when the store cannot name the accounts.
+    """
     sig = _credential_signature()
     hit = _connected_cache.get(provider)
     if hit and hit[1] == sig and now.timestamp() - hit[0] < CONNECTED_CACHE_S:
-        return hit[2], hit[3], hit[4]
+        return hit[2], hit[3], hit[4], hit[5]
     try:
         connected = bool(default_connected(provider))
     except Exception:  # noqa: BLE001
@@ -609,13 +623,18 @@ def _credential_state(provider: str, now: datetime) -> tuple[bool, bool, Optiona
         logger.debug("quota multi-account check failed for %s", provider, exc_info=True)
         multi = False
     live = None
+    count = None
     if connected:
         try:
             live = default_live_fingerprints(provider)
         except Exception:  # noqa: BLE001
             logger.debug("quota live-fingerprint check failed for %s", provider, exc_info=True)
-    _connected_cache[provider] = (now.timestamp(), sig, connected, multi, live)
-    return connected, multi, live
+        try:
+            count = default_account_count(provider)
+        except Exception:  # noqa: BLE001
+            logger.debug("quota account-count check failed for %s", provider, exc_info=True)
+    _connected_cache[provider] = (now.timestamp(), sig, connected, multi, live, count)
+    return connected, multi, live, count
 
 
 def _connected_cached(provider: str, now: datetime) -> bool:
@@ -636,11 +655,17 @@ def status_groups(now: Optional[datetime] = None,
             continue
         if is_multi(provider):
             snap = _read_raw(provider) or {}
-            count = snap.get("multi_account_count")
+            # Name the pool from the LIVE credentials at read time, so a pool that grew or shrank
+            # since the snapshot was last written is named correctly; a snapshot from an older build
+            # (or a store that cannot be read now) falls back to the stored count (D50).
+            count = _credential_state(provider, now)[3]
+            if count is None:
+                stored = snap.get("multi_account_count")
+                count = stored if isinstance(stored, int) else None
             groups.append({"provider": provider, "fetched_at": None, "age_s": None,
                            "error": dict(MULTI_ACCOUNT_ERROR), "backoff_until": None,
                            "windows": [], "hint": None, "multi_account": True,
-                           "multi_account_count": count if isinstance(count, int) else None})
+                           "multi_account_count": count})
             continue
         if _is_quota_aware(provider):
             # D41: a quota_aware provider owns per-account facts/views. A legacy single-account

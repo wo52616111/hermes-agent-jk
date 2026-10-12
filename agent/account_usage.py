@@ -780,9 +780,15 @@ def provider_quota_connected(provider: str) -> bool:
     return False
 
 
-def provider_quota_multi_account(provider: str) -> bool:
-    """True when the credential pool for ``provider`` holds more than one live account: its usage
-    endpoint would report one account's quota, not the subscription's (PD-4)."""
+def provider_quota_account_identities(provider: str) -> Optional[set]:
+    """One identity per LIVE account in ``provider``'s credential pool, or None when the pool cannot
+    be read.
+
+    The dedup key — ``principal or access_token`` over the non-dead, secret-bearing entries — is the
+    account rule the pool itself serves, so the multi-account boolean and the footer's account count
+    cannot drift. The persisted ``secret_fingerprint`` is deliberately NOT a key here: after a
+    rotation an entry answers to both its stored fingerprint and the fingerprint of its current
+    secret, so counting identities would inflate two accounts into four (D41/D50)."""
     name = str(provider or "").strip().lower()
     try:
         from agent.credential_pool import STATUS_DEAD, _codex_principal_identity, load_pool
@@ -795,10 +801,25 @@ def provider_quota_multi_account(provider: str) -> bool:
                 continue
             principal = _codex_principal_identity(entry.access_token) if name == "openai-codex" else None
             identities.add(principal or entry.access_token)
-        return len(identities) > 1
+        return identities
     except Exception:
-        logger.debug("quota multi-account check failed for %s", name, exc_info=True)
-    return False
+        logger.debug("quota account-identity check failed for %s", name, exc_info=True)
+        return None
+
+
+def provider_quota_multi_account(provider: str) -> bool:
+    """True when the credential pool for ``provider`` holds more than one live account: its usage
+    endpoint would report one account's quota, not the subscription's (PD-4)."""
+    identities = provider_quota_account_identities(provider)
+    return identities is not None and len(identities) > 1
+
+
+def provider_quota_account_count(provider: str) -> Optional[int]:
+    """The number of live accounts in ``provider``'s credential pool, or None when the pool cannot
+    be read — the SAME account rule ``provider_quota_multi_account`` counts, never the number of
+    fingerprint aliases a rotation leaves behind (D50)."""
+    identities = provider_quota_account_identities(provider)
+    return len(identities) if identities is not None else None
 
 
 def live_entry_identities(entries) -> Optional[tuple[set, set]]:

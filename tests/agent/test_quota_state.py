@@ -370,8 +370,7 @@ def test_multi_account_pool_stores_and_exposes_the_live_account_count(qdir, monk
     """The legacy pool snapshot names its live account count so the footer can say `·2 accounts`
     instead of collapsing to a literal `err`; it still carries NO account's own windows."""
     monkeypatch.setattr(qs, "default_multi_account", lambda p: p == "anthropic")
-    monkeypatch.setattr(qs, "default_live_fingerprints",
-                        lambda p: ({"sha256:a", "sha256:b"}, {"sha256:b"}))
+    monkeypatch.setattr(qs, "default_account_count", lambda p: 2)
     qs._connected_cache.clear()
     assert qs.refresh("anthropic", fetcher=_Fetcher()) == "multi_account"
 
@@ -387,10 +386,72 @@ def test_multi_account_pool_stores_and_exposes_the_live_account_count(qdir, monk
     assert group["windows"] == []
 
 
-def test_multi_account_pool_without_live_fingerprints_omits_the_count(qdir, monkeypatch):
+def test_multi_account_pool_repairs_a_snapshot_written_without_a_count(qdir, monkeypatch):
+    """A snapshot an older build stored (multi_account, no count) must not stay `None` forever: a
+    refresh repairs it in place and status_groups names the live count (D50)."""
+    qs._write_json_atomic(qs._path("snapshot", "anthropic", ".json"), {
+        "provider": "anthropic", "fetched_at": None, "attempted_at": NOW.isoformat(),
+        "windows": [], "error": None, "backoff_until": None, "multi_account": True,
+    })
+    monkeypatch.setattr(qs, "default_multi_account", lambda p: p == "anthropic")
+    monkeypatch.setattr(qs, "default_account_count", lambda p: 2)
+    qs._connected_cache.clear()
+
+    assert qs.refresh("anthropic") == "multi_account"
+    assert qs.read_snapshot("anthropic")["multi_account_count"] == 2
+
+    group = next(g for g in qs.status_groups() if g["provider"] == "anthropic")
+    assert group["multi_account_count"] == 2
+
+
+def test_multi_account_pool_count_follows_the_live_membership(qdir, monkeypatch):
+    """When the pool grows or shrinks the stored and exposed count must follow, not freeze at the
+    first write (D50)."""
+    monkeypatch.setattr(qs, "default_multi_account", lambda p: p == "anthropic")
+    counts = {"n": 2}
+    monkeypatch.setattr(qs, "default_account_count", lambda p: counts["n"])
+    qs._connected_cache.clear()
+
+    assert qs.refresh("anthropic") == "multi_account"
+    assert qs.read_snapshot("anthropic")["multi_account_count"] == 2
+
+    counts["n"] = 3
+    qs._connected_cache.clear()
+    assert qs.refresh("anthropic") == "multi_account"
+    assert qs.read_snapshot("anthropic")["multi_account_count"] == 3
+    assert next(g for g in qs.status_groups() if g["provider"] == "anthropic")["multi_account_count"] == 3
+
+
+def test_multi_account_count_is_the_account_count_not_the_fingerprint_count(qdir, monkeypatch):
+    """Two pooled entries rotated onto new secrets each still answer to their stored fingerprint, so
+    `live_entry_identities` names 4 identities while the pool holds 2 accounts. The footer must say
+    `·2 accounts`, never the inflated `·4 accounts` (D50)."""
+    from types import SimpleNamespace
+    import agent.credential_pool as cp
+    from agent.account_usage import live_entry_identities, provider_quota_multi_account
+
+    entries = [
+        SimpleNamespace(access_token="rotated-a", last_status="ok", refresh_token="r", source="manual",
+                        extra={"secret_fingerprint": "sha256:old-a"}, provider="anthropic"),
+        SimpleNamespace(access_token="rotated-b", last_status="ok", refresh_token="r", source="manual",
+                        extra={"secret_fingerprint": "sha256:old-b"}, provider="anthropic"),
+    ]
+    monkeypatch.setattr(cp, "load_pool", lambda name: SimpleNamespace(entries=lambda: entries))
+    monkeypatch.setattr(qs, "default_multi_account", provider_quota_multi_account)
+    qs._connected_cache.clear()
+
+    # The identity count the OLD code used is 4 (stored + current fingerprint per entry)...
+    assert len(live_entry_identities(entries)[0]) == 4
+    # ...but the pool holds two accounts, so that is what is stored and shown.
+    assert qs.refresh("anthropic") == "multi_account"
+    assert qs.read_snapshot("anthropic")["multi_account_count"] == 2
+    assert next(g for g in qs.status_groups() if g["provider"] == "anthropic")["multi_account_count"] == 2
+
+
+def test_multi_account_pool_without_a_live_count_omits_the_count(qdir, monkeypatch):
     """When the credential store cannot name the pool's accounts the count is omitted, never guessed."""
     monkeypatch.setattr(qs, "default_multi_account", lambda p: p == "anthropic")
-    monkeypatch.setattr(qs, "default_live_fingerprints", lambda p: None)
+    monkeypatch.setattr(qs, "default_account_count", lambda p: None)
     qs._connected_cache.clear()
     assert qs.refresh("anthropic", fetcher=_Fetcher()) == "multi_account"
 
