@@ -173,6 +173,82 @@ describe('expandAccountGroups', () => {
   })
 })
 
+// A plain single-account provider, for the wire-order sweep below.
+const otherGroup = (provider: string, pct: number): AccountUsageGroup => ({
+  provider,
+  fetched_at: '2026-08-28T09:59:30Z',
+  age_s: 60,
+  error: null,
+  backoff_until: null,
+  windows: [{ period: '7d', used_percent: pct, reset_at: null }],
+  hint: null,
+  multi_account: null,
+  serving: null,
+  serving_since: null,
+  states: null,
+  strategy: null,
+  accounts: []
+})
+
+// The wire order is LABEL_ORDER (anthropic, openai-codex, opencode-go): the pool sits last and its
+// accounts expand in place there. The aligned table's right column is far narrower than a single
+// full-width row, so the table must only engage while it still shows every window number that row
+// would - otherwise the session's own account loses one (the real order hid its `5h` at 56 cols).
+describe('aligned table keeps the serving account windows (real wire order)', () => {
+  it('shows all three windows of the session account from 46 columns up', () => {
+    const pool = goGroup({
+      accounts: [
+        account({
+          fingerprint: 'sha256:bbbbbb',
+          label: 'OPENCODE_GO_API_KEY_2',
+          state: 'covered',
+          windows: [
+            { period: '5h', used_percent: 11, reset_at: null },
+            { period: '7d', used_percent: 4, reset_at: null },
+            { period: 'monthly', used_percent: 18, reset_at: null }
+          ]
+        }),
+        account({
+          fingerprint: 'sha256:aaaaaa',
+          label: 'OPENCODE_GO_API_KEY',
+          state: 'overflow',
+          metered: true,
+          windows: [
+            { period: '5h', used_percent: 2, reset_at: null },
+            { period: '7d', used_percent: 0, reset_at: null },
+            { period: 'monthly', used_percent: 87, reset_at: null }
+          ]
+        })
+      ]
+    })
+
+    const missing: number[] = []
+
+    for (let cols = 46; cols <= 170; cols++) {
+      const text = renderRows(
+        StatusRule({
+          ...baseProps,
+          cols,
+          usage: {
+            ...baseProps.usage,
+            account_usage_all: [otherGroup('anthropic', 40), otherGroup('openai-codex', 42), pool],
+            account_usage_active: 'opencode-go',
+            account_usage_active_account: 'sha256:bbbbbb'
+          }
+        } as any)
+      )
+
+      const ctxRow = text.split('\n').find(row => row.includes('go:1')) ?? ''
+
+      if (!(ctxRow.includes('5h 11%') && ctxRow.includes('7d 4%') && ctxRow.includes('mo 18%'))) {
+        missing.push(cols)
+      }
+    }
+
+    expect(missing).toEqual([])
+  })
+})
+
 describe('layoutQuotaGroups expanded rows', () => {
   it('renders one labelled row per account with its own numbers and badge, never `·multi`', () => {
     const rows = expandAccountGroups([goGroup()])
@@ -439,5 +515,70 @@ describe('session account survives a narrow terminal', () => {
     expect(rendered).not.toContain('multi')
 
     vi.useRealTimers()
+  })
+})
+
+// A provider with all three windows, for the secondary-row fidelity check below.
+const threeWindows = (provider: string, a: number, b: number, c: number): AccountUsageGroup => ({
+  ...otherGroup(provider, a),
+  windows: [
+    { period: '5h', used_percent: a, reset_at: null },
+    { period: '7d', used_percent: b, reset_at: null },
+    { period: 'monthly', used_percent: c, reset_at: null }
+  ]
+})
+
+describe('closing the aligned table keeps the secondary windows', () => {
+  it('accepts the secondary 5h loss to keep the session account windows', () => {
+    const pool = goGroup({
+      accounts: [
+        account({
+          fingerprint: 'sha256:bbbbbb',
+          label: 'OPENCODE_GO_API_KEY_2',
+          state: 'covered',
+          windows: [
+            { period: '5h', used_percent: 11, reset_at: null },
+            { period: '7d', used_percent: 4, reset_at: null },
+            { period: 'monthly', used_percent: 18, reset_at: null }
+          ]
+        }),
+        account({
+          fingerprint: 'sha256:aaaaaa',
+          label: 'OPENCODE_GO_API_KEY',
+          state: 'overflow',
+          metered: true,
+          windows: [
+            { period: '5h', used_percent: 2, reset_at: null },
+            { period: '7d', used_percent: 0, reset_at: null },
+            { period: 'monthly', used_percent: 87, reset_at: null }
+          ]
+        })
+      ]
+    })
+
+    const text = renderRows(
+      StatusRule({
+        ...baseProps,
+        cols: 60,
+        usage: {
+          ...baseProps.usage,
+          account_usage_all: [
+            threeWindows('anthropic', 40, 41, 42),
+            threeWindows('openai-codex', 42, 43, 44),
+            pool
+          ],
+          account_usage_active: 'opencode-go',
+          account_usage_active_account: 'sha256:bbbbbb'
+        }
+      } as any)
+    )
+
+    // The accepted trade at this width: the session's own account keeps every window (the aligned
+    // table would have hidden `5h 11%`), while the secondary row degrades under the signed policy
+    // - it drops the providers' 5h windows, not the providers - so both stay visible.
+    expect(text).toContain('5h 11%')
+    expect(text).toContain('A\\ 7d 41%')
+    expect(text).toContain('codex 7d 43%')
+    expect(text).not.toContain('5h 40%') // the trade: the secondary 5h is what pays for it
   })
 })
