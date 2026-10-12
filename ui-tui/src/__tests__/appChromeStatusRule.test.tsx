@@ -637,8 +637,8 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(NOW))
 
-    // account_usage_active=null: the primary CapacityRow renders every group and NO sub-rows are
-    // rendered, so its subRowsBudget must be 0 to force the serving account's numbers inline.
+    // account_usage_active=null: the primary CapacityRow renders every group with no per-account
+    // sub-rows, so it must carry the serving account's numbers inline.
     const rows = React.Children.toArray(
       StatusRule({
         ...baseProps,
@@ -665,7 +665,7 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     vi.setSystemTime(new Date(NOW))
 
     // active anthropic, codex 2nd, go pool 3rd: go lands in the table's right column via
-    // remainingOtherQuota, whose subRowsBudget must be 0 (no sub-rows for other providers).
+    // remainingOtherQuota, which must carry its own numbers.
     const rows = React.Children.toArray(
       StatusRule({
         ...baseProps,
@@ -702,8 +702,8 @@ describe('StatusRule multi-provider quota (account_usage_all)', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(NOW))
 
-    // No ctx: no table, so the secondary CapacityRow renders the pool with subRowsBudget 0 (no
-    // sub-rows for other providers) and must carry the serving account's numbers.
+    // No ctx: no table, so the secondary CapacityRow renders the pool directly and must carry the
+    // serving account's numbers.
     const rows = React.Children.toArray(
       StatusRule({
         ...baseProps,

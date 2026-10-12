@@ -540,6 +540,25 @@ interface QuotaPiece {
   text: string
 }
 
+/** Clip a string to at most `limit` display columns (wide glyphs counted as they render). */
+function clipToWidth(text: string, limit: number): string {
+  let out = ''
+  let used = 0
+
+  for (const char of text) {
+    const charWidth = stringWidth(char)
+
+    if (used + charWidth > limit) {
+      break
+    }
+
+    out += char
+    used += charWidth
+  }
+
+  return out
+}
+
 /**
  * Lay out the multi-provider quota groups into `budget` columns, degrading progressively until it
  * fits: drop reset countdowns, then the 5h windows, then whole groups from the end.
@@ -555,8 +574,10 @@ export function layoutQuotaGroups(
   t: Theme,
   now = Date.now(),
   activeProvider?: string | null,
-  leadingSeparator = true
+  leadingSeparator = true,
+  options: { allowNumberless?: boolean; protectActive?: boolean } = {}
 ) {
+  const { allowNumberless = false, protectActive = false } = options
   const activeIndex = groups.findIndex(group => group.provider === activeProvider)
 
   const keep = (count: number) =>
@@ -566,18 +587,22 @@ export function layoutQuotaGroups(
 
   type FiveHour = 'all' | 'active' | 'none'
 
-  const build = (count: number, resets: boolean, fiveHour: FiveHour) =>
+  // `details` carries the window percentages; `freshness` the `◷ age` marker. Both are dropped in
+  // the last-resort layouts so the row keeps its identity (`go:2`) and state badge instead of
+  // vanishing when a narrow terminal cannot fit its numbers.
+  const build = (count: number, resets: boolean, fiveHour: FiveHour, details = true, freshness = true) =>
     keep(count).map(({ gi, group }) => {
       const label = group.quotaLabel ?? QUOTA_PROVIDER_LABELS[group.provider] ?? group.provider
       const marker = quotaStaleMarker(group)
       const freshnessAgeS = typeof group.age_s === 'number' && Number.isFinite(group.age_s) ? group.age_s : null
       const hasFreshnessAge = freshnessAgeS !== null
+      const showFreshness = freshness && hasFreshnessAge
       const lineAccount = groupLineAccount(group)
 
       const separator = !leadingSeparator && gi === 0 ? '' : ' │'
 
       const pieces: QuotaPiece[] = [
-        ...(hasFreshnessAge
+        ...(showFreshness
           ? [{ freshnessAgeS, role: 'freshness' as const, text: `${separator} ${marker}` }]
           : separator
             ? [{ role: 'muted' as const, text: separator }]
@@ -587,7 +612,7 @@ export function layoutQuotaGroups(
 
       let windowCount = 0
 
-      for (const window of group.windows ?? []) {
+      for (const window of details ? group.windows ?? [] : []) {
         if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
           continue
         }
@@ -638,6 +663,53 @@ export function layoutQuotaGroups(
   const width = (layout: ReturnType<typeof build>) =>
     layout.reduce((sum, g) => sum + g.pieces.reduce((acc, p) => acc + stringWidth(p.text), 0), 0)
 
+  // Last resort: clip a layout to `limit` columns, keeping the leading pieces (separator, label,
+  // state badge) whole where they fit and trimming the one that overruns. Never returns [] for a
+  // positive budget, so a row that has an account to show never clears entirely.
+  const clipLayout = (layout: ReturnType<typeof build>, limit: number): ReturnType<typeof build> => {
+    if (limit <= 0) {
+      return []
+    }
+
+    const out: ReturnType<typeof build> = []
+    let left = limit
+
+    for (const { gi, pieces } of layout) {
+      const kept: QuotaPiece[] = []
+
+      for (const piece of pieces) {
+        if (left <= 0) {
+          break
+        }
+
+        const pieceWidth = stringWidth(piece.text)
+
+        if (pieceWidth <= left) {
+          kept.push(piece)
+          left -= pieceWidth
+
+          continue
+        }
+
+        const clipped = clipToWidth(piece.text, left)
+
+        if (clipped) {
+          kept.push({ ...piece, text: clipped })
+        }
+
+        left = 0
+
+        break
+      }
+
+      if (kept.length) {
+        out.push({ gi, pieces: kept })
+      }
+    }
+
+    return out
+  }
+
   const candidates: ReturnType<typeof build>[] = [
     build(groups.length, true, 'all'),
     build(groups.length, false, 'all')
@@ -651,7 +723,22 @@ export function layoutQuotaGroups(
     candidates.push(build(count, false, 'none'))
   }
 
-  const chosen = candidates.find(layout => width(layout) <= budget) ?? []
+  // The session's own account must never leave its row: when even the numberless windows are too
+  // wide, the row keeps that account's identity and state badge (`go:2 overflow(metered)`) instead
+  // of clearing — a live, metered account must not be hidden from the session using it (D43).
+  // A real footer row never clears: `allowNumberless` keeps each account's identity and badge by
+  // dropping its window percentages; `protectActive` is the last-resort clip for the row that owns
+  // the session's account. Both are off for the sub-budget probes that only decide whether the
+  // aligned table can be used.
+  if (allowNumberless) {
+    for (let count = groups.length; count >= 1; count--) {
+      candidates.push(build(count, false, 'none', false))
+    }
+  }
+
+  const chosen =
+    candidates.find(layout => width(layout) <= budget) ??
+    (protectActive && activeIndex >= 0 ? clipLayout(build(1, false, 'none', false, false), budget) : [])
 
   return chosen.flatMap(({ gi, pieces }) =>
     pieces.map((piece, pi): QuotaSegment => ({
@@ -754,7 +841,10 @@ function CapacityRow({
   }
 
   const quota: QuotaSegment[] = quotaGroups.length
-    ? layoutQuotaGroups(quotaGroups, budget, t, Date.now(), activeProvider)
+    ? layoutQuotaGroups(quotaGroups, budget, t, Date.now(), activeProvider, true, {
+        allowNumberless: true,
+        protectActive: !!activeProvider
+      })
     : quotaWindows.flatMap(window => {
         const used = Math.max(0, Math.min(100, Math.round(window.used_percent)))
         const reset = formatResetRemaining(window.reset_at)
