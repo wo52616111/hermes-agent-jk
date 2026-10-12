@@ -331,3 +331,113 @@ describe('StatusRule expanded multi-account pool', () => {
     vi.useRealTimers()
   })
 })
+
+// Cross-vendor review repro (b4-expand-accounts): two Go accounts, the session's own account is
+// `go:2` (fingerprint b) — the metered/overflow one with a fresh read and a 5h/7d/monthly window
+// set wide enough that no candidate layout fits a narrow terminal. The old ladder returned [] and
+// cleared the row, hiding the live metered account while the non-session `go:1` survived.
+const narrowAccount = (
+  fingerprint: string,
+  used: number,
+  state = 'covered',
+  metered = false
+): AccountUsageAccount =>
+  account({
+    fingerprint,
+    label: 'key',
+    metered,
+    read_health: 'ok',
+    windows: [
+      { period: '5h', used_percent: used, reset_at: null },
+      { period: '7d', used_percent: used, reset_at: null },
+      { period: 'monthly', used_percent: used, reset_at: null }
+    ],
+    fetched_at: '2026-10-12T03:00:00Z',
+    age_s: 0,
+    state
+  })
+
+const narrowPool = (): AccountUsageGroup => ({
+  provider: 'opencode-go',
+  fetched_at: null,
+  age_s: null,
+  error: null,
+  backoff_until: null,
+  windows: [],
+  hint: null,
+  multi_account: true,
+  serving: 'sha256:b',
+  accounts: [narrowAccount('sha256:a', 1), narrowAccount('sha256:b', 100, 'overflow', true)]
+})
+
+const narrowUsage = (activeAccount: string | null) =>
+  noCtxUsage({
+    account_usage_all: [narrowPool()],
+    account_usage_active: 'opencode-go',
+    account_usage_active_account: activeAccount
+  })
+
+const narrowFrames = (cols: number, activeAccount: string | null) =>
+  renderRows(StatusRule({ ...baseProps, cols, usage: { ...baseProps.usage, ...narrowUsage(activeAccount) } }))
+
+describe('session account survives a narrow terminal', () => {
+  it('keeps the session account and its badge at 38 columns without context', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const rendered = narrowFrames(38, 'sha256:b')
+
+    // The session's own account must not vanish while the non-session one survives.
+    expect(rendered).toContain('go:1')
+    expect(rendered).toContain('go:2')
+    expect(rendered).toContain('overflow(metered)')
+
+    vi.useRealTimers()
+  })
+
+  it('keeps the session account identity at every width from 28 to 160 columns', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const missing: number[] = []
+
+    for (let cols = 28; cols <= 160; cols++) {
+      if (!narrowFrames(cols, 'sha256:b').includes('go:2')) {
+        missing.push(cols)
+      }
+    }
+
+    expect(missing).toEqual([])
+
+    vi.useRealTimers()
+  })
+
+  it('shows both accounts for a matching, null, or mismatched session fingerprint', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    for (const fp of ['sha256:a', 'sha256:b', null, 'sha256:missing']) {
+      const rendered = narrowFrames(38, fp)
+
+      expect(rendered, `fingerprint ${fp}`).toContain('go:1')
+      expect(rendered, `fingerprint ${fp}`).toContain('go:2')
+    }
+
+    vi.useRealTimers()
+  })
+
+  it('never shows an account number on the wrong account row or `·N accounts` on an expanded pool', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+
+    const rendered = narrowFrames(38, 'sha256:b')
+
+    // go:1 is the covered account (all windows 1%); go:2 is the metered overflow account (100%).
+    expect(rendered).toContain('5h 1%')
+    expect(rendered).not.toContain('100%')
+    expect(rendered).not.toContain('accounts')
+    expect(rendered).not.toContain('multi')
+
+    vi.useRealTimers()
+  })
+})
