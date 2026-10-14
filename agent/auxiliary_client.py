@@ -1068,6 +1068,46 @@ def _pool_runtime_api_key(entry: Any) -> str:
     return str(key or "").strip()
 
 
+def _pool_rotated_api_key(pool_provider: Optional[str], failed_api_key: Optional[str]) -> str:
+    """The credential a pool-backed retry must use, or "" to keep the caller's key.
+
+    Pool rotation replaces a credential THE POOL OWNS; an explicit task/route key the pool does not
+    know about is left alone (the ladder rotated a pool entry, not the user's credential, and
+    swapping it would send a credential they never designated to the endpoint). Also returns ""
+    when the pool has nothing to offer.
+    """
+    if not pool_provider:
+        return ""
+    try:
+        pool = load_pool(_normalize_aux_provider(pool_provider))
+    except Exception as exc:  # noqa: BLE001 — recovery must not fail on a pool read
+        logger.debug("Auxiliary client: could not load pool for %s retry: %s", pool_provider, exc)
+        return ""
+    if pool is None or not getattr(pool, "has_credentials", lambda: False)():
+        return ""
+    failed = (failed_api_key or "").strip()
+    if failed:
+        try:
+            owns_failed = any(_pool_runtime_api_key(e) == failed for e in pool.entries())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Auxiliary client: could not inspect pool entries for %s: %s", pool_provider, exc)
+            return ""
+        if not owns_failed:
+            return ""
+    entry = None
+    # Prefer what the pool would actually serve now: the entry rotation landed on, then the
+    # quota order's head (a pool freshly loaded from disk has no in-memory "current"), and only
+    # then the raw availability head.
+    for getter in (lambda: pool.current(),
+                   lambda: pool.quota_choose(mode="session_start"),
+                   lambda: _peek_pool_entry(pool_provider, pool=pool)):
+        with contextlib.suppress(Exception):
+            entry = getter()
+        if entry is not None:
+            break
+    return _pool_runtime_api_key(entry) if entry is not None else ""
+
+
 def _pool_runtime_base_url(entry: Any, fallback: str = "") -> str:
     if entry is None:
         return str(fallback or "").strip().rstrip("/")
@@ -3683,18 +3723,16 @@ def _prepare_same_provider_retry(
     final_model: Optional[str], messages: list, temperature: Optional[float],
     max_tokens: Optional[int], tools: Optional[list], effective_timeout: float,
     effective_extra_body: dict, reasoning_config: Optional[dict], async_mode: bool,
-    extra_headers: Optional[Dict[str, str]] = None,
+    extra_headers: Optional[Dict[str, str]] = None, rotated_api_key: Optional[str] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Rebuild (client, request kwargs) for a same-provider retry after credential recovery."""
-    # The caller's ``resolved_api_key`` was captured BEFORE the recovery rotated the pool, so
-    # rebuilding with it re-sends the credential that just failed — the retry 402s again and the
-    # pool then blames (and benches) the healthy entry it had just rotated to. Whenever the
-    # provider is pool-backed, the pool's current entry is the authority for the retry key.
-    retry_api_key: str = resolved_api_key or ""
-    _pool_entry = _peek_pool_entry(_normalize_aux_provider(resolved_provider))
-    _pool_api_key = _pool_runtime_api_key(_pool_entry) if _pool_entry is not None else ""
-    if _pool_api_key:
-        retry_api_key = _pool_api_key
+    # ``resolved_api_key`` was captured BEFORE the recovery rotated the pool, so rebuilding with it
+    # re-sends the credential that just failed: the retry 402s again and the pool then blames (and
+    # benches) the healthy entry it had just rotated to. The rung that performed the rotation
+    # passes the credential the pool moved to (``rotated_api_key``); it is derived from the
+    # RECOVERED provider, which the route's own name may not know (an ``auto`` route inherits the
+    # session's provider, so re-deriving here would find no pool at all).
+    retry_api_key: str = (rotated_api_key or "").strip() or (resolved_api_key or "")
     if task == "vision":
         effective_provider, retry_client, retry_model = resolve_vision_provider_client(
             provider=resolved_provider, model=final_model, base_url=resolved_base_url,
@@ -7575,15 +7613,20 @@ def _ladder_credential_rungs(
         if _recover_provider_pool(pool_provider, recovery_err, failed_api_key=_client_api_key):
             logger.info("Auxiliary %s%s: recovered %s via credential-pool rotation after %s",
                         task or "call", tag, pool_provider, type(recovery_err).__name__)
+            # The credential the pool moved to. Without it the retry re-sends the key that just
+            # failed, which then gets blamed on the entry the rotation had just selected.
+            rotated_key = _pool_rotated_api_key(pool_provider, _client_api_key)
             try:
                 return (yield _LadderStep(
-                    "retry_same_provider", (resolved_provider, route.resolved_model))), None
+                    "retry_same_provider",
+                    (resolved_provider, route.resolved_model, rotated_key))), None
             except Exception as retry2_err:
                 # Rotated key also hit a wall: mark it now so concurrent processes skip it,
                 # then fall through to the provider fallback.
                 if (_is_payment_error(retry2_err) or _is_auth_error(retry2_err)
                         or _is_rate_limit_error(retry2_err)):
-                    _recover_provider_pool(pool_provider, retry2_err)
+                    _recover_provider_pool(
+                        pool_provider, retry2_err, failed_api_key=rotated_key or _client_api_key)
                     first_err = retry2_err
                 else:
                     raise
@@ -7915,8 +7958,11 @@ def _ladder_step_call(
     if step.kind == "call":
         return "call", step.args, dict(provider=req.resolved_provider, api_mode=req.resolved_api_mode)
     if step.kind == "retry_same_provider":
-        retry_provider, retry_model = step.args
-        return "retry", (), dict(retry_kwargs, resolved_provider=retry_provider, resolved_model=retry_model)
+        retry_provider, retry_model, *rest = step.args
+        kwargs = dict(retry_kwargs, resolved_provider=retry_provider, resolved_model=retry_model)
+        if rest and rest[0]:
+            kwargs["rotated_api_key"] = rest[0]
+        return "retry", (), kwargs
     return "fallback", step.args, candidate_kwargs
 
 
