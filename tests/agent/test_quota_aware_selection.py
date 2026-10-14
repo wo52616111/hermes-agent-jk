@@ -22,7 +22,8 @@ import pytest
 from agent import quota_aware_selection as qsel
 from agent import quota_aware_state as st
 from agent import quota_state as qs
-from agent.credential_pool import CredentialPool, PooledCredential
+from agent.credential_pool import (STATUS_DEAD, STATUS_EXHAUSTED, CredentialPool,
+                                    PooledCredential)
 
 # The pool-level entry points under test (select / _quota_states / acquire_lease) read the real
 # clock, so a frozen NOW makes every NOW-relative cooling deadline expire as wall time passes and
@@ -1050,3 +1051,99 @@ def test_revert_guard_filters_candidates_by_the_session_endpoint(qdir, quota_awa
     agent = _Agent(pool, "c", revert_id="r")
     _revert_credential_rotation(agent)
     assert agent.swaps == ["r"]                          # the cross-endpoint sibling did not cancel it
+
+
+# ============================================================================
+# Bench escape (D50): a billing bench must never hide an account with quota
+# ============================================================================
+
+
+def _bench(entry, *, code=402, status=STATUS_EXHAUSTED, seconds_ago=60, model=None):
+    """Stamp a live cooldown on *entry* as the failed-request path would."""
+    entry.last_status = status
+    entry.last_status_at = time.time() - seconds_ago
+    entry.last_error_code = code
+    if model is not None:
+        entry.model_cooldowns = {model: time.time() + 3600}
+    return entry
+
+
+def test_a_covered_account_survives_its_own_billing_bench(qdir, quota_aware):
+    """Regression: one (possibly mis-attributed) 402 benched a covered account for its whole TTL.
+
+    ``_available_entries`` dropped it from the candidate set, so ``select`` handed out the spent
+    sibling and every request 402'd with no way back -- exactly the "stuck on the exhausted
+    account" report. The quota view still called this account covered, so it must stay selectable.
+    """
+    _facts("sha256:aaa", [_win(percent=100.0)])   # A spent -> overflow
+    _facts("sha256:bbb", [_win(percent=5.0)])     # B has plan quota left
+    a = _entry("a", priority=0, fingerprint="sha256:aaa")
+    b = _bench(_entry("b", priority=1, fingerprint="sha256:bbb"))
+    pool = _pool([a, b])
+    chosen = pool.select()
+    assert chosen is not None and chosen.id == "b"
+
+
+def test_a_fully_benched_pool_still_serves_its_covered_account(qdir, quota_aware):
+    """Both accounts benched (the incident's state) -> the covered one is served, never None."""
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_bench(_entry("a", priority=0, fingerprint="sha256:aaa")),
+                  _bench(_entry("b", priority=1, fingerprint="sha256:bbb"))])
+    chosen = pool.select()
+    assert chosen is not None and chosen.id == "b"
+
+
+def test_a_benched_covered_account_beats_an_available_spent_one(qdir, quota_aware):
+    """D50 with both states live: coverage decides, not which sibling happens to be un-benched."""
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _bench(_entry("b", priority=1, fingerprint="sha256:bbb"))])
+    assert pool.quota_choose(current_id="a", mode="turn_boundary").id == "b"
+
+
+def test_the_bench_escape_never_re_admits_a_dead_credential(qdir, quota_aware):
+    """Only a *billing* bench is escapable: a revoked credential stays out of the pool."""
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_bench(_entry("b", fingerprint="sha256:bbb"), code=401, status=STATUS_DEAD)])
+    assert pool.select() is None
+
+
+def test_the_bench_escape_respects_a_model_scoped_cooldown(qdir, quota_aware):
+    """A 429 on one model is not a billing bench: the account stays out for that model."""
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    _facts("sha256:aaa", [_win(percent=5.0)])
+    b = _bench(_entry("b", priority=1, fingerprint="sha256:bbb"), code=429, model="glm-5",
+               seconds_ago=1)
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"), b])
+    assert pool.select(model="glm-5").id != "b"
+
+
+def test_the_bench_escape_leaves_an_unbenched_pool_untouched(qdir, quota_aware):
+    """No bench, no escape: ordinary selection still prefers the lower-priority covered account."""
+    _facts("sha256:aaa", [_win(percent=5.0)])
+    _facts("sha256:bbb", [_win(percent=90.0)])
+    pool = _pool([_entry("a", priority=0, fingerprint="sha256:aaa"),
+                  _entry("b", priority=1, fingerprint="sha256:bbb")])
+    assert pool.select().id == "a"
+
+
+def test_the_bench_escape_is_visible_to_has_available(qdir, quota_aware):
+    """``has_available``/``next_available_at`` gate ``select`` for callers like the restore path.
+
+    A False there sent them to the provider's static key even though the pool could serve the
+    covered account, so the escape must show up in both or the stall only half-disappears.
+    """
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_bench(_entry("a", priority=0, fingerprint="sha256:aaa")),
+                  _bench(_entry("b", priority=1, fingerprint="sha256:bbb"))])
+    assert pool.has_available() is True
+    assert pool.next_available_at() is None      # nothing to wait for: B can serve now
+    # Still honest when the only benched account has no quota left: nothing available.
+    _facts("sha256:bbb", [_win(percent=100.0)])
+    spent = _pool([_bench(_entry("b", fingerprint="sha256:bbb"))])
+    assert spent.has_available() is False
+    assert spent.select() is None
+    assert spent.next_available_at() is not None  # report the wait instead of pretending

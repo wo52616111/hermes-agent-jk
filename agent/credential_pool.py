@@ -1303,6 +1303,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             return None
         with self._lock:
             available, _pending = self._available_entries(clear_expired=True, refresh=False)
+            available = self._readmit_benched_covered(available)
         if endpoint is not None:
             available = [e for e in available if credential_pool_entry_serves_endpoint(e, endpoint)]
         return self._quota_pick(available, current_id, mode, now=now)
@@ -1315,7 +1316,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         """
         with self._lock:
             available, _pending = self._available_entries(clear_expired=True, refresh=False)
-        return available
+            return self._readmit_benched_covered(available)
 
     def order_entries(self, entries: List[PooledCredential], *,
                       now: Optional[datetime] = None) -> List[PooledCredential]:
@@ -1396,14 +1397,19 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             return bool(self._entries)
 
     def has_available(self, *, model: Optional[str] = None) -> bool:
-        """True if at least one entry is not currently in exhaustion cooldown.
+        """True if at least one entry can serve a request right now.
 
         ``_available_entries`` is not read-only (it prunes aged-out DEAD
         manual entries and persists), so it must run under ``self._lock``
         like every other caller or a probe can race a concurrent rotation.
+        Quota-aware pools also count a benched-but-covered account
+        (``_readmit_benched_covered``): callers gate ``select`` on this flag, so
+        returning False while a covered account exists sends them to the
+        provider's static key instead of the account that still has quota.
         """
         with self._lock:
             available, _pending = self._available_entries(model=model)
+            available = self._readmit_benched_covered(available, model=model)
             return bool(available)
 
     def next_available_at(self, *, model: Optional[str] = None) -> Optional[float]:
@@ -1416,6 +1422,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         """
         with self._lock:
             available, _pending = self._available_entries(model=model)
+            available = self._readmit_benched_covered(available, model=model)
             if available:
                 return None
             # Mirror _available_entries: a sole credential's transient throttle
@@ -2381,6 +2388,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False, model: Optional[str] = None,
+        include_billing_benched: bool = False,
     ) -> Tuple[List[PooledCredential], List[PooledCredential]]:
         """Return (available, pending_refresh) for entries not in cooldown.
 
@@ -2390,6 +2398,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         xai-oauth), which are returned as *pending_refresh* so the caller
         refreshes them outside the lock instead of stalling every pool
         consumer during cross-process flock acquisition + OAuth network I/O.
+        *include_billing_benched* keeps handing back a 402-benched entry *without* clearing its
+        bench, so a quota-aware caller can let the quota view decide (see
+        ``_readmit_benched_covered``); every other cooldown still hides it.
         """
         now = time.time()
         cleared_any = False
@@ -2437,6 +2448,10 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                     and now < exhausted_until
                     and not (clear_expired and self._codex_quota_restored_upstream(entry))
                 ):
+                    if include_billing_benched and entry.last_error_code == 402:
+                        # Keep the bench but still offer the entry: a billing 402 is one
+                        # request's verdict, not the account's quota state (D50).
+                        available.append(entry)
                     continue
                 if clear_expired:
                     entry = self._adopt(entry, persist=False, **_MARK_OK)
@@ -2462,6 +2477,36 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             self._persist(removed_ids=entries_to_prune)
         return available, pending_refresh
 
+    def _readmit_benched_covered(
+        self, available: List[PooledCredential], *, model: Optional[str] = None,
+    ) -> List[PooledCredential]:
+        """Re-admit 402-benched entries the quota view still calls covered (D50).
+
+        ``_available_entries`` hides a 402'd entry for its whole billing TTL (~1h), so a single
+        failure — possibly mis-attributed, e.g. an auxiliary retry that re-sent the key that had
+        already failed — removed a healthy account from the candidate set for an hour. The pool
+        then served (or the caller fell back to) the spent sibling and every request 402'd with
+        no way back. The bench stays on the record; only the ordering sees the account, and only
+        while its own quota windows still call it covered. Rotation keeps its own no-recovery
+        guard, so a genuine 402 on a covered account still surfaces the failure instead of
+        silently rotating to a spent sibling.
+        """
+        if not self.is_quota_aware():
+            return available
+        known = {entry.id for entry in available}
+        benched, _pending = self._available_entries(
+            clear_expired=False, refresh=False, model=model, include_billing_benched=True,
+        )
+        extra = [entry for entry in benched if entry.id not in known]
+        if not extra:
+            return available
+        from agent import quota_aware_selection as qsel
+        states = self._quota_states(extra, now=datetime.now(timezone.utc))
+        return available + [
+            entry for entry in extra
+            if getattr(states.get(entry.id), "state", None) == qsel.COVERED
+        ]
+
     def _log_no_available_entries(self) -> None:
         """Emit the empty-pool INFO line at most once per throttle window."""
         now = time.monotonic()
@@ -2480,6 +2525,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         not going to serve a request (a forced-refresh target lookup).
         """
         available, pending_refresh = self._available_entries(clear_expired=True, refresh=refresh, model=model)
+        available = self._readmit_benched_covered(available, model=model)
         if not available:
             self._current_id = None
             self._log_no_available_entries()
@@ -2719,6 +2765,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 # eligibility (D44). Lease it only when it is genuinely available; else
                 # fall through to the ordered pick (never take a cooled/dead entry).
                 available, pending_refresh = self._available_entries(clear_expired=True, refresh=True)
+                available = self._readmit_benched_covered(available)
                 if any(e.id == credential_id for e in available):
                     self._active_leases[credential_id] = self._active_leases.get(credential_id, 0) + 1
                     self._current_id = credential_id
@@ -2730,6 +2777,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
                 credential_id = None
 
             available, pending_refresh = self._available_entries(clear_expired=True, refresh=True)
+            available = self._readmit_benched_covered(available)
             if not available:
                 return None, pending_refresh
 
