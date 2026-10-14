@@ -3686,15 +3686,24 @@ def _prepare_same_provider_retry(
     extra_headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[Any, Dict[str, Any]]:
     """Rebuild (client, request kwargs) for a same-provider retry after credential recovery."""
+    # The caller's ``resolved_api_key`` was captured BEFORE the recovery rotated the pool, so
+    # rebuilding with it re-sends the credential that just failed — the retry 402s again and the
+    # pool then blames (and benches) the healthy entry it had just rotated to. Whenever the
+    # provider is pool-backed, the pool's current entry is the authority for the retry key.
+    retry_api_key: str = resolved_api_key or ""
+    _pool_entry = _peek_pool_entry(_normalize_aux_provider(resolved_provider))
+    _pool_api_key = _pool_runtime_api_key(_pool_entry) if _pool_entry is not None else ""
+    if _pool_api_key:
+        retry_api_key = _pool_api_key
     if task == "vision":
         effective_provider, retry_client, retry_model = resolve_vision_provider_client(
             provider=resolved_provider, model=final_model, base_url=resolved_base_url,
-            api_key=resolved_api_key, async_mode=async_mode,
+            api_key=retry_api_key, async_mode=async_mode,
         )
     else:
         retry_client, retry_model = _get_cached_client(
             resolved_provider, resolved_model, async_mode=async_mode, base_url=resolved_base_url,
-            api_key=resolved_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
+            api_key=retry_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
         )
         effective_provider = _effective_provider_for_client(retry_client, resolved_provider)
     if retry_client is None:
