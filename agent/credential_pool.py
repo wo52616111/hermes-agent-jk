@@ -1303,9 +1303,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             return None
         with self._lock:
             available, _pending = self._available_entries(clear_expired=True, refresh=False)
-            available = self._readmit_benched_covered(available)
-        if endpoint is not None:
-            available = [e for e in available if credential_pool_entry_serves_endpoint(e, endpoint)]
+            if endpoint is not None:
+                available = [e for e in available if credential_pool_entry_serves_endpoint(e, endpoint)]
+            available = self._readmit_benched_covered(available, endpoint=endpoint)
         return self._quota_pick(available, current_id, mode, now=now)
 
     def eligible_entries(self) -> List[PooledCredential]:
@@ -2479,17 +2479,25 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def _readmit_benched_covered(
         self, available: List[PooledCredential], *, model: Optional[str] = None,
+        endpoint: Optional[str] = None, only_when_no_covered: bool = True,
     ) -> List[PooledCredential]:
         """Re-admit 402-benched entries the quota view still calls covered (D50).
 
         ``_available_entries`` hides a 402'd entry for its whole billing TTL (~1h), so a single
         failure — possibly mis-attributed, e.g. an auxiliary retry that re-sent the key that had
-        already failed — removed a healthy account from the candidate set for an hour. The pool
-        then served (or the caller fell back to) the spent sibling and every request 402'd with
-        no way back. The bench stays on the record; only the ordering sees the account, and only
-        while its own quota windows still call it covered. Rotation keeps its own no-recovery
-        guard, so a genuine 402 on a covered account still surfaces the failure instead of
-        silently rotating to a spent sibling.
+        already failed — removed a healthy account from the candidate set for an hour: the pool
+        then served (or the caller fell back to) the spent sibling and every request 402'd with no
+        way back. The bench stays on the record (only the ordering sees the account), and only
+        while its own quota windows still call it covered.
+
+        Two limits keep the escape from becoming its own stall. A benched account never shadows a
+        live covered one — a just-failed credential must not outrank a healthy sibling on priority
+        (``only_when_no_covered=False`` exempts targeted queries such as ``reclaim``, which ask
+        about one named credential and leave the pick to their caller) — and only a *billing* bench
+        is escapable: a revoked credential, a model-scoped throttle or an unknown/spent quota state
+        keeps its bench. Rotation keeps its own no-recovery guard,
+        so a genuine 402 on a covered account surfaces instead of silently rotating to a spent
+        sibling.
         """
         if not self.is_quota_aware():
             return available
@@ -2498,10 +2506,17 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             clear_expired=False, refresh=False, model=model, include_billing_benched=True,
         )
         extra = [entry for entry in benched if entry.id not in known]
+        if endpoint is not None:
+            extra = [e for e in extra if credential_pool_entry_serves_endpoint(e, endpoint)]
         if not extra:
             return available
         from agent import quota_aware_selection as qsel
-        states = self._quota_states(extra, now=datetime.now(timezone.utc))
+        now = datetime.now(timezone.utc)
+        if only_when_no_covered and available and any(
+            state.state == qsel.COVERED for state in self._quota_states(available, now=now).values()
+        ):
+            return available
+        states = self._quota_states(extra, now=now)
         return available + [
             entry for entry in extra
             if getattr(states.get(entry.id), "state", None) == qsel.COVERED
@@ -2565,6 +2580,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
             if current is not None:
                 return current
             available, _pending = self._available_entries()
+            available = self._readmit_benched_covered(available)
             return available[0] if available else None
 
     def reclaim(self, credential_id: str, *, model: Optional[str] = None) -> Optional[PooledCredential]:
@@ -2573,10 +2589,13 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         live session asking "may I go back?" every turn is not a request."""
         with self._lock:
             available, pending = self._available_entries(clear_expired=True, refresh=True, model=model)
+            available = self._readmit_benched_covered(available, model=model, only_when_no_covered=False)
         if any(e.id == credential_id for e in pending):
             self._refresh_pending_entries([e for e in pending if e.id == credential_id])
             with self._lock:
                 available, _pending = self._available_entries(clear_expired=True, refresh=True, model=model)
+                available = self._readmit_benched_covered(
+                    available, model=model, only_when_no_covered=False)
         return next((e for e in available if e.id == credential_id), None)
 
     # ---- rotation ----------------------------------------------------------
@@ -2624,7 +2643,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         available entries, then surface the error; no cooldown is written.
         """
         self._unmatched_rotation_streak += 1
-        available_count = len(self._available_entries()[0])
+        available_count = len(self._readmit_benched_covered(self._available_entries()[0]))
         if self._unmatched_rotation_streak > max(available_count, 1):
             logger.warning(
                 "credential pool: failed credential identity matched no "
@@ -2642,7 +2661,7 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         )
         self._current_id = None
         next_entry, _pending = self._select_unlocked(refresh=False)
-        if next_entry is not None and len(self._available_entries()[0]) == 1:
+        if next_entry is not None and len(self._readmit_benched_covered(self._available_entries()[0])) == 1:
             # A single-entry pool cannot rotate: returning its only entry would
             # report a recovery without changing the credential, and the
             # caller retries the same 401 indefinitely.
