@@ -1147,3 +1147,60 @@ def test_the_bench_escape_is_visible_to_has_available(qdir, quota_aware):
     assert spent.has_available() is False
     assert spent.select() is None
     assert spent.next_available_at() is not None  # report the wait instead of pretending
+
+
+def test_a_live_covered_account_outranks_a_benched_covered_sibling(qdir, quota_aware):
+    """A just-failed credential must not shadow a healthy sibling on priority (the escape's own
+    stall: the same account would be re-picked on every request, 402ing forever)."""
+    _facts("sha256:aaa", [_win(percent=5.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_bench(_entry("b", priority=0, fingerprint="sha256:bbb")),
+                  _entry("a", priority=1, fingerprint="sha256:aaa")])
+    assert pool.select().id == "a"
+    # ... and rotation therefore still has somewhere to go (#97315's guard must not fire).
+    nxt = pool.mark_exhausted_and_rotate(status_code=402, api_key_hint="key-b", credential_id="b")
+    assert nxt is not None and nxt.id == "a"
+
+
+def test_a_benched_entry_without_quota_is_never_re_admitted(qdir, quota_aware):
+    """Only a *covered* verdict earns the escape: UNKNOWN (no facts) and OVERFLOW stay benched."""
+    _facts("sha256:aaa", [_win(percent=100.0)])   # stored facts say spent
+    unknown = _pool([_bench(_entry("u", fingerprint="sha256:unknown"))])
+    assert unknown.select() is None               # no facts at all -> UNKNOWN
+    overflow = _pool([_bench(_entry("a", fingerprint="sha256:aaa"))])
+    assert overflow.select() is None
+
+
+def test_the_bench_survives_the_escape(qdir, quota_aware):
+    """The account is offered to the ordering, but its failure record is kept: the bench still
+    guards the paths that do not consult the quota view, and rotation keeps its no-recovery guard."""
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    b = _bench(_entry("b", fingerprint="sha256:bbb"))
+    stamped = b.last_status_at
+    pool = _pool([b])
+    assert pool.select().id == "b"
+    kept = pool.entries()[0]
+    assert kept.last_status == STATUS_EXHAUSTED and kept.last_error_code == 402
+    assert kept.last_status_at == stamped
+
+
+def test_acquire_lease_readmits_a_benched_covered_account(qdir, quota_aware):
+    """Leases draw their candidates from the same set as ``select`` (D44)."""
+    _facts("sha256:aaa", [_win(percent=100.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_bench(_entry("a", priority=0, fingerprint="sha256:aaa")),
+                  _bench(_entry("b", priority=1, fingerprint="sha256:bbb"))])
+    assert pool.acquire_lease() == "b"
+
+
+def test_reclaim_readmits_a_benched_covered_account(qdir, quota_aware):
+    """The revert path asks "may I go back to THIS credential?" through ``reclaim``.
+
+    A targeted query, so a benched-but-covered target answers yes even while another covered
+    account is free — the revert guard applies its own D22 covered check before swapping.
+    """
+    _facts("sha256:aaa", [_win(percent=5.0)])
+    _facts("sha256:bbb", [_win(percent=5.0)])
+    pool = _pool([_bench(_entry("b", fingerprint="sha256:bbb")),
+                  _entry("a", fingerprint="sha256:aaa")])
+    assert pool.reclaim("b") is not None
