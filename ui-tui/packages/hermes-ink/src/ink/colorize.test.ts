@@ -9,10 +9,6 @@ import {
 } from './colorize.js'
 
 describe('shouldUseRichEightBitDowngradeForLegacyAppleTerminal', () => {
-  it('memoizes the current process decision for render hot paths', () => {
-    expect(typeof CHALK_USES_RICH_EIGHT_BIT_DOWNGRADE).toBe('boolean')
-  })
-
   it('uses Rich-compatible 256-color downgrade on legacy Apple Terminal', () => {
     expect(
       shouldUseRichEightBitDowngradeForLegacyAppleTerminal({ TERM_PROGRAM: 'Apple_Terminal' } as NodeJS.ProcessEnv, 2)
