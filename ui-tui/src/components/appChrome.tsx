@@ -647,7 +647,7 @@ export function layoutQuotaGroups(
 
       let windowCount = 0
 
-      for (const window of details ? group.windows ?? [] : []) {
+      for (const window of details ? (group.windows ?? []) : []) {
         if (QUOTA_SKIPPED_PERIODS.has(window.period)) {
           continue
         }
@@ -745,10 +745,7 @@ export function layoutQuotaGroups(
     return out
   }
 
-  const candidates: ReturnType<typeof build>[] = [
-    build(groups.length, true, 'all'),
-    build(groups.length, false, 'all')
-  ]
+  const candidates: ReturnType<typeof build>[] = [build(groups.length, true, 'all'), build(groups.length, false, 'all')]
 
   for (let count = groups.length; count >= 1; count--) {
     candidates.push(build(count, false, 'active'))
@@ -783,17 +780,17 @@ export function layoutQuotaGroups(
           ? quotaColor(piece.pct ?? 0, t)
           : piece.role === 'freshness'
             ? quotaFreshnessColor(piece.freshnessAgeS ?? 0, t)
-          : piece.role === 'body'
-            ? t.color.text
-            : piece.role === 'overflow'
-              ? t.color.warn
-              : piece.role === 'exhausted'
-                ? t.color.error
-                : piece.role === 'hint'
-                  ? t.color.warn
-                  : piece.role === 'active'
-                    ? t.color.text
-                    : t.color.muted,
+            : piece.role === 'body'
+              ? t.color.text
+              : piece.role === 'overflow'
+                ? t.color.warn
+                : piece.role === 'exhausted'
+                  ? t.color.error
+                  : piece.role === 'hint'
+                    ? t.color.warn
+                    : piece.role === 'active'
+                      ? t.color.text
+                      : t.color.muted,
       dim: piece.dim ?? (piece.role === 'muted' && pi > 0),
       key: `${gi}-${pi}`,
       text: piece.text
@@ -1315,13 +1312,13 @@ export function StatusRule({
   // The session's own account (matched on fingerprint, D29) owns the prime cell next to ctx; the
   // remaining rows keep the wire order, so an active pool's other accounts sit at its position.
   const activeQuotaGroup = usage.account_usage_active
-    ? quotaGroups.find(
+    ? (quotaGroups.find(
         group =>
           group.provider === usage.account_usage_active &&
           (!activeAccount || group.quotaAccount?.fingerprint === activeAccount)
       ) ??
       quotaGroups.find(group => group.provider === usage.account_usage_active) ??
-      null
+      null)
     : null
 
   const primaryQuotaGroups = activeQuotaGroup ? [activeQuotaGroup] : quotaGroups
@@ -1358,7 +1355,10 @@ export function StatusRule({
       ).map((segment, index) => (index === 0 ? { ...segment, text: segment.text.trimStart() } : segment))
     : []
 
-  const otherCellWidth = otherLeadCell.reduce((sum, segment) => sum + stringWidth(segment.text), stringWidth(otherRowLabel))
+  const otherCellWidth = otherLeadCell.reduce(
+    (sum, segment) => sum + stringWidth(segment.text),
+    stringWidth(otherRowLabel)
+  )
   // One space of breathing room between the widest left cell and the divider.
   const tableLeftWidth = Math.max(ctxCellWidth, otherCellWidth) + 1
   const tableRightBudget = Math.max(0, capacityWidth - tableLeftWidth - stringWidth('│'))

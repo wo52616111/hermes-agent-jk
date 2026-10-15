@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
 import {
-  CHALK_USES_RICH_EIGHT_BIT_DOWNGRADE,
   clampChalkLevelForTmux,
   richEightBitColorNumber,
   shouldUseRichEightBitDowngradeForLegacyAppleTerminal,

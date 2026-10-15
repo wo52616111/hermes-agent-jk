@@ -7,14 +7,7 @@ describe('fallback startup logo', () => {
   it('uses the downstream violet gradient instead of semantic gold colors', () => {
     const colors = logo(DEFAULT_THEME.color).map(([color]) => color)
 
-    expect(colors).toEqual([
-      '#ecf0c1',
-      '#ecf0c1',
-      '#b3a1e6',
-      '#b3a1e6',
-      '#7a5ccc',
-      '#7a5ccc'
-    ])
+    expect(colors).toEqual(['#ecf0c1', '#ecf0c1', '#b3a1e6', '#b3a1e6', '#7a5ccc', '#7a5ccc'])
   })
 
   it('uses the downstream violet gradient for the fallback caduceus', () => {

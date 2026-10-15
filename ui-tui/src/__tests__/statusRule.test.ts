@@ -1,6 +1,5 @@
 import { describe, expect, it } from 'vitest'
 
-import type { StatusBarSegments } from '../components/appChrome.js'
 import {
   busyIndicatorWidth,
   renderIndicator,

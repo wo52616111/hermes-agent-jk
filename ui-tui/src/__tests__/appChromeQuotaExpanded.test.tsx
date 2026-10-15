@@ -288,9 +288,21 @@ describe('layoutQuotaGroups expanded rows', () => {
   it('drops later account rows before earlier ones when entries must go', () => {
     const three = goGroup({
       accounts: [
-        account({ fingerprint: 'sha256:bbbbbb', state: 'covered', windows: [{ period: '7d', used_percent: 1, reset_at: null }] }),
-        account({ fingerprint: 'sha256:aaaaaa', state: 'overflow', windows: [{ period: '7d', used_percent: 100, reset_at: null }] }),
-        account({ fingerprint: 'sha256:cccccc', state: 'exhausted', windows: [{ period: '7d', used_percent: 100, reset_at: null }] })
+        account({
+          fingerprint: 'sha256:bbbbbb',
+          state: 'covered',
+          windows: [{ period: '7d', used_percent: 1, reset_at: null }]
+        }),
+        account({
+          fingerprint: 'sha256:aaaaaa',
+          state: 'overflow',
+          windows: [{ period: '7d', used_percent: 100, reset_at: null }]
+        }),
+        account({
+          fingerprint: 'sha256:cccccc',
+          state: 'exhausted',
+          windows: [{ period: '7d', used_percent: 100, reset_at: null }]
+        })
       ]
     })
 
@@ -389,7 +401,13 @@ describe('StatusRule expanded multi-account pool', () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date(NOW))
 
-    const anthropic = { ...goGroup(), provider: 'anthropic', accounts: undefined, multi_account: null, windows: [{ period: '7d', used_percent: 3, reset_at: null }] }
+    const anthropic = {
+      ...goGroup(),
+      provider: 'anthropic',
+      accounts: undefined,
+      multi_account: null,
+      windows: [{ period: '7d', used_percent: 3, reset_at: null }]
+    }
 
     const element = StatusRule({
       ...baseProps,
@@ -412,12 +430,7 @@ describe('StatusRule expanded multi-account pool', () => {
 // `go:2` (fingerprint b) — the metered/overflow one with a fresh read and a 5h/7d/monthly window
 // set wide enough that no candidate layout fits a narrow terminal. The old ladder returned [] and
 // cleared the row, hiding the live metered account while the non-session `go:1` survived.
-const narrowAccount = (
-  fingerprint: string,
-  used: number,
-  state = 'covered',
-  metered = false
-): AccountUsageAccount =>
+const narrowAccount = (fingerprint: string, used: number, state = 'covered', metered = false): AccountUsageAccount =>
   account({
     fingerprint,
     label: 'key',
@@ -562,11 +575,7 @@ describe('closing the aligned table keeps the secondary windows', () => {
         cols: 60,
         usage: {
           ...baseProps.usage,
-          account_usage_all: [
-            threeWindows('anthropic', 40, 41, 42),
-            threeWindows('openai-codex', 42, 43, 44),
-            pool
-          ],
+          account_usage_all: [threeWindows('anthropic', 40, 41, 42), threeWindows('openai-codex', 42, 43, 44), pool],
           account_usage_active: 'opencode-go',
           account_usage_active_account: 'sha256:bbbbbb'
         }
