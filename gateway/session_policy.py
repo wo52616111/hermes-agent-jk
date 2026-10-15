@@ -381,11 +381,16 @@ def _apply_launch_overrides(params, config):
 
 def _resolve_toolsets(params, config, source, safe_mode):
     """Validate explicit toolsets and return the session's enabled toolset set."""
-    from hermes_cli.tools_config import _get_platform_tools
+    from hermes_cli.tools_config import _get_platform_tools, enabled_mcp_server_names
     from toolsets import validate_toolset
     explicit = params.get('toolsets')
     if 'toolsets' in params:
-        if (not isinstance(explicit, list) or any(not isinstance(x, str) or not validate_toolset(x) for x in explicit)
+        # An enabled MCP server is a legitimate toolset reference even while offline: it only registers
+        # once connected, and a dropped server (expired OAuth) is the MCP layer's warning, not a reason
+        # to refuse the whole session. A typo or a disabled server still is refused.
+        configured_mcp = enabled_mcp_server_names(config)
+        if (not isinstance(explicit, list)
+                or any(not isinstance(x, str) or not (validate_toolset(x) or x in configured_mcp) for x in explicit)
                 or ('desktop_ui' in explicit and source != 'gui')):
             raise RuntimeStoreError('invalid_params')
         config.setdefault('platform_toolsets', {})['acp' if source == 'acp' else 'cli'] = explicit
