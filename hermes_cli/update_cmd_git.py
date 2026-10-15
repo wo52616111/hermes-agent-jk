@@ -408,13 +408,17 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
     if origin_ahead < 0 or upstream_ahead < 0:
         print("  ✗ Could not compare branches. Skipping upstream sync.")
         return False
-    if origin_ahead > 0:
-        print(
-            f"\nℹ Your fork has {origin_ahead} commit(s) not on upstream.\n"
-            "  Skipping upstream sync to preserve your changes.\n"
-            "  If you want to merge upstream changes, run:\n    git pull upstream main"
-        )
+    if origin_ahead > 0 and upstream_ahead == 0:
+        # Upstream has nothing the fork lacks: the comparison WAS made, the fork is just ahead.
+        print(f"\nℹ Your fork has {origin_ahead} commit(s) not on upstream, and upstream has nothing new for it.")
         return True
+    if origin_ahead > 0:
+        # The fork has its own commits AND is behind, so a fast-forward is impossible and the sync is
+        # skipped to preserve them. That is NOT "verified up to date": say how far behind, offer the
+        # integration, and return False so the caller never reports the official repo as checked.
+        _report_diverged_fork(git_cmd, cwd, upstream, origin_ahead, upstream_ahead,
+                              assume_yes=assume_yes, input_fn=input_fn)
+        return False
     if upstream_ahead == 0:
         print("  ✓ Fork is up to date with upstream")
         return True
@@ -466,6 +470,59 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
     print("  ✓ Updated from upstream")
     # The fork push waits for a validated update: ``_push_synced_fork`` after the syntax guard.
     return True
+
+
+def _report_diverged_fork(git_cmd: list[str], cwd: Path, upstream: str, origin_ahead: int, upstream_ahead: int,
+                          *, assume_yes: bool, input_fn) -> None:
+    """A fork with its own commits can't fast-forward: show how far behind and offer to integrate.
+
+    Nothing here touches the working tree. The offer pre-tests the merge in memory
+    (``git merge-tree --write-tree``) so the user sees the conflict count before choosing, and the
+    integration itself is the user's own ``git`` command (merge keeps published history; rebase
+    rewrites it and needs a force-push, so it is shown but never run for them).
+    """
+    from hermes_cli.update_cmd import _no_prompt_git_kwargs
+    from hermes_cli.update_custody import run_git
+    print(f"\n⚠ Your fork is {upstream_ahead} commit(s) BEHIND upstream and has {origin_ahead} commit(s) of its own.\n"
+          "  A fast-forward is impossible, so upstream was NOT merged and the official repo was NOT checked.")
+    conflicts: Optional[int] = None
+    try:
+        # --write-tree computes the merge without a worktree or index; exit 1 means conflicts.
+        probe = run_git(git_cmd, ["merge-tree", "--write-tree", "--name-only", "--no-messages",
+                                  "refs/remotes/origin/main", upstream], cwd=cwd, capture_output=True, text=True, check=False)
+        if probe.returncode == 0:
+            conflicts = 0
+        elif probe.returncode == 1:
+            conflicts = len({ln for ln in (probe.stdout or "").splitlines()[1:] if ln.strip() and not ln.startswith(" ")})
+    except (OSError, subprocess.SubprocessError):
+        conflicts = None
+    if conflicts == 0:
+        print("  A trial merge in memory is conflict-free.")
+    elif conflicts is not None:
+        print(f"  A trial merge in memory has conflicts in {conflicts} file(s); resolve them in a separate worktree.")
+    merge_cmd = "git merge upstream/main"
+    print(f"  To integrate (keeps your published history):  {merge_cmd}\n"
+          "  To replay your commits on top instead (rewrites history, needs a force-push):  git rebase upstream/main")
+    if assume_yes or (input_fn is None and not (sys.stdin.isatty() and sys.stdout.isatty())):
+        return  # non-interactive: the reminder above is the whole offer; never mutate history unasked
+    if conflicts != 0:
+        return  # only an in-memory conflict-free merge is safe to offer as one step
+    if input_fn is not None:
+        reply = input_fn("Merge upstream/main into your checkout now? [y/N]", "n").strip().lower()
+    else:
+        try:
+            reply = input("Merge upstream/main into your checkout now? [y/N]: ").strip().lower()
+        except (EOFError, KeyboardInterrupt, UnicodeDecodeError):
+            print()
+            reply = "n"
+    if reply not in {"y", "yes"}:
+        return
+    try:
+        run_git(git_cmd, ["merge", "--no-edit", upstream], cwd=cwd, check=True, **_no_prompt_git_kwargs())
+        print("  ✓ Merged upstream/main. Re-run `hermes update` to refresh dependencies.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        run_git(git_cmd, ["merge", "--abort"], cwd=cwd, check=False, capture_output=True)
+        print(f"  ✗ Merge failed and was aborted; your tree is unchanged. ({getattr(exc, 'stderr', '') or exc})")
 
 
 def _push_synced_fork(git_cmd: list[str], cwd: Path) -> None:
