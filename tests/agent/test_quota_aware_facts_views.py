@@ -1813,12 +1813,17 @@ def test_start_replaces_a_worker_committed_to_exit(qdir, monkeypatch):
             exit_go.wait(5)           # stay alive, but committed to leaving
         return leaving
 
+    # Install the gate BEFORE the worker exists. ``start()`` holds ``_lock`` while it launches the
+    # thread, so the worker's first ``_exit_pending`` can run (a) before a late patch lands, which
+    # would send it through the real method and let it leave without ever parking, or (b) after
+    # stop() already set ``_stop``. Gating up front makes every call - first or last - observable,
+    # so the test no longer depends on which thread wins the lock (it flaked on CPython 3.14).
+    monkeypatch.setattr(qs.QuotaRefresher, "_exit_pending", gated_exit_pending)
     refresher = qs.QuotaRefresher(interval_s=0.05, fetcher=lambda: None)
     refresher.start()
     old = refresher._thread
     try:
         assert old is not None and old.is_alive()
-        monkeypatch.setattr(qs.QuotaRefresher, "_exit_pending", gated_exit_pending)
         # A stop() sets ``_stop``; the worker reaches ``_exit_pending`` and parks there with
         # ``_exiting`` already recorded, so it is alive yet on its way out.
         stopper = threading.Thread(target=lambda: refresher.stop(0.2), name="stopper")
