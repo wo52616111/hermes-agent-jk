@@ -9,6 +9,9 @@ import pytest
 
 from gateway.config import Platform
 
+# The capacity row rides the same dict (``gateway/session_usage.py::quota_fields``).
+QUOTA_KEYS = {'account_usage', 'account_usage_all', 'account_usage_active', 'account_usage_active_account'}
+
 FIELDS = {'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'prompt_tokens',
           'completion_tokens', 'total_tokens', 'reasoning_tokens', 'api_calls', 'last_prompt_tokens',
           'context_tokens', 'context_length', 'config_context_length', 'context_source', 'compression_count',
@@ -61,7 +64,7 @@ def test_each_api_step_publishes_usage_only_for_local_viewers(platform):
     kinds = [kind for kind, _ in published]
     if platform == Platform.LOCAL:
         usage = next(payload for kind, payload in published if kind == 'session.usage')
-        assert set(usage) == FIELDS and usage['api_calls'] == 2
+        assert set(usage) == FIELDS | QUOTA_KEYS and usage['api_calls'] == 2
     else:
         assert 'session.usage' not in kinds
 
@@ -83,7 +86,8 @@ async def test_session_stats_returns_the_same_dict(tmp_path, monkeypatch):
         reply = await connection.dispatch({'id': 2, 'method': 'session.stats', 'params': {'session_id': 's'}})
         assert 'result' in reply, reply
         from gateway.session_usage import usage_stats
-        assert reply['result'] == usage_stats(agent)
+        assert {key: value for key, value in reply['result'].items() if key in FIELDS} == usage_stats(agent)
+        assert QUOTA_KEYS <= set(reply['result'])
         CANONICAL_METHODS['session.stats'].result.model_validate(reply['result'])
     finally:
         await connection.close()

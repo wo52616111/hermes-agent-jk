@@ -38131,6 +38131,56 @@
             ],
             "default": null,
             "title": "Fallback Model"
+          },
+          "account_usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "account_usage_all": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AccountUsageGroup"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage All"
+          },
+          "account_usage_active": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active"
+          },
+          "account_usage_active_account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active Account"
           }
         },
         "required": [
@@ -38648,6 +38698,56 @@
             ],
             "default": null,
             "title": "Model"
+          },
+          "account_usage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AccountUsage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "account_usage_all": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/AccountUsageGroup"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage All"
+          },
+          "account_usage_active": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active"
+          },
+          "account_usage_active_account": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Account Usage Active Account"
           },
           "provider": {
             "anyOf": [

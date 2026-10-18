@@ -299,7 +299,7 @@ def _start_quota_bootstrap(session: dict | None = None):
                 if profile_session is None:
                     quota_state.bootstrap_connected()
                 else:
-                    with getattr(server, "_session_profile_runtime_scope")(profile_session):
+                    with server._session_profile_runtime_scope(profile_session):
                         quota_state.bootstrap_connected()
             except Exception:
                 logger.debug("quota bootstrap failed", exc_info=True)
@@ -341,7 +341,7 @@ def _publish_quota_usage(*, seed: bool = False) -> None:
             if profile_home in groups_by_profile:
                 continue
             try:
-                with getattr(server, "_session_profile_runtime_scope")(session):
+                with server._session_profile_runtime_scope(session):
                     groups_by_profile[profile_home] = server._account_usage_all_wire()
             except Exception:
                 logger.debug("quota usage seed read failed for profile %s", profile_home, exc_info=True)
@@ -367,7 +367,8 @@ def _publish_quota_usage(*, seed: bool = False) -> None:
                     groups = session.get("_account_usage_all")
                     if not isinstance(groups, list):
                         continue
-                groups = server._age_account_usage_groups(groups)
+                from agent import quota_wire
+                groups = quota_wire.age_groups(groups)
                 usage = server._session_usage_snapshot(session, account_usage_groups=groups)
                 generation = int(session.get("_account_usage_generation") or 0) + 1
                 session["_account_usage_generation"] = generation

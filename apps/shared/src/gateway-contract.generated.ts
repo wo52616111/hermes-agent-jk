@@ -4696,6 +4696,10 @@ export interface SessionStats {
   model: string
   provider: string
   fallback_model?: string | null
+  account_usage?: AccountUsage | null
+  account_usage_all?: AccountUsageGroup[] | null
+  account_usage_active?: string | null
+  account_usage_active_account?: string | null
 }
 export interface RollbackSessionDiffParams {
   session_id: string
@@ -5666,6 +5670,10 @@ export interface SessionUsagePayload {
   rate_limit?: Record<string, unknown> | null
   active_subagents?: number | null
   model?: string | null
+  account_usage?: AccountUsage | null
+  account_usage_all?: AccountUsageGroup[] | null
+  account_usage_active?: string | null
+  account_usage_active_account?: string | null
   provider?: string | null
   fallback_model?: string | null
 }

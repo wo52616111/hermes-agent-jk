@@ -10,6 +10,12 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import logging
+
+logger = logging.getLogger(__name__)
+# The status-bar quota keys, as `agent/quota_wire.py::fields` returns them.
+QUOTA_KEYS = ("account_usage", "account_usage_all", "account_usage_active",
+              "account_usage_active_account")
 
 _COUNTERS = (("input_tokens", "session_input_tokens"), ("output_tokens", "session_output_tokens"),
              ("cache_read_tokens", "session_cache_read_tokens"),
@@ -83,6 +89,21 @@ def usage_stats(agent) -> dict:
     return stats
 
 
+def quota_fields(agent) -> dict:
+    """Provider quota groups for the capacity row (``account_usage*``).
+
+    Same builder as the legacy TUI backend (``agent/quota_wire``): the status bar is one surface,
+    so a provider's windows must not depend on which transport carried the session. A failed read
+    leaves the keys out rather than fabricating an empty bar.
+    """
+    try:
+        from agent import quota_wire
+        return quota_wire.fields(agent)
+    except Exception:
+        logger.debug("quota wire fields failed", exc_info=True)
+        return {}
+
+
 def carried_compression_count(live, agent=None) -> int:
     """Compactions of this conversation: main's agent counted them on its compressor for the
     session's life. A canonical compress evicts the gateway's agent (a session boundary), so the
@@ -134,6 +155,9 @@ def tui_usage(stats: dict) -> dict:
             usage[key] = round(float(stats[source_key]), 1)
     if isinstance(stats.get("active_subagents"), int):
         usage["active_subagents"] = stats["active_subagents"]
+    for key in QUOTA_KEYS:
+        if stats.get(key) is not None:
+            usage[key] = stats[key]
     return usage
 
 
@@ -145,6 +169,7 @@ def publish_usage(turn, agent, *, record: bool = False) -> None:
         return
     with contextlib.suppress(Exception):
         stats = usage_stats(agent)
+        stats.update(quota_fields(agent))
         turn._publish_execution("session.usage", stats)
         if record:
             from gateway.session_results import execution_result
@@ -162,4 +187,5 @@ async def stats(connection, ref, params):
     agent = connection.authority.agent(ref)
     result = usage_stats(agent)
     result["compression_count"] = carried_compression_count(connection.authority.sessions.get(ref.session_id), agent)
+    result.update(quota_fields(agent))
     return result

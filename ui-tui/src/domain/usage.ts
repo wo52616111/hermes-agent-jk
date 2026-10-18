@@ -67,6 +67,37 @@ function rateFields(p: Record<string, unknown>): Partial<Usage> {
   return fields
 }
 
+/** The capacity-row keys. They ride the same frame as the counters (`gateway/session_usage.py::
+ * quota_fields`), so a viewer that only ever sees ticks still renders every provider's quota. */
+const QUOTA_KEYS = [
+  'account_usage',
+  'account_usage_all',
+  'account_usage_active',
+  'account_usage_active_account'
+] as const
+
+function quotaFields(p: Record<string, unknown>): Partial<Usage> | undefined {
+  const fields: Partial<Usage> = {}
+
+  if (p.account_usage && typeof p.account_usage === 'object') {
+    fields.account_usage = p.account_usage as Usage['account_usage']
+  }
+
+  if (Array.isArray(p.account_usage_all)) {
+    fields.account_usage_all = p.account_usage_all as Usage['account_usage_all']
+  }
+
+  if (typeof p.account_usage_active === 'string') {
+    fields.account_usage_active = p.account_usage_active
+  }
+
+  if (typeof p.account_usage_active_account === 'string') {
+    fields.account_usage_active_account = p.account_usage_active_account
+  }
+
+  return QUOTA_KEYS.some(key => fields[key] !== undefined) ? fields : undefined
+}
+
 /** A canonical local viewer's `session.usage` tick carries the owner's session-cumulative counters at
  * the top level (`gateway/session_usage.py::usage_stats`, the `session.stats` dict); main's sidecar
  * ticker sent its `_get_usage` shape under `usage`. Both land as the same status-bar `Usage`
@@ -82,8 +113,12 @@ export function usageFromTick(payload: unknown): Partial<Usage> | undefined {
     return p.usage as Partial<Usage>
   }
 
+  const quota = quotaFields(p)
+
   if (num(p.api_calls) === undefined && num(p.total_tokens) === undefined) {
-    return undefined
+    // A quota-only frame (a resumed session that has not called the model yet) still has to
+    // paint the capacity row; counters are absent, not zero, so nothing is clobbered.
+    return quota
   }
 
   const usage: Partial<Usage> = Object.fromEntries(
@@ -94,5 +129,5 @@ export function usageFromTick(payload: unknown): Partial<Usage> | undefined {
     usage.model = p.model
   }
 
-  return { ...usage, ...contextFields(p), ...rateFields(p) }
+  return { ...usage, ...contextFields(p), ...rateFields(p), ...quota }
 }

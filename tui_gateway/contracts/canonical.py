@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Literal
 
 from .base import JsonValue, Params, Result
-from .common import McpServerStatus, OpenModel, ProjectRef
+from .common import AccountUsage, AccountUsageGroup, McpServerStatus, OpenModel, ProjectRef
 from .events import SkinPayload
 from .groups_bot_relay import RoomParams, RoomTaskReceipt
 from .registry import canonical_method
@@ -214,6 +214,12 @@ class SessionStats(Result):
     model: str
     provider: str
     fallback_model: str | None = None
+    # ``gateway/session_usage.py::quota_fields``: the capacity row rides the same dict as the
+    # counters so ``/usage`` and the post-resume read show quota without a second round trip.
+    account_usage: AccountUsage | None = None
+    account_usage_all: list[AccountUsageGroup] | None = None
+    account_usage_active: str | None = None
+    account_usage_active_account: str | None = None
 
 
 canonical_method("session.stats", params=SessionStatsParams, result=SessionStats,

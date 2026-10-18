@@ -18,7 +18,8 @@ from __future__ import annotations
 from pydantic import Field
 
 from .base import JsonValue, Payload, WireEnum
-from .common import MessageReaction, SessionLiveInfo, SubagentStatus, ToolLabel, ToolLabelKind, Usage
+from .common import (AccountUsage, AccountUsageGroup, MessageReaction, SessionLiveInfo, SubagentStatus,
+                     ToolLabel, ToolLabelKind, Usage)
 from .config_free_tier_control import FreeTierChallengePayload, SessionControlSnapshot
 from .registry import event
 
@@ -298,6 +299,12 @@ class SessionUsagePayload(Payload):
     rate_limit: dict[str, JsonValue] | None = None
     active_subagents: int | None = None
     model: str | None = None
+    # The capacity row: subscription quota travels WITH the counters, because a viewer that only
+    # ever sees ticks has no other frame to read it from (D41 groups; ``agent/quota_wire.py``).
+    account_usage: AccountUsage | None = None
+    account_usage_all: list[AccountUsageGroup] | None = None
+    account_usage_active: str | None = None
+    account_usage_active_account: str | None = None
     provider: str | None = None
     fallback_model: str | None = None
 
