@@ -124,11 +124,6 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
   const [inputBuf, setInputBufState] = useState<string[]>([])
   const composerRevision = useRef(0)
 
-  const setInputBuf = useCallback<StateSetter<string[]>>(next => {
-    composerRevision.current++
-    setInputBufState(next)
-  }, [])
-
   const [tokens, setTokens] = useState<ComposerToken[]>([])
   // Tokens and the input line are read from keystroke handlers that run several
   // times before React re-renders, so the refs — not the state — are the source
@@ -145,6 +140,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
   }, [])
 
   const setInputBuf = useCallback<StateSetter<string[]>>(next => {
+    composerRevision.current++
     inputBufRef.current = typeof next === 'function' ? next(inputBufRef.current) : next
     setInputBufState(inputBufRef.current)
   }, [])
