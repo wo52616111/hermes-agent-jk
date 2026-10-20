@@ -1304,7 +1304,17 @@ def _exit_after_failed_branch_switch(
         print(f"✗ {detail}.")
         _record_stop("commit_point_refused" if track_result.args is _ARM_REFUSED else "head_moved")
     else:
-        print(f"✗ Branch '{branch}' does not exist locally or on origin.")
+        from hermes_cli.update_cmd_git import _worktree_branch_holder
+        holder = _worktree_branch_holder(git_cmd, _m().PROJECT_ROOT, branch)
+        if holder is not None:
+            # The branch exists; a sibling worktree owns it and git refuses a second checkout.
+            # Never report that as a missing branch (the install-runs-from-a-worktree layout is
+            # legitimate, and this message sent people hunting for a branch that was right there).
+            print(f"✗ Branch '{branch}' is checked out at {holder}, so git will not check it out here.")
+            print("  Update this branch in place instead: "
+                  "hermes config set updates.parked_branch_strategy update_in_place")
+        else:
+            print(f"✗ Branch '{branch}' does not exist locally or on origin.")
         if detail:
             print(f"  {detail.splitlines()[0]}")
         _record_stop(_missing_branch_stop(git_cmd, branch))
@@ -1361,6 +1371,15 @@ def _apply_parked_branch_guard(
         _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
         _record_stop("parked_branch_blocked")
         sys.exit(1)
+    from hermes_cli.update_cmd_git import _worktree_branch_holder
+    holder = _worktree_branch_holder(git_cmd, _m().PROJECT_ROOT, branch)
+    if holder is not None:
+        # A sibling worktree has the update branch checked out, so git refuses the switch and a
+        # worktree install could never update at all. Nothing is wrong with the branch itself:
+        # update the parked branch in place from origin/<branch> instead of failing.
+        print(f"  ℹ Branch '{branch}' is checked out at {holder} — updating '{current_branch}' "
+              f"in place from origin/{branch} (no branch switch; local commits preserved).")
+        return False, True, f"worktree_held:{holder}"
     if not switch_block_reason.startswith("unmerged:"):
         print(f"  ⚠ Checkout was parked on '{current_branch}' (fully merged) — switching back to {branch}...")
         return True, False, switch_block_reason

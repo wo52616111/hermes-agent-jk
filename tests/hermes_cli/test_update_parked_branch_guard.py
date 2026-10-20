@@ -709,3 +709,99 @@ def test_update_on_main_fast_path_unchanged(repo_pair, monkeypatch, capsys):
     head = _git(repo_pair, "rev-parse", "HEAD").stdout.strip()
     remote = _git(repo_pair, "rev-parse", "origin/main").stdout.strip()
     assert head == remote
+
+
+# ---------------------------------------------------------------------------
+# A sibling worktree holds the update branch (the install-runs-from-a-worktree layout)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture()
+def worktree_install(tmp_path):
+    """The layout that made every update abort: the primary checkout holds ``main`` and the
+    install runs from a sibling worktree on its own branch. The branch the update wants is
+    already checked out, so git refuses a second checkout of it."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    _git(origin, "init", "-q", "-b", "main")
+    _git(origin, "config", "user.email", "test@example.com")
+    _git(origin, "config", "user.name", "Test")
+    (origin / "a.txt").write_text("one\n", encoding="utf-8")
+    _git(origin, "add", "a.txt")
+    _git(origin, "commit", "-qm", "c1")
+
+    primary = tmp_path / "primary"
+    _git(tmp_path, "clone", "-q", str(origin), str(primary))
+    _git(primary, "config", "user.email", "test@example.com")
+    _git(primary, "config", "user.name", "Test")
+    install = tmp_path / "install"
+    _git(primary, "worktree", "add", "-q", "-b", "install-branch", str(install))
+
+    (origin / "a.txt").write_text("two\n", encoding="utf-8")
+    _git(origin, "commit", "-aqm", "c2")
+    _git(install, "fetch", "-q", "origin", "main")
+    return primary, install
+
+
+def test_worktree_holder_names_the_sibling_checkout(worktree_install):
+    """``git worktree list --porcelain`` is the honest answer, per branch."""
+    from hermes_cli.update_cmd_git import _worktree_branch_holder
+
+    primary, install = worktree_install
+    assert _worktree_branch_holder(GIT, install, "main") == str(primary)
+    assert _worktree_branch_holder(GIT, install, "install-branch") == str(install)
+    assert _worktree_branch_holder(GIT, install, "no-such-branch") is None
+
+
+def test_worktree_held_target_updates_in_place(worktree_install, monkeypatch, capsys):
+    """A clean parked branch whose target is held elsewhere updates IN PLACE.
+
+    Switching is impossible here (git will not check ``main`` out twice), and nothing is wrong with
+    the branch, so the guard must fall back to merging origin/main into the checked-out branch
+    instead of failing the whole update.
+    """
+    primary, install = worktree_install
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", install)
+
+    switched, in_place, reason = update_cmd._apply_parked_branch_guard(
+        GIT, "main", "install-branch", switch_branch=False, _windows_gateway_resume=None)
+
+    assert (switched, in_place) == (False, True)
+    assert reason == f"worktree_held:{primary}"
+    out = capsys.readouterr().out
+    assert "in place from origin/main" in out
+    assert "switching back to" not in out
+
+
+def test_worktree_held_target_updates_in_place_with_unmerged_commits(worktree_install, monkeypatch, capsys):
+    """The unmerged case takes the same in-place path, even under an explicit ``--switch-branch``:
+    a switch that git cannot perform must not turn into a failed update."""
+    primary, install = worktree_install
+    (install / "local.txt").write_text("work\n", encoding="utf-8")
+    _git(install, "add", "local.txt")
+    _git(install, "commit", "-qm", "local work")
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", install)
+
+    switched, in_place, reason = update_cmd._apply_parked_branch_guard(
+        GIT, "main", "install-branch", switch_branch=True, _windows_gateway_resume=None)
+
+    assert (switched, in_place) == (False, True)
+    assert reason.startswith(f"worktree_held:{primary}")
+    assert "local commits preserved" in capsys.readouterr().out
+
+
+def test_failed_switch_names_the_worktree_not_a_missing_branch(worktree_install, monkeypatch, capsys):
+    """The refusal must say what happened. The branch exists; a sibling worktree owns it."""
+    primary, install = worktree_install
+    monkeypatch.setattr(hermes_main, "PROJECT_ROOT", install)
+    failed = subprocess.CompletedProcess(
+        ["checkout", "--no-guess", "main"], 1, "",
+        f"fatal: 'main' is already used by worktree at '{primary}'")
+
+    with pytest.raises(SystemExit) as exited:
+        update_cmd._exit_after_failed_branch_switch(GIT, "main", failed, None, None)
+
+    assert exited.value.code == 1
+    out = capsys.readouterr().out
+    assert f"is checked out at {primary}" in out
+    assert "update_in_place" in out
+    assert "does not exist locally or on origin" not in out
