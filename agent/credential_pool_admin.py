@@ -135,10 +135,7 @@ class CredentialPoolAdminMixin:
             return self._find(lambda e: e.id == credential_id)
 
     def resolve_target(self, target: Any) -> tuple[Optional[int], Optional[PooledCredential], Optional[str]]:
-        raw = str(target or "").strip()
-        if not raw:
-            return None, None, "No credential target provided."
-
+        # The empty-target guard lives in resolve_entry_target (the ONE owner of precedence).
         with self._lock:
             return resolve_entry_target(target, self._entries)
 

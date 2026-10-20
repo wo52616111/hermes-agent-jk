@@ -32,13 +32,13 @@ class AccountUsageWindow:
     used_percent: Optional[float] = None
     reset_at: Optional[datetime] = None
     detail: Optional[str] = None
-    # Provider's own window state marker (e.g. opencode-go's "rate-limited"). Outranks
-    # ``used_percent`` when deciding a window is spent (spec D2/D25); None means "no marker".
-    status: Optional[str] = None
     # ``account``: exhausting this window exhausts the whole login (Codex session/weekly).
     # ``model``: the window caps only one model family (Anthropic Opus/Sonnet weekly) and can
     # never imply the account itself is out of quota.
     scope: str = "account"
+    # Provider's own window state marker (e.g. opencode-go's "rate-limited"). Outranks
+    # ``used_percent`` when deciding a window is spent (spec D2/D25); None means "no marker".
+    status: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -787,17 +787,39 @@ def _call_plugin_usage_hook(profile, base_url: Optional[str], api_key: Optional[
     return None if bounded.timed_out else bounded.value
 
 
+
+def _usage_slug(provider: Optional[str], base_url: Optional[str]) -> str:
+    """An opencode.ai/zen/go endpoint IS the Go subscription, whatever the entry is named
+    (``opencode-go-bridge``, #85589): the Go profile owns the /zen/go usage hook, while a
+    custom entry only carries the base no-op."""
+    return "opencode-go" if _is_opencode_go_base_url(base_url) else str(provider or "").strip().lower()
+
 def fetch_account_usage(
     provider: Optional[str], *, base_url: Optional[str] = None, api_key: Optional[str] = None,
     read_only: bool = False, identity_id: Optional[str] = None,
 ) -> Optional[AccountUsageSnapshot]:
     from agent.account_usage_cache import remember_account_usage
+
+    # An opencode.ai/zen/go endpoint IS the Go subscription, whatever the entry is named
+    # (``opencode-go-bridge``, #85589): the Go profile owns the /zen/go usage hook, while a
+    # custom entry only carries the base no-op.
+    slug = _usage_slug(provider, base_url)
+    # The picker's per-credential path resolves variants that never rotate/refresh a credential
+    # on failure (Codex 401), so a read cannot repair or bench a pool entry it does not own.
+    fetcher = _READ_ONLY_USAGE_FETCHERS.get(slug) if read_only else None
+    if fetcher is None:
+        fetcher = _USAGE_FETCHERS.get(slug)
     import time as _time
 
     started = _time.monotonic()
     try:
-        snapshot = fetch_account_usage_checked(
-            provider, base_url=base_url, api_key=api_key, read_only=read_only)
+        if fetcher:
+            snapshot = fetcher(base_url, api_key)
+        else:
+            from providers import get_provider_profile
+
+            profile = get_provider_profile(slug)
+            snapshot = _call_plugin_usage_hook(profile, base_url, api_key) if profile else None
     except Exception:
         return None
     # Every fetch (``/usage``, the per-turn ``session.usage``) keeps the picker's cache current.
@@ -811,25 +833,16 @@ def fetch_account_usage(
 
 def fetch_account_usage_checked(
     provider: Optional[str], *, base_url: Optional[str] = None, api_key: Optional[str] = None,
-    read_only: bool = False,
 ) -> Optional[AccountUsageSnapshot]:
-    """``fetch_account_usage`` without the swallow or the picker cache: raises on failure, so the
-    shared quota state (``agent.quota_state``) can honour 429 Retry-After instead of retrying blindly.
-
-    An opencode.ai/zen/go endpoint IS the Go subscription, whatever the entry is named
-    (``opencode-go-bridge``, #85589): the Go profile owns the /zen/go usage hook, while a custom
-    entry only carries the base no-op. ``read_only`` picks the variant that never rotates/refreshes
-    a credential on failure (Codex 401), so a picker read cannot repair or bench a pool entry it
-    does not own."""
-    slug = "opencode-go" if _is_opencode_go_base_url(base_url) else str(provider or "").strip().lower()
-    fetcher = _READ_ONLY_USAGE_FETCHERS.get(slug) if read_only else None
-    if fetcher is None:
-        fetcher = _USAGE_FETCHERS.get(slug)
+    """``fetch_account_usage`` that raises instead of returning None on failure, so the shared quota
+    state (``agent.quota_state``) can honour 429 Retry-After instead of retrying blindly."""
+    normalized = _usage_slug(provider, base_url)
+    fetcher = _USAGE_FETCHERS.get(normalized)
     if fetcher:
         return fetcher(base_url, api_key)
     from providers import get_provider_profile
 
-    profile = get_provider_profile(slug)
+    profile = get_provider_profile(normalized)
     return _call_plugin_usage_hook(profile, base_url, api_key) if profile else None
 
 

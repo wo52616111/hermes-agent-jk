@@ -510,7 +510,7 @@ export interface GatewayEventHandlerContext {
     recoverSidRef?: MutableRefObject<null | string>
     resetSession: () => void
     resumeById: (id: string) => Promise<void>
-    setCatalog: StateSetter<null | SlashCatalog>
+    setCatalog: (catalog: null | SlashCatalog) => void
   }
   submission: {
     /** Submit text literally as a prompt — no slash/!/interpolation dispatch.
@@ -570,7 +570,7 @@ export interface SlashHandlerContext {
     getHistoryItems: () => Msg[]
     getLastUserMsg: () => string
     maybeWarn: (value: unknown) => void
-    setCatalog: StateSetter<null | SlashCatalog>
+    setCatalog: (catalog: null | SlashCatalog) => void
   }
   session: {
     closeSession: (targetSid?: null | string, deferMessages?: boolean) => Promise<unknown>

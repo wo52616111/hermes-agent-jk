@@ -1433,6 +1433,13 @@ def _get_usage(agent) -> dict:
             spent = agent.get_credits_spent_micros()
             if spent is not None:
                 usage["dev_credits_spent_micros"] = int(spent)
+    # The capacity row rides this same view (`agent/quota_wire.py` is the one builder): a client that
+    # reads the nested `usage` must not lose a provider's windows because the other transport carried
+    # them. Only figures that exist are added — `session_usage.tui_usage` applies the same rule, and
+    # the two views are asserted equal (`tests/gateway/test_local_viewer_usage.py`).
+    with contextlib.suppress(Exception):
+        from agent import quota_wire
+        usage.update({k: v for k, v in quota_wire.fields(agent).items() if v is not None})
     return usage
 
 

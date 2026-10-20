@@ -295,11 +295,11 @@ def record_response_usage(
                 if cost_result.status == "included" else None,
                 model=agent.model,
                 api_call_count=1,
+                task=getattr(agent, "_turn_route_task", "") or "",
                 # D42: the served entry's identity, so the hermes-state per-call boundary names
                 # the account that actually served (matches the turn-path mark above).
                 served_api_key=getattr(agent, "api_key", None),
                 served_entry_id=getattr(agent, "_credential_pool_entry_id", None),
-                task=getattr(agent, "_turn_route_task", "") or "",
             )
         except Exception as e:  # silent loss here undercounts analytics
             logger.debug(

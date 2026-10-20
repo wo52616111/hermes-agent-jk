@@ -275,6 +275,24 @@ def _write_or_exit(payload: dict, reason: str) -> None:
         sys.exit(0)
 
 
+def _claim_launch_home():
+    """Reserve the launch home exactly as the gateway does, or None when it is already owned.
+
+    No product surface launches this standalone stdio server any more: Ink and Desktop attach to
+    the profile's gateway over WS (``ui-tui/scripts/gateway_bootstrap.py``). Dev harnesses still
+    run it against a sandbox home (``apps/desktop/e2e/real-session-builder.ts``), and it opens that
+    home's ``state.db`` as a writer, so it must be the home's only owner: the gateway's
+    ``gateway.lock`` reservation refuses it beside a live gateway (or a second entry), and holding
+    that lock keeps a gateway from starting on the home while this process writes."""
+    from gateway.runtime_ownership import OwnershipConflict, process_ownership
+    home = server._launch_home()
+    try:
+        process_ownership.reserve([home])
+    except OwnershipConflict:
+        return None
+    return home
+
+
 def _start_quota_bootstrap(session: dict | None = None):
     """One fetch per connected subscription that has no stored quota yet, so the status bar has
     data before the first turn, then pushed to every live session. Off the startup path; the
@@ -411,24 +429,6 @@ def _ensure_quota_usage_service() -> None:
             logger.warning("quota usage service failed to start", exc_info=True)
             return
         _quota_usage_service_started = True
-
-
-def _claim_launch_home():
-    """Reserve the launch home exactly as the gateway does, or None when it is already owned.
-
-    No product surface launches this standalone stdio server any more: Ink and Desktop attach to
-    the profile's gateway over WS (``ui-tui/scripts/gateway_bootstrap.py``). Dev harnesses still
-    run it against a sandbox home (``apps/desktop/e2e/real-session-builder.ts``), and it opens that
-    home's ``state.db`` as a writer, so it must be the home's only owner: the gateway's
-    ``gateway.lock`` reservation refuses it beside a live gateway (or a second entry), and holding
-    that lock keeps a gateway from starting on the home while this process writes."""
-    from gateway.runtime_ownership import OwnershipConflict, process_ownership
-    home = server._launch_home()
-    try:
-        process_ownership.reserve([home])
-    except OwnershipConflict:
-        return None
-    return home
 
 
 def main():

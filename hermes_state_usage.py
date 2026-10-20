@@ -276,8 +276,8 @@ class SessionUsageMixin:
         actual_cost_usd: Optional[float]=None, cost_status: Optional[str]=None, cost_source: Optional[str]=None,
         pricing_version: Optional[str]=None, billing_provider: Optional[str]=None, billing_base_url: Optional[str]=None,
         billing_mode: Optional[str]=None, api_call_count: int=0, absolute: bool=False,
-        source: Optional[str]=None, task: str = "",
-        served_api_key: Optional[str]=None, served_entry_id: Optional[str]=None,
+        source: Optional[str]=None, task: str = "", served_api_key: Optional[str]=None,
+        served_entry_id: Optional[str]=None,
     ) -> None:
         """Update totals and route attribution, ensuring the legacy missing-row backfill.
         *absolute*=False increments (per-API-call deltas, CLI path); *absolute*=True sets directly
@@ -285,10 +285,10 @@ class SessionUsageMixin:
         real surface for the row-existence guard; callers that don't know it leave the placeholder.
         ``task`` names a per-turn route (``voice_chat``): its calls count in the session totals and
         land in ``session_model_usage`` under that task, but never become the session's recorded route.
-
         ``served_api_key`` / ``served_entry_id`` are the credential of the account that ACTUALLY
-        served this call (D42); they are not persisted as columns, they only ride the coalescing
-        route key and feed ``_record_model_usage`` so quota attribution names the right account."""
+        served this call (D42); the caller that holds the resolved runtime passes them so the
+        quota-attribution mark names the right account. Not persisted as a column — they only
+        ride the coalescing route key and feed ``_record_model_usage``."""
         values = dict(locals())
         values.pop('self')
         values.pop('session_id')
@@ -351,9 +351,8 @@ class SessionUsageMixin:
                    WHERE id = ?""", (model, billing_provider, billing_base_url, billing_mode, session_id))
         conn.execute(sql, params)
         if record_model_usage:
-            self._record_model_usage(
-                conn, session_id, task=task, **usage,
-                served_api_key=served_api_key, served_entry_id=served_entry_id)
+            self._record_model_usage(conn, session_id, task=task, **usage,
+                                      served_api_key=served_api_key, served_entry_id=served_entry_id)
 
     def _record_model_usage(
         self, conn, session_id: str, *, model: Optional[str]=None, billing_provider: Optional[str]=None,

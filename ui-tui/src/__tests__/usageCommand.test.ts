@@ -58,6 +58,23 @@ describe('/usage slash command', () => {
     vi.clearAllMocks()
   })
 
+  it('resolves the CTA at run time, so a locale pack applied after import is observed', async () => {
+    applyLocale('xx', {
+      lang: 'xx',
+      messages: { 'slashCmd.session.usage.cta': 'ZZ-CTA', 'slashCmd.session.usage.noCalls': 'ZZ-NOCALLS' },
+      surface: 'tui'
+    })
+
+    try {
+      const { run, sys } = buildCtx({ 'session.usage': baseUsage({ calls: 0, credits_lines: [] }) })
+      await run('')
+      expect(printed(sys)).toContain('ZZ-CTA')
+      expect(printed(sys)).toContain('ZZ-NOCALLS')
+    } finally {
+      resetLocale()
+    }
+  })
+
   it('updates the status-bar quota from the session usage RPC', async () => {
     patchUiState({ usage: { calls: 1, input: 1, output: 1, total: 2 } })
 
@@ -96,23 +113,6 @@ describe('/usage slash command', () => {
     await run('')
 
     expect(getUiState().usage.account_usage_all).toEqual(all)
-  })
-
-  it('resolves the CTA at run time, so a locale pack applied after import is observed', async () => {
-    applyLocale('xx', {
-      lang: 'xx',
-      messages: { 'slashCmd.session.usage.cta': 'ZZ-CTA', 'slashCmd.session.usage.noCalls': 'ZZ-NOCALLS' },
-      surface: 'tui'
-    })
-
-    try {
-      const { run, sys } = buildCtx({ 'session.usage': baseUsage({ calls: 0, credits_lines: [] }) })
-      await run('')
-      expect(printed(sys)).toContain('ZZ-CTA')
-      expect(printed(sys)).toContain('ZZ-NOCALLS')
-    } finally {
-      resetLocale()
-    }
   })
 
   it('always shows the CTA; "no API calls yet" only when there is no balance', async () => {

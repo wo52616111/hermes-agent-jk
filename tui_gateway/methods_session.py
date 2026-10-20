@@ -442,6 +442,7 @@ def _create_session(rid, params: dict, *, copy_parent_history: bool = False) -> 
         logger.info("session.create %s: model=%s provider=%s source=client override (profile default: %s)",
                     key, session_model_override["model"], session_model_override.get("provider") or "-",
                     _session_default_route(_sessions[sid])[0])
+
     # Quota credentials are profile-scoped. Bootstrap this profile now (off
     # the create path) so an idle secondary-profile session gets its first
     # snapshot without waiting for a prompt turn.
@@ -1465,31 +1466,7 @@ def _(rid, params: dict, session: dict) -> dict:
         from agent.account_usage import nous_credits_lines
         if credits := nous_credits_lines():
             usage["credits_lines"] = credits
-    # Provider account limits (e.g. Codex quota windows) — the same block the CLI and gateway /usage
-    # render, so the Desktop usage feed is not the one surface that omits them. Fail-open.
-    with contextlib.suppress(Exception):
-        if account := _account_usage_lines(session):
-            usage["account_lines"] = account
     return _ok(rid, usage)
-
-
-def _account_usage_lines(session: dict) -> list[str]:
-    """Rendered account-limit lines for the session's route: the live agent's provider/endpoint when
-    built, else the configured ``model.provider`` (on-disk credentials suffice, e.g. Codex OAuth).
-    Subscription providers are served from the shared quota state so every surface shares one fetch
-    and its 429 backoff; other providers fetch directly."""
-    from agent import quota_state
-    from agent.account_usage import fetch_account_usage, render_account_usage_lines
-    agent = session.get("agent")
-    provider = getattr(agent, "provider", None) or _config_model_target()[1]
-    if not provider:
-        return []
-    base_url = getattr(agent, "base_url", None)
-    subscription = quota_state.quota_provider(provider, base_url)
-    if subscription in quota_state.SUPPORTED:
-        return render_account_usage_lines(quota_state.account_snapshot(subscription))
-    snapshot = fetch_account_usage(provider, base_url=base_url, api_key=getattr(agent, "api_key", None))
-    return render_account_usage_lines(snapshot)
 
 
 @_session_method("session.context_breakdown")

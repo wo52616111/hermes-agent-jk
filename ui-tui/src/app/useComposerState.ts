@@ -629,7 +629,6 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
       setQueueEdit,
       takeQ,
       toggleStash,
-      setInputBuf,
       syncTokens
     ]
   )

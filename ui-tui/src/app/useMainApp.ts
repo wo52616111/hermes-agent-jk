@@ -44,7 +44,7 @@ import { terminalParityHints } from '../lib/terminalParity.js'
 import { formatAbandonedClarify, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
 import { onUserWidgets } from '../sdk/userWidgets.js'
-import type { Msg, PanelSection, SlashCatalog } from '../types.js'
+import type { Msg, PanelSection } from '../types.js'
 
 import { applyAgentSnapshot } from './agentRoster.js'
 import { clarifySettledRows } from './clarifyTranscript.js'
@@ -52,16 +52,17 @@ import { createGatewayEventHandler } from './createGatewayEventHandler.js'
 import { createServerRequestHandler } from './createServerRequestHandler.js'
 import { createSlashHandler } from './createSlashHandler.js'
 import { planGatewayRecovery } from './gatewayRecovery.js'
-import { applyGoalSnapshot } from './goalStatus.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import { type GatewayRpc, type SlashHandler, type StateSetter, type TranscriptRow, type UiState } from './interfaces.js'
 import { requestLiveSessions } from './liveSessions.js'
+import { applyControlSnapshot } from './loopStatus.js'
 import { $overlayState, capturePromptResponseGuard, hasSensitivePrompt, patchOverlayState } from './overlayStore.js'
 import { $goodVibesTick } from './petFlashStore.js'
 import { applyProcessSnapshot, type ProcessEntry } from './processRoster.js'
 import { scrollWithSelectionBy } from './scroll.js'
 import { respondToServerRequest } from './serverRequestStore.js'
 import { mutateCanonicalSession } from './slash/canonicalSessionControls.js'
+import { setSlashCatalog, useSlashCatalog } from './slashCatalog.js'
 import { captureDestination, isCurrentDestination, type SubmissionDestination } from './submissionDestination.js'
 import { turnController } from './turnController.js'
 import { patchTurnState, useTurnSelector } from './turnStore.js'
@@ -86,10 +87,6 @@ import { useSubmission } from './useSubmission.js'
 const BRACKET_PASTE_ON = '\x1b[?2004h'
 const BRACKET_PASTE_OFF = '\x1b[?2004l'
 const MAX_HEIGHT_CACHE_BUCKETS = 12
-
-// Keep the startup surface responsive while AppLayout renders it through the
-// shared launcher/gateway theme resolver.
-export const initialHistoryItems = (): Msg[] => [{ kind: 'intro', role: 'system', text: '' }]
 
 interface ExitClose {
   close: () => Promise<void>
@@ -134,6 +131,10 @@ function deferExitForClose(gw: GatewayClient, state: ExitClose, again: () => voi
 
   return true
 }
+
+// Keep the startup surface responsive while AppLayout renders it through the
+// shared launcher/gateway theme resolver.
+export const initialHistoryItems = (): Msg[] => [{ kind: 'intro', role: 'system', text: '' }]
 
 const statusColorOf = (status: string, t: { error: string; muted: string; ok: string; warn: string }) => {
   if (status === 'ready') {
@@ -310,7 +311,6 @@ export function useMainApp(gw: GatewayClient) {
 
   const [lastUserMsg, setLastUserMsg] = useState('')
   const [stickyPrompt, setStickyPrompt] = useState('')
-  const [catalog, setCatalog] = useState<null | SlashCatalog>(null)
   const [voiceEnabled, setVoiceEnabled] = useState(false)
   const [voiceTts, setVoiceTts] = useState(false)
   const [voiceRecording, setVoiceRecording] = useState(false)
@@ -640,6 +640,7 @@ export function useMainApp(gw: GatewayClient) {
   )
 
   const gateway = useMemo(() => ({ gw, rpc }), [gw, rpc])
+  const catalog = useSlashCatalog(rpc)
 
   const { die, dieWithCode, exitClose } = useDie(gw, exit)
 
@@ -697,15 +698,15 @@ export function useMainApp(gw: GatewayClient) {
     let stopped = false
     applyAgentSnapshot(ui.sid)
     applyProcessSnapshot(ui.sid)
-    applyGoalSnapshot(ui.sid)
-    // Goal state changes only on /goal and after a judged turn, both of which push
+    applyControlSnapshot(ui.sid)
+    // Goal/loop state changes only on their slash commands, a judged turn or a loop wakeup, all of which push
     // `session.control.update`; read it once per session instead of polling state.db.
     gw.request<{ control: SessionControlSnapshot }>('session.control.read', { session_id: ui.sid })
       .then(raw => {
         const result = asRpcResult<{ control: SessionControlSnapshot }>(raw)
 
         if (!stopped && result && getUiState().sid === ui.sid) {
-          applyGoalSnapshot(ui.sid, result.control?.goal ?? null)
+          applyControlSnapshot(ui.sid, result.control)
         }
       })
       .catch(() => {})
@@ -1035,7 +1036,7 @@ export function useMainApp(gw: GatewayClient) {
           recoverSidRef,
           resetSession: session.resetSession,
           resumeById: session.resumeById,
-          setCatalog
+          setCatalog: setSlashCatalog
         },
         submission: { submitLiteralRef, submitRef },
         system: { bellOnComplete, bellOnPrompt, stdout, sys },
@@ -1198,7 +1199,7 @@ export function useMainApp(gw: GatewayClient) {
           getHistoryItems: () => historyItemsRef.current,
           getLastUserMsg: () => lastUserMsgRef.current,
           maybeWarn,
-          setCatalog
+          setCatalog: setSlashCatalog
         },
         session: {
           closeSession: session.closeSession,
@@ -1415,7 +1416,7 @@ export function useMainApp(gw: GatewayClient) {
       patchUiState({ status: t('session.status.closingSession') })
 
       try {
-        const result = (await session.closeSession(id)) as null | SessionCloseResponse
+        const result = (await session.closeLiveView(id)) as null | SessionCloseResponse
         patchUiState({ status: 'ready' })
 
         return result

@@ -56,8 +56,8 @@ export function ArtLines({ lines }: { lines: [string, string][] }) {
 // fits the available columns. Thresholds are picked so each tier reads
 // comfortably without forcing wrap or truncation drift on box-drawing edges.
 // Taglines live in the catalog (chatBits.branding.tagFull/tagMid); the tiny
-// tier is the bare brand name and stays untranslated. Fork: tiny tier carries the customization credit.
-const TAG_TINY = 'Customized by junkai'
+// tier is the bare brand name and stays untranslated.
+const TAG_TINY = 'Nous Research'
 const HIDE_BELOW = 34
 const COMPACT_FROM = 58
 
