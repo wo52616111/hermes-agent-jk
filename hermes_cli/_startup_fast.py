@@ -236,7 +236,16 @@ def print_fast_version_info(*, check_updates: bool = True) -> None:
             commits_word = "commit" if behind == 1 else "commits"
             print(f"Update available: {behind} {commits_word} behind — run '{recommended_update_command()}'")
         elif behind == 0:
-            print("Up to date")
+            # Name what was compared. The passive check follows the checkout's OWN branch, so a
+            # checkout parked on a long-lived branch reads "up to date" here while the channel can
+            # be hundreds of commits ahead — `update --check` is the channel answer, and saying
+            # "Up to date" alone reads as "nothing to install" (it is not).
+            branch = status.get("branch")
+            if branch and branch != "main":
+                print(f"Up to date with origin/{branch} — "
+                      f"'{recommended_update_command()} --check' reports the channel")
+            else:
+                print(f"Up to date with origin/{branch}" if branch else "Up to date")
     except Exception:
         pass
 
