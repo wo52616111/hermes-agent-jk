@@ -238,3 +238,32 @@ def test_termux_chat_shortcut_leaves_subcommands_to_dispatch(monkeypatch, argv):
     monkeypatch.delenv("HERMES_TERMUX_DISABLE_FAST_CLI", raising=False)
     monkeypatch.setattr(sys, "argv", ["hermes", *argv])
     assert main._try_termux_fast_cli_launch() is False
+
+
+def _version_output(monkeypatch, capsys, status):
+    """``hermes --version``'s update line for a given passive-check status."""
+    from hermes_cli import _startup_fast, source_check
+    import hermes_cli.config as hermes_config
+
+    monkeypatch.setattr(source_check, "check_for_updates", lambda **kwargs: status)
+    monkeypatch.setattr(hermes_config, "recommended_update_command", lambda: "hermes update")
+    _startup_fast.print_fast_version_info(check_updates=True)
+    return capsys.readouterr().out
+
+
+def test_version_line_names_the_compared_branch_when_parked(monkeypatch, capsys):
+    """A checkout parked on a long-lived branch follows THAT branch, so "Up to date" alone reads
+    as "nothing to install" while the channel can be hundreds of commits ahead. The line must name
+    the branch it compared and point at the channel check."""
+    out = _version_output(monkeypatch, capsys, {"behind": 0, "branch": "2610/upstream-sync"})
+
+    assert "Up to date with origin/2610/upstream-sync" in out
+    assert "hermes update --check" in out
+
+
+def test_version_line_on_the_channel_branch_stays_plain(monkeypatch, capsys):
+    """On ``main`` there is no parked branch to disambiguate: no channel hint."""
+    out = _version_output(monkeypatch, capsys, {"behind": 0, "branch": "main"})
+
+    assert "Up to date with origin/main" in out
+    assert "--check" not in out
