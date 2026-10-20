@@ -805,3 +805,56 @@ def test_failed_switch_names_the_worktree_not_a_missing_branch(worktree_install,
     assert f"is checked out at {primary}" in out
     assert "update_in_place" in out
     assert "does not exist locally or on origin" not in out
+
+
+# ---------------------------------------------------------------------------
+# End to end through cmd_update, in the install-worktree layout
+# ---------------------------------------------------------------------------
+
+def _stop_after_pull(monkeypatch):
+    class _StopFlow(Exception):
+        pass
+
+    monkeypatch.setattr(
+        update_cmd, "_complete_source_update",
+        lambda *a, **k: (_ for _ in ()).throw(_StopFlow()))
+    return _StopFlow
+
+
+def test_update_from_a_worktree_install_pulls_in_place(worktree_install, monkeypatch, capsys):
+    """The whole `hermes update` decision path, against real git: the install worktree pulls
+    origin/main onto the branch it is on. Before the fix this died at
+    `✗ Branch 'main' does not exist locally or on origin.` and moved nothing."""
+    primary, install = worktree_install
+    _patch_update_flow(monkeypatch, install)
+    stop = _stop_after_pull(monkeypatch)
+
+    with pytest.raises(stop):
+        hermes_main.cmd_update(SimpleNamespace(branch=None, yes=True, force=False, force_venv=False))
+
+    out = capsys.readouterr().out
+    assert "in place from origin/main" in out
+    assert "does not exist locally or on origin" not in out
+    assert _git(install, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "install-branch"
+    # Both tips are the same commit: a plain fast-forward of the branch it was already on.
+    assert _git(install, "rev-parse", "HEAD").stdout.strip() == _git(
+        install, "rev-parse", "origin/main").stdout.strip()
+
+
+def test_update_from_a_worktree_install_keeps_local_commits(worktree_install, monkeypatch, capsys):
+    """Local work on the parked branch survives the in-place update as a real merge."""
+    primary, install = worktree_install
+    (install / "local.txt").write_text("work\n", encoding="utf-8")
+    _git(install, "add", "local.txt")
+    _git(install, "commit", "-qm", "local work")
+    _patch_update_flow(monkeypatch, install)
+    stop = _stop_after_pull(monkeypatch)
+
+    with pytest.raises(stop):
+        hermes_main.cmd_update(SimpleNamespace(branch=None, yes=True, force=False, force_venv=False))
+
+    assert _git(install, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "install-branch"
+    _git(install, "merge-base", "--is-ancestor", "origin/main", "HEAD")
+    parents = _git(install, "rev-list", "--parents", "-1", "HEAD").stdout.split()
+    assert len(parents) == 3, "HEAD should be the merge of origin/main into the parked branch"
+    assert (install / "local.txt").exists()
