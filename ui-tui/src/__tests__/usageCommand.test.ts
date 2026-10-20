@@ -92,7 +92,6 @@ describe('/usage slash command', () => {
 
     expect(getUiState().usage.account_usage).toEqual(accountUsage)
     expect(getUiState().usage.context_used).toBe(50_000)
->>>>>>> 0f7791f06b (✨ feat: ship capacity status bar as downstream build)
   })
 
   it('copies account_usage_all from the session usage RPC', async () => {
