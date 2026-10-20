@@ -228,6 +228,26 @@ def _assess_parked_branch_switch(git_cmd: list[str], cwd: Path, current_branch: 
     return True, f"unmerged:{len(unmerged)}" if unmerged else ""
 
 
+def _worktree_branch_holder(git_cmd: list[str], cwd: Path, branch: str) -> str | None:
+    """The linked worktree that has *branch* checked out, or ``None``.
+
+    git refuses to check a branch out twice, so an install that lives in its own worktree (a normal
+    dev layout: the primary checkout holds ``main``, the install runs from a sibling worktree on a
+    long-lived branch) can never be switched to that branch. Only ``git worktree list --porcelain``
+    answers this honestly — the checkout's stderr says the same thing but as prose.
+    """
+    listed = _git_run(git_cmd, ["worktree", "list", "--porcelain"], cwd)
+    if listed.returncode != 0:
+        return None
+    path = ""
+    for line in (listed.stdout or "").splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):].strip()
+        elif line == f"branch refs/heads/{branch}" and path:
+            return path
+    return None
+
+
 _PARKED_SKIP_WHY = {
     "dirty": "the working tree has uncommitted changes",
     "disabled": "updates.auto_switch_parked_branch is set to false in config.yaml",
