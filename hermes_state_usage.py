@@ -421,12 +421,24 @@ class SessionUsageMixin:
         if not session_id or not task:
             return
         usage["api_call_count"] = 1 if api_call_count is None else int(api_call_count)
-        # FK to sessions.id: same guard as update_token_counts; the aux path carries no surface, so
-        # the placeholder stays repairable by the creator's upsert (_insert_session_row).
-        self._insert_session_row(session_id, "unknown")
-        self._execute_write(lambda conn: self._record_model_usage(
-            conn, session_id, task=task, **usage,
-            served_api_key=served_api_key, served_entry_id=served_entry_id))
+        # FK to sessions.id. A missing row is inserted as the ``unknown`` placeholder, which
+        # the creator upsert later replaces. An existing row keeps source and created_source,
+        # including a NULL surface update_token_counts can still fill; the UPDATE below only
+        # fills a NULL profile_name, without writing ``unknown`` anywhere.
+        from hermes_state_worker_lifecycle import insert_session_row_in_transaction
+
+        def _write(conn):
+            if conn.execute("SELECT 1 FROM sessions WHERE id=?", (session_id,)).fetchone() is None:
+                insert_session_row_in_transaction(self, conn, session_id, "unknown")
+            elif own_profile := self._own_profile_name():
+                conn.execute(
+                    "UPDATE sessions SET profile_name=? WHERE id=? AND profile_name IS NULL",
+                    (own_profile, session_id))
+            # D42 attribution: an aux call still names the credential that served it (the fork's
+            # ``served_*`` pair), so the quota mark lands on the right account of a pool.
+            self._record_model_usage(conn, session_id, task=task, **usage,
+                                     served_api_key=served_api_key, served_entry_id=served_entry_id)
+        self._execute_write(_write, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 
     def auxiliary_usage_by_task(self, session_id: str) -> dict[str, dict[str, float]]:
         """Per-task auxiliary usage (``task != ''``: vision, compression, title_generation, ...) summed
