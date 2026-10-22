@@ -1642,6 +1642,13 @@ def _turn_started_at(session: dict | None) -> float | None:
     return float(inflight["started_at"]) if isinstance(inflight, dict) and inflight.get("started_at") else None
 
 
+def _scoped_session_provider(agent, session: dict) -> str:
+    """The entry an agent on the ``custom`` adapter runs, resolved in the session's own profile: clients
+    reuse this identity for new chats without the endpoint or key, and callers need not be bound to it."""
+    with _profile_build_scope(session.get("profile_home") or _hermes_home):
+        return _runtime_model_config(agent).get("provider") or "custom"
+
+
 def _live_session_identity(session: dict) -> tuple[str, str]:
     """``(model, provider)`` the live session actually runs — the same precedence ``_session_info`` reports:
     a switch queued mid-turn, the metadata mirror, the built agent, the composer override a deferred record
@@ -1652,8 +1659,11 @@ def _live_session_identity(session: dict) -> tuple[str, str]:
     override = session.get("model_override") or {}
     model = (str(pending.get("display_model") or "").strip() or mirror.get("model")
              or getattr(agent, "model", "") or override.get("model"))
+    agent_provider = getattr(agent, "provider", "")
+    if agent_provider == "custom":
+        agent_provider = _scoped_session_provider(agent, session)
     provider = (str(pending.get("display_provider") or "").strip() or mirror.get("provider")
-                or getattr(agent, "provider", "") or override.get("provider"))
+                or agent_provider or override.get("provider"))
     default = ("", "") if model else _session_default_route(session)
     return str(model or default[0]), str(provider or default[1])
 
@@ -1705,14 +1715,8 @@ def _session_info(agent, session: dict | None = None) -> dict:
     pending_model = str(pending_switch.get("display_model") or "").strip()
     pending_provider = str(pending_switch.get("display_provider") or "").strip()
     provider = mirror.get("provider", getattr(agent, "provider", ""))
-    requested_provider = str(getattr(agent, "requested_provider", "") or "").strip()
-    if provider == "custom" and requested_provider.lower() not in {"", "custom", "auto"}:
-        provider = requested_provider
     if provider == "custom" and "provider" not in mirror and agent is not None:
-        # Clients reuse this identity for new chats without carrying the endpoint or key.
-        # Broadcast/resume callers need not be bound to this session's profile.
-        with _profile_build_scope(sess.get("profile_home") or _hermes_home):
-            provider = _runtime_model_config(agent).get("provider", provider)
+        provider = _scoped_session_provider(agent, sess)
     model = pending_model or mirror.get("model", getattr(agent, "model", ""))
     # The level the route's entry clamp actually sends (== reasoning_effort when verbatim), so the
     # Desktop can say "ultra sends max on this route" like `/reasoning` does instead of presenting a

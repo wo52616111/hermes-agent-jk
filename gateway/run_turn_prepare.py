@@ -258,21 +258,11 @@ class GatewayTurnPrepareMixin:
         model = getattr(agent, "model", None)
         if not model:
             return
-        adapter_provider = str(getattr(agent, "provider", "") or "").strip()
-        requested_provider = str(getattr(agent, "requested_provider", "") or "").strip()
-        provider = adapter_provider
-        if adapter_provider.lower() == "custom":
-            if requested_provider.lower() not in {"", "custom", "auto"}:
-                provider = requested_provider
-            else:
-                try:
-                    from hermes_cli.runtime_provider import canonical_custom_identity
-                    provider = canonical_custom_identity(
-                        base_url=str(getattr(agent, "base_url", "") or ""), model=model) or provider
-                except Exception:
-                    logger.debug("custom provider identity lookup failed", exc_info=True)
+        from hermes_cli.runtime_provider_custom import session_provider_identity
         runtime = {
-            "provider": provider,
+            "provider": session_provider_identity(getattr(agent, "provider", None),
+                                                  getattr(agent, "requested_provider", None),
+                                                  getattr(agent, "base_url", None), model),
             "base_url": getattr(agent, "base_url", None),
             "api_mode": getattr(agent, "api_mode", None),
         }

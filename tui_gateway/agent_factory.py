@@ -187,19 +187,9 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
     from agent.voice_turn_route import session_runtime_view
     agent = session_runtime_view(agent)
     attr = lambda k: str(getattr(agent, k, "") or "").strip()
-    model, provider, requested_provider, base_url = (
-        attr("model"), attr("provider"), attr("requested_provider"), attr("base_url"))
-    if provider.lower() == "custom":
-        # ``agent.provider`` is the adapter class for every named custom entry. Keep the
-        # requested identity when available; endpoint matching is ambiguous when entries share a host.
-        if requested_provider and requested_provider.lower() not in {"custom", "auto"}:
-            provider = requested_provider
-        else:
-            try:
-                from hermes_cli.runtime_provider import canonical_custom_identity
-                provider = canonical_custom_identity(base_url=base_url, model=model or None) or provider
-            except Exception:
-                logger.debug("custom provider identity lookup failed", exc_info=True)
+    model, base_url = attr("model"), attr("base_url")
+    from hermes_cli.runtime_provider_custom import session_provider_identity
+    provider = session_provider_identity(attr("provider"), attr("requested_provider"), base_url, model)
     reasoning_config = getattr(agent, "reasoning_config", None)
     live = {
         "model": model, "provider": provider, "base_url": base_url, "api_mode": attr("api_mode"),

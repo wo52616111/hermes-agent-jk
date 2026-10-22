@@ -400,6 +400,22 @@ def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider
     return identity or custom_provider_slug(candidate_norm)
 
 
+def session_provider_identity(provider: Any, requested_provider: Any, base_url: Any, model: Any = None, *,
+                              config: Optional[dict[str, Any]] = None) -> str:
+    """A session's identity: the requested entry while it still serves ``base_url`` (an edited entry would
+    pair its new key with the old endpoint on resume), else the endpoint's entry, else the adapter."""
+    adapter = _clean(provider)
+    if adapter.lower() != "custom":
+        return adapter
+    requested = _clean(requested_provider)
+    url = _normalize_base_url_for_match(base_url)
+    if url and requested.lower() not in {"", "custom", "auto"}:
+        entry = _get_named_custom_provider(requested, config=config, resolve_credentials=False)
+        if entry and _normalize_base_url_for_match(_entry_url(entry)) == url:
+            return requested
+    return canonical_custom_identity(base_url=_clean(base_url) or None, model=_clean(model) or None) or adapter
+
+
 def is_routable_provider(provider: Optional[str]) -> bool:
     """Whether a provider name currently resolves to a routable route. Empty/None/``auto`` is
     vacuously routable (agent build falls back to the configured default). Bare ``custom`` is the

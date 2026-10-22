@@ -96,11 +96,15 @@ def test_bare_custom_sync_uses_canonical_endpoint_fallback(tmp_path, monkeypatch
 
 
 def test_tui_runtime_config_and_session_info_keep_requested_custom_slug(monkeypatch):
+    from hermes_cli.config import atomic_config_write, get_config_path
+    from hermes_constants import get_hermes_home
+
+    atomic_config_write(get_config_path(), CONFIG)
     agent = _agent()
     monkeypatch.setattr("tui_gateway.server._load_approval_mode", lambda: "manual")
     config = _runtime_model_config(agent)
     assert config["provider"] == "custom:beta"
-    info = _session_info(agent, {"agent": agent, "session_key": "s1"})
+    info = _session_info(agent, {"agent": agent, "session_key": "s1", "profile_home": str(get_hermes_home())})
     assert info["provider"] == "custom:beta"
     assert "sk-beta" not in str(config)
 
@@ -121,8 +125,11 @@ async def test_canonical_session_info_snapshot_uses_named_custom_identity(tmp_pa
     from gateway.session_local_inventory import snapshot_info
     from tests.gateway.test_surface_admission import _authority
 
+    from hermes_cli.config import atomic_config_write, get_config_path
+
     agent = _agent()
     authority = await _authority(tmp_path, monkeypatch, lambda _event: "ok")
+    atomic_config_write(get_config_path(), CONFIG)
     authority.runner._cached_agent_for = lambda _route: agent
     info = await snapshot_info(authority, SessionRef("p", "s"))
     assert info["provider"] == "custom:beta"
@@ -203,9 +210,10 @@ def test_tui_runtime_config_does_not_pair_an_edited_entry_key_with_the_old_endpo
 def test_live_unpersisted_session_reports_the_requested_entry(monkeypatch):
     """A built session reattached before its first turn reports the entry it runs, not the adapter class."""
     from hermes_cli.config import atomic_config_write, get_config_path
+    from hermes_constants import get_hermes_home
     from tui_gateway.server import _live_session_identity
 
     atomic_config_write(get_config_path(), CONFIG)
-    session = {"agent": _agent(), "session_key": "not-persisted"}
+    session = {"agent": _agent(), "session_key": "not-persisted", "profile_home": str(get_hermes_home())}
     assert _live_session_identity(session) == ("beta-model", "custom:beta")
 
