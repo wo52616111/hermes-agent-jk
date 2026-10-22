@@ -146,3 +146,66 @@ def test_non_custom_adapter_does_not_take_requested_custom_identity(tmp_path, mo
         assert SessionDB.session_gateway_runtime(row)["provider"] == "anthropic"
     finally:
         db.close()
+
+
+OLD_URL = "https://old.example/v1"
+NEW_URL = "https://new.example/v1"
+
+
+def _edited_entry_agent():
+    """A live session on ``custom:alpha`` whose entry was then moved to another endpoint and key."""
+    from hermes_cli import runtime_provider
+    from hermes_cli.config import atomic_config_write, get_config_path
+
+    config = {
+        "model": {"default": "m", "provider": "custom:alpha"},
+        "custom_providers": [
+            {"name": "alpha", "base_url": OLD_URL, "api_key": "sk-old", "model": "m"},
+            {"name": "old-owner", "base_url": OLD_URL, "api_key": "sk-old", "model": "m"},
+        ],
+    }
+    atomic_config_write(get_config_path(), config)
+    runtime = runtime_provider.resolve_runtime_provider(requested="custom:alpha", target_model="m")
+    agent = SimpleNamespace(model="m", provider=runtime["provider"], requested_provider=runtime["requested_provider"],
+                            base_url=runtime["base_url"], api_mode=runtime["api_mode"], _fallback_activated=False)
+    config["custom_providers"][0].update(base_url=NEW_URL, api_key="sk-new")
+    atomic_config_write(get_config_path(), config)
+    return agent
+
+
+def _resumed_route(row):
+    from tui_gateway.server import _resolve_agent_model_runtime
+
+    overrides = _stored_session_runtime_overrides(row)
+    _, restored = _resolve_agent_model_runtime(overrides["model_override"], overrides.get("provider_override"))
+    return restored["base_url"], restored["api_key"]
+
+
+def test_gateway_sync_does_not_pair_an_edited_entry_key_with_the_old_endpoint(tmp_path):
+    agent = _edited_entry_agent()
+    db = SessionDB(tmp_path / "state.db")
+    try:
+        db.create_session("s1", source="telegram", model="m")
+        GatewayTurnPrepareMixin._sync_session_model_from_agent(_runner(db), "s1", agent)
+        assert _resumed_route(db.get_session("s1")) == (OLD_URL, "sk-old")
+    finally:
+        db.close()
+
+
+def test_tui_runtime_config_does_not_pair_an_edited_entry_key_with_the_old_endpoint():
+    import json
+
+    agent = _edited_entry_agent()
+    row = {"model": "m", "model_config": json.dumps(_runtime_model_config(agent))}
+    assert _resumed_route(row) == (OLD_URL, "sk-old")
+
+
+def test_live_unpersisted_session_reports_the_requested_entry(monkeypatch):
+    """A built session reattached before its first turn reports the entry it runs, not the adapter class."""
+    from hermes_cli.config import atomic_config_write, get_config_path
+    from tui_gateway.server import _live_session_identity
+
+    atomic_config_write(get_config_path(), CONFIG)
+    session = {"agent": _agent(), "session_key": "not-persisted"}
+    assert _live_session_identity(session) == ("beta-model", "custom:beta")
+
