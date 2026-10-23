@@ -98,6 +98,10 @@ def _format_trust_gate_arguments(args: dict) -> str:
     from agent.redact import redact_sensitive_text
 
     rendered = json.dumps(_mask_secret_fields(args), ensure_ascii=False, indent=2, default=str)
+    # Scan and redact only a window well past the cap: a multi-megabyte payload (a file write) would
+    # otherwise hold the prompt back for seconds.
+    window = 4 * _TRUST_GATE_ARGUMENTS_MAX_CHARS
+    cut, rendered = len(rendered) > window, rendered[:window]
     # Bidi overrides, invisible format characters and the C1/DEL controls JSON leaves raw could make the
     # card show something other than what the server receives; render them as escapes.
     rendered = "".join(ch.encode("unicode_escape").decode()
@@ -105,7 +109,7 @@ def _format_trust_gate_arguments(args: dict) -> str:
     # force: the approval prompt is a display boundary even with security.redact_secrets off. The CLI
     # prints it as-is. Redact before truncating so a cut cannot split a secret past its pattern.
     rendered = redact_sensitive_text(rendered, force=True)
-    if len(rendered) > _TRUST_GATE_ARGUMENTS_MAX_CHARS:
+    if cut or len(rendered) > _TRUST_GATE_ARGUMENTS_MAX_CHARS:
         keep = _TRUST_GATE_ARGUMENTS_MAX_CHARS - len(_TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER)
         rendered = rendered[:keep].rstrip() + _TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER
     return rendered
