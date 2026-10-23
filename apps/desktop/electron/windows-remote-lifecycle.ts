@@ -83,8 +83,12 @@ async function probeWindowsFiles(ssh, explicitHermesPath = '') {
     '$fallbackProfileCandidate=Join-Path $HOME "hermes-agent\\.venv\\Scripts\\hermes.exe"',
     '$candidates=@()',
     'if($explicit){$candidates+=$explicit}',
-    '$cmd=Get-Command hermes.exe -ErrorAction SilentlyContinue',
+    // A bare `hermes` resolves through PATHEXT, so a published hermes.cmd counts as well as hermes.exe.
+    '$cmd=@(Get-Command hermes -CommandType Application -ErrorAction SilentlyContinue)|Select-Object -First 1',
     'if($cmd){Assert-NoReparse $cmd.Source $true;$cmdPython=[IO.Path]::Combine([IO.Path]::GetDirectoryName($cmd.Source), "python.exe");Assert-NoReparse $cmdPython $true;$candidates+=$cmd.Source}',
+    // The installer's launchers, for an SSH session whose PATH lacks the user PATH entry.
+    '$candidates+=Join-Path $hermesHome "bin\\hermes.exe"',
+    '$candidates+=Join-Path $hermesHome "bin\\hermes.cmd"',
     '$candidates+=$fallbackHomeCandidate',
     '$candidates+=$fallbackProfileCandidate',
     '$hermes=$null',

@@ -204,7 +204,7 @@ test('Windows relaunch gate refuses live and uncertain markers before executing 
       const script = scriptFromInvocation(command, options)
       scripts.push(script)
 
-      if (script.includes('Get-Command hermes.exe')) {
+      if (script.includes('Get-Command hermes -CommandType Application')) {
         return JSON.stringify({
           os: 'Windows',
           arch: 'AMD64',

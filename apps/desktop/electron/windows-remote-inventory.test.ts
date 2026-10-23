@@ -56,7 +56,7 @@ test('PATH bin launcher is resolved independently of its absent sibling Python, 
     const script = streamed(command, options)
     calls.push(script)
 
-    if (script.includes('Get-Command hermes.exe')) {
+    if (script.includes('Get-Command hermes -CommandType Application')) {
       return JSON.stringify({ ...runtime, python: '', launcherPath: runtime.hermesPath })
     }
 
@@ -84,7 +84,7 @@ test('held marker stops launcher imports and unrecognized runtime capabilities f
   const blocked = { exec: async (command: string, options: { stdinData?: string }) => {
     const script = streamed(command, options)
 
-    if (script.includes('Get-Command hermes.exe')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
+    if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
 
     if (script.includes('.hermes-update-in-progress')) {return 'HELD'}
     imported = true
@@ -98,7 +98,7 @@ test('held marker stops launcher imports and unrecognized runtime capabilities f
   const invalid = { exec: async (command: string, options: { stdinData?: string }) => {
     const script = streamed(command, options)
 
-    if (script.includes('Get-Command hermes.exe')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
+    if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
 
     if (script.includes('.hermes-update-in-progress')) {return 'CLEAR'}
 
@@ -136,7 +136,7 @@ test('Connect refuses an older helper before token upload or backend spawn on a 
   const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
     const script = streamed(command, options)
 
-    if (script.includes('Get-Command hermes.exe')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
+    if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
 
     if (script.includes('.hermes-update-in-progress')) {return 'CLEAR'}
 

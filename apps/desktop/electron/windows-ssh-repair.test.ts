@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
+import fs from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
 
 import { test } from 'vitest'
 
 import { listRemoteHermesProfiles, readRemoteInstallId } from './remote-lifecycle'
-import { assertWindowsRemoteInstallUpdateClear, connectWindowsRemote, probeWindowsRemote, windowsHelperOwnsRuntime } from './windows-remote-lifecycle'
+import { assertWindowsRemoteInstallUpdateClear, connectWindowsRemote, probeWindowsFiles, probeWindowsRemote, windowsHelperOwnsRuntime } from './windows-remote-lifecycle'
 
 const runtime = {
   os: 'Windows', arch: 'AMD64', hermesHome: 'C:\\Users\\A\\AppData\\Local\\hermes',
@@ -76,7 +80,7 @@ test('a bin launcher does not require a nonexistent sibling Python and resolves 
   const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
     const script = Buffer.from(String(options?.stdinData || '').trim(), 'base64').toString('utf16le')
 
-    if (script.includes('Get-Command hermes.exe')) {return JSON.stringify({ ...runtime, python: '', launcherPath: runtime.hermesPath })}
+    if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, python: '', launcherPath: runtime.hermesPath })}
 
     if (script.includes('.hermes-update-in-progress')) {return 'CLEAR'}
 
@@ -98,7 +102,7 @@ test('the complete connect path keeps atomic spawn off argv and delivers the exp
 
     if (!token || script.includes('ReadToEnd')) {script = Buffer.from(String(options.stdinData || '').trim(), 'base64').toString('utf16le')}
 
-    if (script.includes('Get-Command hermes.exe')) {return JSON.stringify(runtime)}
+    if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify(runtime)}
 
     if (script.includes("'spawn'")) {
       assert.ok(command.length < 8191, 'Connect must not inline its atomic spawn script')
@@ -137,4 +141,30 @@ test('Test and Connect share one verdict on a helper too old for a boot-selected
   assert.equal(windowsHelperOwnsRuntime(selected, { supported: true }), false)
   assert.equal(windowsHelperOwnsRuntime(selected, { supported: true, runtimeBootstrapOwnership: 1 }), true)
   assert.equal(windowsHelperOwnsRuntime(runtime, { supported: true }), true)
+})
+
+test.runIf(process.platform === 'win32')('the real Windows probe finds a .cmd-only launcher in the Hermes home off PATH', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-probe-home-'))
+  fs.mkdirSync(path.join(home, 'bin'))
+  fs.writeFileSync(path.join(home, 'bin', 'hermes.cmd'), '@echo off\r\n')
+  const system = process.env.SystemRoot || 'C:\\Windows'
+  const env = { ...process.env, HERMES_HOME: home, PATH: [path.join(system, 'System32'), system, path.join(system, 'System32', 'WindowsPowerShell', 'v1.0')].join(';') }
+
+  const ssh = {
+    exec: async (command: string, options: { stdinData?: string } = {}) => {
+      const [exe, ...args] = command.split(' ')
+      const result = spawnSync(exe, args, { input: options.stdinData, encoding: 'utf8', env })
+
+      if (result.status !== 0) {throw new Error(result.stderr)}
+
+      return result.stdout
+    }
+  }
+
+  try {
+    const parsed = await probeWindowsFiles(ssh, '')
+    assert.equal(parsed.hermesPath.toLowerCase(), path.join(home, 'bin', 'hermes.cmd').toLowerCase())
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true })
+  }
 })
