@@ -10340,7 +10340,7 @@ async function testDesktopConnectionConfig(input: any = {}) {
         }
       }
     } catch (error: any) {
-      return { reachable: false, sshError: error.kind || 'unknown', error: error.message }
+      return { reachable: false, sshError: error.kind || 'unknown', error: redactSecrets(String(error?.message || error)) }
     } finally {
       try {
         await ssh.close()
