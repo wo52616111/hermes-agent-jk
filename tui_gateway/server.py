@@ -1642,13 +1642,6 @@ def _turn_started_at(session: dict | None) -> float | None:
     return float(inflight["started_at"]) if isinstance(inflight, dict) and inflight.get("started_at") else None
 
 
-def _scoped_session_provider(agent, session: dict) -> str:
-    """The entry an agent on the ``custom`` adapter runs, resolved in the session's own profile: clients
-    reuse this identity for new chats without the endpoint or key, and callers need not be bound to it."""
-    with _profile_build_scope(session.get("profile_home") or _hermes_home):
-        return _runtime_model_config(agent).get("provider") or "custom"
-
-
 def _live_session_identity(session: dict) -> tuple[str, str]:
     """``(model, provider)`` the live session actually runs — the same precedence ``_session_info`` reports:
     a switch queued mid-turn, the metadata mirror, the built agent, the composer override a deferred record
@@ -1660,8 +1653,7 @@ def _live_session_identity(session: dict) -> tuple[str, str]:
     model = (str(pending.get("display_model") or "").strip() or mirror.get("model")
              or getattr(agent, "model", "") or override.get("model"))
     agent_provider = getattr(agent, "provider", "")
-    if agent_provider == "custom":
-        agent_provider = _scoped_session_provider(agent, session)
+    agent_provider = _scoped_session_provider(agent, session) if agent_provider == "custom" else agent_provider
     provider = (str(pending.get("display_provider") or "").strip() or mirror.get("provider")
                 or agent_provider or override.get("provider"))
     default = ("", "") if model else _session_default_route(session)
