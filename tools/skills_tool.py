@@ -336,6 +336,12 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
     from agent.skill_utils import is_valid_namespace, parse_qualified_name
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
     namespace, bare = parse_qualified_name(name)
+    if namespace == "plugin" and ":" in bare:
+        # The skills index lists plugin skills under a "plugin" heading, and models write that
+        # heading as a prefix ("plugin:agent-plugin-blender-5a80e4ba:blender"). A bare skill name
+        # never holds a colon, so the remainder is the real qualified name.
+        name = bare
+        namespace, bare = parse_qualified_name(name)
     if not is_valid_namespace(namespace):
         return _fail(f"Invalid namespace '{namespace}' in '{name}'. Namespaces must match [a-zA-Z0-9_-]+."), None
     discover_plugins()  # idempotent
