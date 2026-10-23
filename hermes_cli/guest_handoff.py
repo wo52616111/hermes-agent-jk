@@ -166,8 +166,9 @@ def _run_one(path: Path, key: str) -> Optional[dict[str, Any]]:
     from hermes_cli.auth_constants import AuthError
     try:
         bearer = _bearer()
-    except AuthError as exc:
-        logger.info("Free-tier handoff (%s): account token unavailable (%s)", key[:8], exc.code)
+    except (AuthError, TimeoutError) as exc:  # a busy store lock defers the move like a missing token
+        logger.info("Free-tier handoff (%s): account token unavailable (%s)", key[:8],
+                    getattr(exc, "code", None) or type(exc).__name__)
         return None
     record = _update(path, key, _reserve)
     if record is None:
@@ -241,8 +242,8 @@ def _classify(status: int, payload: dict[str, Any]) -> str:
 
 def _apply(record: dict[str, Any], outcome: str, payload: dict[str, Any], retry_after: Optional[float],
            prior_attempts: int) -> dict[str, Any]:
-    if record["state"] == CLAIMED:
-        return record  # never overwritten, whatever a racing attempt heard
+    if record["state"] not in _ACTIVE:
+        return record  # a finished move stays finished, whatever a late attempt heard
     record = {**record, "error": payload.get("error"), "next_attempt_at": None}
     if outcome == _CLAIMED:
         connectors = payload.get("connectors") if isinstance(payload.get("connectors"), dict) else None
@@ -301,10 +302,12 @@ def stop_worker(timeout: float = 5.0) -> None:
 
 
 def _worker_loop() -> None:
+    from tui_gateway.launch_profile_policy import launch_profile_scope_if_multiplexed
     wait = _WORKER_FIRST_TICK_SECONDS
     while not _worker_stop.wait(wait):
         try:
-            drain()
+            with launch_profile_scope_if_multiplexed():
+                drain()
         except Exception:
             logger.warning("Free-tier handoff retry tick failed; the records stay for the next one", exc_info=True)
         wait = _WORKER_INTERVAL_SECONDS

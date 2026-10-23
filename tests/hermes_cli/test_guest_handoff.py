@@ -305,6 +305,55 @@ def test_a_claimed_record_is_never_reopened(portal):
     assert len(portal.claims) == 1 and _only_record()["state"] == record["state"] == "claimed"
 
 
+def test_a_late_answer_never_reopens_a_finished_move(portal, monkeypatch):
+    from hermes_cli import guest_handoff
+    _mint_guest()
+    _save(_account())
+    # A's answer is lost; while A hangs past its lease, B hears unknown_token and finishes the move.
+    portal.claim_answers = [_err(404, "unknown_token"), httpx.ReadTimeout("lost")]
+
+    def b_runs_while_a_hangs():
+        portal.on_claim = None
+        _later(monkeypatch, guest_handoff._LEASE_SECONDS + 1)
+        guest_handoff.drain()
+    portal.on_claim = b_runs_while_a_hangs
+    guest_handoff.drain()
+    _later(monkeypatch, 7 * 3600)
+    assert guest_handoff.drain() == []
+    assert len(portal.claims) == 2 and _only_record()["state"] == "gone"
+
+
+def test_a_busy_store_lock_leaves_the_move_for_a_later_run(portal, monkeypatch):
+    from hermes_cli import guest_handoff
+    _mint_guest()
+    _save(_account())
+    real_bearer = guest_handoff._bearer
+    monkeypatch.setattr(guest_handoff, "_bearer", lambda **_kw: (_ for _ in ()).throw(TimeoutError("busy")))
+    assert guest_handoff.drain() == []
+    assert portal.claims == [] and _only_record()["state"] == "pending"
+    monkeypatch.setattr(guest_handoff, "_bearer", real_bearer)
+    guest_handoff.drain()
+    assert _only_record()["state"] == "claimed"
+
+
+def test_the_retry_worker_binds_the_launch_profile(portal, monkeypatch):
+    import threading
+    from agent.secret_scope import current_secret_scope, is_multiplex_active, set_multiplex_active
+    from hermes_cli import guest_handoff
+    ticked, scopes = threading.Event(), []
+    monkeypatch.setattr(guest_handoff, "_WORKER_FIRST_TICK_SECONDS", 0.0)
+    monkeypatch.setattr(guest_handoff, "drain", lambda: (scopes.append(current_secret_scope()), ticked.set()))
+    previous = is_multiplex_active()
+    set_multiplex_active(True)
+    try:
+        guest_handoff.start_worker()
+        assert ticked.wait(5)
+    finally:
+        guest_handoff.stop_worker()
+        set_multiplex_active(previous)
+    assert scopes[0] is not None
+
+
 def test_a_run_while_an_attempt_is_in_flight_sends_nothing(portal):
     from hermes_cli import guest_handoff
     _mint_guest()
