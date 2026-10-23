@@ -65,9 +65,12 @@ def _trust_approval_key(server_name: str, tool_name: str) -> str:
 
 
 def _trust_granted(server_name: str, tool_name: str) -> bool:
-    from tools.approval import is_approved
+    """A remembered Session/Always answer, or YOLO / ``approvals.mode: off`` for the calling session.
+    Covers only the trust prompt: the spend limit is a budget, not an approval, and still asks."""
+    from tools.approval import is_approval_bypass_active, is_approved
     from tools.approval_context import get_current_session_key
-    return is_approved(get_current_session_key(), _trust_approval_key(server_name, tool_name))
+    return is_approval_bypass_active() or is_approved(get_current_session_key(),
+                                                      _trust_approval_key(server_name, tool_name))
 
 
 def _trust_gate_check(server_name: str, tool_name: str, booked: Optional[list] = None) -> Optional[str]:
