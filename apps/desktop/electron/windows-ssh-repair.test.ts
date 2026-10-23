@@ -7,7 +7,7 @@ import path from 'node:path'
 import { test } from 'vitest'
 
 import { listRemoteHermesProfiles, readRemoteInstallId } from './remote-lifecycle'
-import { assertWindowsRemoteInstallUpdateClear, connectWindowsRemote, probeWindowsFiles, probeWindowsRemote, windowsHelperOwnsRuntime } from './windows-remote-lifecycle'
+import { assertWindowsRemoteInstallUpdateClear, connectWindowsRemote, decodePowerShellCommand, probeWindowsFiles, probeWindowsRemote, windowsHelperOwnsRuntime } from './windows-remote-lifecycle'
 
 const runtime = {
   os: 'Windows', arch: 'AMD64', hermesHome: 'C:\\Users\\A\\AppData\\Local\\hermes',
@@ -16,16 +16,15 @@ const runtime = {
 }
 
 function decode(command: string) {
-  const token = command.match(/-EncodedCommand\s+(\S+)$/)?.[1]
-  assert.ok(token, 'outer shells must receive the bootstrap as one encoded argument')
+  assert.match(command, /-EncodedCommand\s+\S+$/, 'outer shells must receive the script as one encoded argument')
 
-  return Buffer.from(token, 'base64').toString('utf16le')
+  return decodePowerShellCommand(command)
 }
 
-test('platform and marker bootstrap survive outer-shell parsing without inlining long payloads', async () => {
+test('platform and marker scripts survive outer-shell parsing as one compressed argument without stdin', async () => {
   const calls: Array<{ command: string; options: { stdinData?: string } }> = []
 
-  const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
+  const ssh = { exec: async (command: string, options: { stdinData?: string } = {}) => {
     calls.push({ command, options })
 
     return calls.length === 1 ? JSON.stringify(runtime) : 'CLEAR'
@@ -35,22 +34,21 @@ test('platform and marker bootstrap survive outer-shell parsing without inlining
   await assertWindowsRemoteInstallUpdateClear(ssh, runtime.hermesHome, runtime.python)
 
   for (const { command, options } of calls) {
-    const wrapper = decode(command)
-    assert.match(wrapper, /ReadToEnd/)
-    assert.match(wrapper, /FromBase64String/)
+    const outer = Buffer.from(command.split(' ').at(-1)!, 'base64').toString('utf16le')
+    assert.match(outer, /DeflateStream/)
     assert.ok(command.length < 8191)
-    const script = Buffer.from(String(options.stdinData).trim(), 'base64').toString('utf16le')
-    assert.ok(script.length > wrapper.length)
+    assert.equal(options.stdinData, undefined)
+    assert.ok(decode(command).length > outer.length)
   }
 })
 
 test('Windows roster and install id never dispatch POSIX syntax or hide a failed read', async () => {
   const calls: string[] = []
 
-  const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
+  const ssh = { exec: async (command: string) => {
     calls.push(command)
     assert.doesNotMatch(command, /^echo|^if \[/)
-    const script = Buffer.from(String(options?.stdinData ?? '').trim(), 'base64').toString('utf16le') || decode(command)
+    const script = decode(command)
 
     if (script.includes('.hermes-update-in-progress')) {return 'CLEAR'}
 
@@ -65,8 +63,8 @@ test('Windows roster and install id never dispatch POSIX syntax or hide a failed
 })
 
 test('Windows inventory rejects malformed helper output instead of fabricating default', async () => {
-  const ssh = { exec: async (_command: string, options: { stdinData?: string }) => {
-    const script = Buffer.from(String(options?.stdinData ?? '').trim(), 'base64').toString('utf16le')
+  const ssh = { exec: async (command: string) => {
+    const script = decodePowerShellCommand(command)
 
     return script.includes('.hermes-update-in-progress') ? 'CLEAR' : '{}'
   } }
@@ -77,8 +75,8 @@ test('Windows inventory rejects malformed helper output instead of fabricating d
 test('a bin launcher does not require a nonexistent sibling Python and resolves after the update gate', async () => {
   const bootstrap = "import os, sys, runpy; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
 
-  const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
-    const script = Buffer.from(String(options?.stdinData || '').trim(), 'base64').toString('utf16le')
+  const ssh = { exec: async (command: string) => {
+    const script = decodePowerShellCommand(command)
 
     if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, python: '', launcherPath: runtime.hermesPath })}
 
@@ -97,16 +95,14 @@ test('the complete connect path keeps atomic spawn off argv and delivers the exp
   let spawned = false
 
   const ssh = { exec: async (command: string, options: { stdinData?: string } = {}) => {
-    const token = command.match(/-EncodedCommand\s+(\S+)$/)?.[1]
-    let script = token ? Buffer.from(token, 'base64').toString('utf16le') : ''
-
-    if (!token || script.includes('ReadToEnd')) {script = Buffer.from(String(options.stdinData || '').trim(), 'base64').toString('utf16le')}
+    const script = decodePowerShellCommand(command) || ''
 
     if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify(runtime)}
 
     if (script.includes("'spawn'")) {
-      assert.ok(command.length < 8191, 'Connect must not inline its atomic spawn script')
-      assert.ok(script.includes('"profile":"bob"'), 'script stdin cannot also serve as helper JSON stdin')
+      assert.ok(command.length < 8191, "Connect's atomic spawn command must fit cmd.exe's limit")
+      assert.equal(options.stdinData, undefined)
+      assert.ok(script.includes('"profile":"bob"'), 'the caller JSON travels inside the spawn script')
       assert.match(script, /' \| & /)
       spawned = true
 

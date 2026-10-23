@@ -1,5 +1,5 @@
 import { parseRemoteProfileListing } from './connection-registry'
-import { assertWindowsRemoteInstallUpdateClear, encodedPowerShell, powerShellStdinCommand, psLiteral, stripPowerShellNoise } from './windows-remote-lifecycle'
+import { assertWindowsRemoteInstallUpdateClear, compressedPowerShellCommand, psLiteral, stripPowerShellNoise } from './windows-remote-lifecycle'
 import { WINDOWS_NO_REPARSE_PS, type WindowsRuntime, windowsRuntimeProgramArgv } from './windows-runtime-command'
 
 // Use the canonical identity/tombstone predicate without list_profile_names' OSError suppression.
@@ -79,9 +79,7 @@ export function windowsInventoryScript(runtime: WindowsRuntime, operation: 'inst
 async function readInventory(ssh: any, runtime: WindowsRuntime, operation: 'install-id' | 'profiles'): Promise<any> {
   await assertWindowsRemoteInstallUpdateClear(ssh, runtime.hermesHome, runtime.python)
 
-  const output = await ssh.exec(powerShellStdinCommand(), {
-    stdinData: `${encodedPowerShell(windowsInventoryScript(runtime, operation))}\r\n`
-  })
+  const output = await ssh.exec(compressedPowerShellCommand(windowsInventoryScript(runtime, operation)))
 
   const parsed = JSON.parse(stripPowerShellNoise(output).pop() || 'null')
 

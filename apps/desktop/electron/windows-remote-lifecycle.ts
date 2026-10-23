@@ -1,4 +1,5 @@
 import crypto from 'node:crypto'
+import zlib from 'node:zlib'
 
 import { resolveReadyTimeoutMs } from './remote-lifecycle'
 import { WINDOWS_CHECKOUT_LOCK_PS, WINDOWS_MARKER_JUDGE_PS } from './remote-update-marker-programs'
@@ -37,12 +38,73 @@ function stripPowerShellNoise(stdout) {
     .filter(line => line.trim() && !line.trimStart().startsWith('#< CLIXML'))
 }
 
-// A bare -Command expression is evaluated by an outer PowerShell SSH shell.
-// Encode only the bootstrap; long Unicode payloads still travel on stdin.
-function powerShellStdinCommand() {
-  return powerShellCommand(
-    '[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$payload=[Console]::In.ReadToEnd();$script=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($payload));& ([scriptblock]::Create($script))'
-  )
+// Long scripts travel inside a self-contained -EncodedCommand, never on stdin:
+// Windows OpenSSH does not reliably deliver a stdin payload and its end of input
+// to the remote PowerShell, which then blocks past the exec timeout and outlives
+// the session. Deflate keeps the command under cmd.exe's 8191-char limit; the
+// bytes are packed 15 bits per BMP character, skipping U+2000..U+20FF, where
+// PowerShell reads U+2018..U+201B as single quotes.
+function compressedPowerShellBootstrap(script) {
+  const deflated = zlib.deflateRawSync(Buffer.from(script, 'utf8'), { level: 9 })
+  let chars = ''
+  let bitBuf = 0
+  let bitCount = 0
+
+  for (const byte of deflated) {
+    bitBuf |= byte << bitCount
+    bitCount += 8
+
+    while (bitCount >= 15) {
+      const value = bitBuf & 0x7fff
+      chars += String.fromCharCode((value < 0x1f00 ? 0x0100 : 0x0200) + value)
+      bitBuf >>>= 15
+      bitCount -= 15
+    }
+  }
+
+  if (bitCount > 0) {
+    const value = bitBuf & 0x7fff
+    chars += String.fromCharCode((value < 0x1f00 ? 0x0100 : 0x0200) + value)
+  }
+
+  return `$ProgressPreference="SilentlyContinue";[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$m=[IO.MemoryStream]::new();$b=0;$n=0;foreach($c in [char[]]'${chars}'){$v=[int]$c;$v-=if($v-lt8192){256}else{512};$b=$b-bor($v-shl$n);$n+=15;while($n-ge8){$m.WriteByte($b-band255);$b=$b-shr8;$n-=8}};$m.Position=0;& ([ScriptBlock]::Create([IO.StreamReader]::new([IO.Compression.DeflateStream]::new($m,[IO.Compression.CompressionMode]::Decompress),[Text.Encoding]::UTF8).ReadToEnd()))`
+}
+
+function compressedPowerShellCommand(script) {
+  return powerShellCommand(compressedPowerShellBootstrap(script))
+}
+
+function decodePowerShellCommand(command) {
+  const encoded = String(command || '').match(/-EncodedCommand\s+([^\s]+)$/)?.[1]
+
+  if (!encoded) {
+    return ''
+  }
+
+  const outer = Buffer.from(encoded, 'base64').toString('utf16le')
+  const packed = outer.match(/foreach\(\$c in \[char\[\]\]'([^']+)'\)\{\$v=\[int\]\$c;/)?.[1]
+
+  if (!packed) {
+    return outer
+  }
+
+  const deflated: number[] = []
+  let bitBuf = 0
+  let bitCount = 0
+
+  for (let index = 0; index < packed.length; index += 1) {
+    const code = packed.charCodeAt(index)
+    bitBuf |= (code - (code < 0x2000 ? 0x0100 : 0x0200)) << bitCount
+    bitCount += 15
+
+    while (bitCount >= 8) {
+      deflated.push(bitBuf & 0xff)
+      bitBuf >>>= 8
+      bitCount -= 8
+    }
+  }
+
+  return zlib.inflateRawSync(Buffer.from(deflated)).toString('utf8')
 }
 
 async function probeWindowsFiles(ssh, explicitHermesPath = '') {
@@ -106,9 +168,7 @@ async function probeWindowsFiles(ssh, explicitHermesPath = '') {
   // probe parses, ahead of, after, or on the same line as the probe JSON
   // (module auto-load racing the exec read). stripPowerShellNoise drops every
   // block; the JSON is the last meaningful line.
-  const lines = stripPowerShellNoise(
-    await ssh.exec(powerShellStdinCommand(), { stdinData: `${encodedPowerShell(script)}\r\n` })
-  )
+  const lines = stripPowerShellNoise(await ssh.exec(compressedPowerShellCommand(script)))
 
   const parsed = JSON.parse(lines[lines.length - 1] || 'null')
 
@@ -152,7 +212,7 @@ async function resolveWindowsLauncher(ssh: any, runtime: any) {
   let resolved
 
   try {
-    const output = await ssh.exec(powerShellStdinCommand(), { stdinData: `${encodedPowerShell(script)}\r\n` })
+    const output = await ssh.exec(compressedPowerShellCommand(script))
     resolved = JSON.parse(stripPowerShellNoise(output).pop() || 'null')
 
     if (!Array.isArray(resolved?.runtimeCommand) || !resolved.runtimeCommand.every(part => typeof part === 'string' && !part.includes('\0')) || typeof resolved.python !== 'string' || !/^[a-z]:[\\/]/i.test(resolved.python)) {
@@ -242,13 +302,6 @@ public static class HermesMarkerNoFollow {
   return script
 }
 
-// The marker probe rides the same stdin transport as the platform probe
-// (powerShellStdinCommand): its script, with the C# no-follow reader, is far
-// over cmd.exe's 8191-char command-line limit.
-function windowsUpdateMarkerProbeStdinData(hermesHome, python = '') {
-  return `${encodedPowerShell(windowsUpdateMarkerProbeScript(hermesHome, python))}\r\n`
-}
-
 /**
  * Fail-closed install marker gate for a fresh/relaunched Desktop process.
  * This uses only PowerShell/.NET and therefore never imports the remote
@@ -263,9 +316,7 @@ async function assertWindowsRemoteInstallUpdateClear(ssh, hermesHome, python = '
     // CLEAR gate into a fail-closed 'update-in-progress' verdict.
     observation =
       stripPowerShellNoise(
-        await ssh.exec(powerShellStdinCommand(), {
-          stdinData: windowsUpdateMarkerProbeStdinData(hermesHome, python)
-        })
+        await ssh.exec(compressedPowerShellCommand(windowsUpdateMarkerProbeScript(hermesHome, python)))
       ).pop() || ''
   } catch (cause) {
     const error: any = new Error('Could not prove that the remote Hermes install is clear for SSH startup.')
@@ -430,12 +481,11 @@ function atomicWindowsSpawnCommand(runtime, reservation: any = {}, payload?: str
     .filter(line => line !== '')
     .join(';')
 
-  return powerShellCommand(script)
+  return compressedPowerShellCommand(script)
 }
 
-async function atomicWindowsSpawn(ssh, runtime, stdinData, reservation: any = {}) {
-  const encoded = atomicWindowsSpawnCommand(runtime, reservation, stdinData).split(' ').at(-1)
-  const output = await ssh.exec(powerShellStdinCommand(), { stdinData: `${encoded}\r\n` })
+async function atomicWindowsSpawn(ssh, runtime, payload, reservation: any = {}) {
+  const output = await ssh.exec(atomicWindowsSpawnCommand(runtime, reservation, payload))
 
   const lines = stripPowerShellNoise(output)
 
@@ -924,13 +974,14 @@ export {
   atomicWindowsSpawn,
   atomicWindowsSpawnCommand,
   buildWindowsInteractiveCommand,
+  compressedPowerShellCommand,
   connectWindowsRemote,
+  decodePowerShellCommand,
   detectRemotePlatform,
   encodedPowerShell,
   helper,
   helperCommand,
   powerShellCommand,
-  powerShellStdinCommand,
   probeWindowsFiles,
   probeWindowsRemote,
   psLiteral,

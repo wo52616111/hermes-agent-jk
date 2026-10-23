@@ -7,7 +7,7 @@ import path from 'node:path'
 import { test } from 'vitest'
 
 import { WINDOWS_PROFILE_LIST_PY, windowsInventoryScript } from './windows-remote-inventory'
-import { atomicWindowsSpawn, atomicWindowsSpawnCommand, encodedPowerShell, powerShellStdinCommand, probeWindowsFiles, probeWindowsRemote } from './windows-remote-lifecycle'
+import { atomicWindowsSpawn, atomicWindowsSpawnCommand, compressedPowerShellCommand, decodePowerShellCommand, encodedPowerShell, probeWindowsFiles, probeWindowsRemote } from './windows-remote-lifecycle'
 import { WINDOWS_NO_REPARSE_PS, windowsHelperArgv, windowsRuntimeProgramArgv } from './windows-runtime-command'
 
 const repo = path.resolve(import.meta.dirname, '../../..')
@@ -16,11 +16,8 @@ const runtime = { os: 'Windows', arch: 'AMD64', hermesHome: 'C:\\hermes', hermes
 const bootstrap = "import os, sys, runpy; os.environ['HERMES_TEST_BOOT']='selected'; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
 const selected = { ...runtime, runtimeCommand: [python, '-I', '-c', bootstrap] }
 
-function streamed(command: string, options: { stdinData?: string } = {}) {
-  const token = command.match(/-EncodedCommand\s+(\S+)$/)?.[1]
-  const wrapper = token ? Buffer.from(token, 'base64').toString('utf16le') : ''
-
-  return wrapper.includes('ReadToEnd') ? Buffer.from(String(options.stdinData || '').trim(), 'base64').toString('utf16le') : wrapper
+function streamed(command: string) {
+  return decodePowerShellCommand(command)
 }
 
 test('the canonical runtime prefix is actually executed, including bootstrap and Unicode arguments', () => {
@@ -53,8 +50,8 @@ test('injected Python program survives the observed PowerShell 5.1 double-quote 
 test('PATH bin launcher is resolved independently of its absent sibling Python, after the marker gate', async () => {
   const calls: string[] = []
 
-  const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
-    const script = streamed(command, options)
+  const ssh = { exec: async (command: string) => {
+    const script = streamed(command)
     calls.push(script)
 
     if (script.includes('Get-Command hermes -CommandType Application')) {
@@ -82,8 +79,8 @@ test('PATH bin launcher is resolved independently of its absent sibling Python, 
 test('held marker stops launcher imports and unrecognized runtime capabilities fail clearly', async () => {
   let imported = false
 
-  const blocked = { exec: async (command: string, options: { stdinData?: string }) => {
-    const script = streamed(command, options)
+  const blocked = { exec: async (command: string) => {
+    const script = streamed(command)
 
     if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
 
@@ -96,8 +93,8 @@ test('held marker stops launcher imports and unrecognized runtime capabilities f
   await assert.rejects(() => probeWindowsRemote(blocked), (e: any) => e.kind === 'update-in-progress')
   assert.equal(imported, false)
 
-  const invalid = { exec: async (command: string, options: { stdinData?: string }) => {
-    const script = streamed(command, options)
+  const invalid = { exec: async (command: string) => {
+    const script = streamed(command)
 
     if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
 
@@ -113,9 +110,10 @@ test('atomic spawn streams its whole script and explicitly pipes Unicode caller 
   const payload = JSON.stringify({ ownershipId: 'a'.repeat(32), spawnNonce: 'b'.repeat(16), profile: 'bob', hermesPath: 'C:\\用户\\hermes.exe' })
   let observed = ''
 
-  const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
-    assert.ok(command.length < 1024)
-    observed = streamed(command, options)
+  const ssh = { exec: async (command: string, options: { stdinData?: string } = {}) => {
+    assert.ok(command.length < 8191)
+    assert.equal(options.stdinData, undefined)
+    observed = streamed(command)
     assert.match(observed, /\$OutputEncoding=\[Text.UTF8Encoding\]::new\(\$false\)/)
     assert.ok(observed.includes(payload))
     assert.match(observed, /' \| & .*windows_ssh_runtime.*spawn/)
@@ -134,8 +132,8 @@ test('Connect refuses an older helper before token upload or backend spawn on a 
   const { connectWindowsRemote } = await import('./windows-remote-lifecycle')
   let writes = 0
 
-  const ssh = { exec: async (command: string, options: { stdinData?: string }) => {
-    const script = streamed(command, options)
+  const ssh = { exec: async (command: string) => {
+    const script = streamed(command)
 
     if (script.includes('Get-Command hermes -CommandType Application')) {return JSON.stringify({ ...runtime, launcherPath: runtime.hermesPath })}
 
@@ -199,21 +197,22 @@ test('inventory programs guard ancestors, keep install-root anchoring and open i
   assert.doesNotMatch(identity, /read_or_create_install_id|WriteAllText|CreateDirectory/)
 })
 
-test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real local PowerShell bootstrap preserves Unicode and pipes JSON after script stdin is consumed', () => {
+test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real local PowerShell runs a long compressed script, preserving Unicode and piped JSON', () => {
   const pwsh = String(process.env.HERMES_TEST_PWSH)
   const payload = JSON.stringify({ marker: '用户/한글', length: 12000 })
   const script = `$OutputEncoding=[Text.UTF8Encoding]::new($false);${"# padding\r\n".repeat(1500)}'${payload}' | & '${python}' -c 'import json,sys; print(json.dumps(json.load(sys.stdin),ensure_ascii=False))'`
-  const token = powerShellStdinCommand().split(' ').at(-1)!
+  const command = compressedPowerShellCommand(script)
+  assert.ok(command.length < 8191)
 
-  const result = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-EncodedCommand', token], {
-    input: encodedPowerShell(script), encoding: 'utf8', timeout: 20000
+  const result = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-EncodedCommand', command.split(' ').at(-1)!], {
+    encoding: 'utf8', timeout: 20000
   })
 
   assert.equal(result.status, 0, result.stderr)
   assert.deepEqual(JSON.parse(result.stdout.trim()), JSON.parse(payload))
 })
 
-test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real outer PowerShell rejects the old Invoke wrapper and accepts the encoded bootstrap', () => {
+test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real outer PowerShell rejects the old Invoke wrapper and accepts the compressed command', () => {
   const pwsh = String(process.env.HERMES_TEST_PWSH)
   const tools = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-outer-powershell-'))
   const marker = 'HERMES_LOCAL_OUTER_SHELL_OK_用户'
@@ -227,7 +226,7 @@ test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real outer PowerShell rejects
     })
 
     const red = run(old)
-    const green = run(powerShellStdinCommand())
+    const green = run(compressedPowerShellCommand(`Write-Output '${marker}'`))
 
     assert.notEqual(red.status, 0)
     assert.match(red.stderr, /Invoke/)
@@ -242,8 +241,8 @@ test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real PowerShell parser accept
   const pwsh = String(process.env.HERMES_TEST_PWSH)
   const scripts = [windowsInventoryScript(runtime, 'profiles'), windowsInventoryScript(runtime, 'install-id')]
   scripts.push(streamed(atomicWindowsSpawnCommand(runtime)))
-  await probeWindowsFiles({ exec: async (command: string, options: { stdinData?: string }) => {
-    scripts.push(streamed(command, options))
+  await probeWindowsFiles({ exec: async (command: string) => {
+    scripts.push(streamed(command))
 
     return JSON.stringify(runtime)
   } })
@@ -252,12 +251,18 @@ test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real PowerShell parser accept
   assert.ok(compile)
   const program = `$errorsFound=@();foreach($b in @(${list})){$text=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b));$tokens=$null;$parseErrors=$null;[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$parseErrors)|Out-Null;$errorsFound+=@($parseErrors)};${compile};if($errorsFound.Count){$errorsFound|ForEach-Object {$_.Message};exit 1};'HERMES_PS_PROGRAMS_PARSE_OK'`
 
-  const result = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-EncodedCommand', powerShellStdinCommand().split(' ').at(-1)!], {
-    input: encodedPowerShell(program), encoding: 'utf8', timeout: 20000
-  })
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ps-parse-'))
+  const file = path.join(dir, 'parse.ps1')
+  fs.writeFileSync(file, `\uFEFF${program}`, 'utf8')
 
-  assert.equal(result.status, 0, result.stderr + result.stdout)
-  assert.equal(result.stdout.trim(), 'HERMES_PS_PROGRAMS_PARSE_OK')
+  try {
+    const result = spawnSync(pwsh, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', file], { encoding: 'utf8', timeout: 20000 })
+
+    assert.equal(result.status, 0, result.stderr + result.stdout)
+    assert.equal(result.stdout.trim(), 'HERMES_PS_PROGRAMS_PARSE_OK')
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('no-reparse guard checks a leaf file and every ancestor, not FileInfo.Parent', () => {
