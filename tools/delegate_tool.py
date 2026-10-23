@@ -526,12 +526,23 @@ def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credential
         # same route path a delegation backend's answer takes.
         if is_auto(cfg):
             return _auto_routes(task_list, cfg, parent_agent)
+        # The router hints are advertised "ignored otherwise" (DELEGATE_TASK_SCHEMA): a backend that does
+        # not declare them would refuse the whole task, so they never reach a non-auto route.
+        _drop_router_hints(task_list)
         return resolve_task_routes(task_list, cfg, parent_agent)
+    _drop_router_hints(task_list)
     try:
         route = route_for_config(credentials_cfg, parent_agent)
     except ValueError as exc:
         return [], str(exc)
     return [route] * len(task_list), None
+
+
+def _drop_router_hints(task_list: list[dict[str, Any]]) -> None:
+    """Strip the router-only task hints from tasks that will not go through the router."""
+    for t in task_list:
+        t.pop("route_role", None)
+        t.pop("author_vendor", None)
 
 
 def _auto_routes(task_list: list[dict[str, Any]], cfg: dict[str, Any],
