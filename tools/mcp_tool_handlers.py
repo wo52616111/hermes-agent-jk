@@ -73,25 +73,41 @@ def _trust_granted(server_name: str, tool_name: str) -> bool:
                                                       _trust_approval_key(server_name, tool_name))
 
 
-_TRUST_GATE_ARGUMENTS_MAX_CHARS = 2_048
+# Keeps the whole trust-gate card inside Discord's 2,000-character message cap (the tightest button
+# surface), so the truncation marker is never cut off by the adapter's own fit.
+_TRUST_GATE_ARGUMENTS_MAX_CHARS = 1_200
 _TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER = "\n... [arguments truncated]"
 
 
+def _mask_secret_fields(value: Any) -> Any:
+    """Mask string values under credential-named fields (``db_password``, ``client_secret``): the text
+    redactor below only catches the field names and token shapes it knows."""
+    from agent.redact import is_secret_field_name
+    if isinstance(value, dict):
+        return {k: "***" if isinstance(v, str) and v and is_secret_field_name(k) else _mask_secret_fields(v)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mask_secret_fields(v) for v in value]
+    return value
+
+
 def _format_trust_gate_arguments(args: dict) -> str:
-    """Return redacted, bounded JSON for the user-facing approval card."""
+    """Redacted, bounded JSON of the call's arguments for the approval card. Plain text, no
+    fence: every surface already renders the prompt inside a code block."""
+    import unicodedata
     from agent.redact import redact_sensitive_text
 
-    rendered = json.dumps(args, ensure_ascii=False, indent=2, default=str)
-    rendered = redact_sensitive_text(rendered)
+    rendered = json.dumps(_mask_secret_fields(args), ensure_ascii=False, indent=2, default=str)
+    # Bidi overrides, invisible format characters and the C1/DEL controls JSON leaves raw could make the
+    # card show something other than what the server receives; render them as escapes.
+    rendered = "".join(ch.encode("unicode_escape").decode()
+                       if ch != "\n" and unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in rendered)
+    # force: the approval prompt is a display boundary even with security.redact_secrets off. The CLI
+    # prints it as-is. Redact before truncating so a cut cannot split a secret past its pattern.
+    rendered = redact_sensitive_text(rendered, force=True)
     if len(rendered) > _TRUST_GATE_ARGUMENTS_MAX_CHARS:
-        prefix_length = (
-            _TRUST_GATE_ARGUMENTS_MAX_CHARS
-            - len(_TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER)
-        )
-        rendered = (
-            rendered[:prefix_length].rstrip()
-            + _TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER
-        )
+        keep = _TRUST_GATE_ARGUMENTS_MAX_CHARS - len(_TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER)
+        rendered = rendered[:keep].rstrip() + _TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER
     return rendered
 
 
@@ -143,8 +159,8 @@ def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[lis
         tail = "This tool is write-capable (no readOnlyHint=true annotation) and may modify external state."
         # The limit notice leads: the messaging gateway's text fallback keeps only the first ~200 characters.
         message = " ".join([head, *(["This call goes past the chat's spend limit."] if over else []), *extra, tail])
-        display_args = _format_trust_gate_arguments(args or {})
-        message += f"\n\nArguments:\n```json\n{display_args}\n```"
+        if args:  # after the notice and cost lines, which must stay in the text fallback's first ~200 characters
+            message += f"\n\nArguments:\n{_format_trust_gate_arguments(args)}"
         # Over the limit the answer covers this call only: a remembered trust grant must not
         # pre-approve the next over-limit call.
         remember_key = None if over else _trust_approval_key(server_name, tool_name)

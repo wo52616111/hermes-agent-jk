@@ -106,13 +106,19 @@ class TestTrustGateAtCallTime:
         assert json.loads(raw) == {"result": "ok"}
         fake_session.call_tool.assert_awaited_once()
 
-    def test_approval_card_shows_redacted_bounded_arguments(self, fake_session):
-        """The approver sees the exact call payload without exposed secrets."""
+    def test_approval_card_shows_redacted_bounded_arguments(self, fake_session, monkeypatch):
+        """The approver sees the call's arguments, never its secrets (even with redaction turned off
+        for logs), and the card stays inside the smallest messaging cap."""
+        import agent.redact
+        monkeypatch.setattr(agent.redact, "_REDACT_ENABLED", False)
         _set_trust("srv", "untrusted")
         handler = _mcp_handlers._make_tool_handler("srv", "trigger_build", 30.0)
         args = {
             "job": "release",
             "api_key": "sk-supersecretcredential123456",
+            "db_password": "hunter2-correct-horse-battery",
+            "headers": {"Authorization": "Bearer eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2lnbmF0dXJl"},
+            "target": "prod\u202e",
             "notes": "x" * 5_000,
         }
 
@@ -123,12 +129,14 @@ class TestTrustGateAtCallTime:
             handler(args)
 
         message = consent.call_args.args[0]
-        assert "```json" in message
         assert '"job": "release"' in message
-        assert "sk-supersecretcredential123456" not in message
+        for secret in ("sk-supersecretcredential123456", "hunter2-correct-horse-battery",
+                       "eyJhbGciOiJIUzI1NiJ9.cGF5bG9hZA.c2lnbmF0dXJl", "\u202e"):
+            assert secret not in message
         assert "truncated" in message
-        assert len(message) < 3_000
+        assert len(message) < 2_000
         fake_session.call_tool.assert_not_awaited()
+
 
     def test_denied_approval_blocks_rpc(self, fake_session):
         """'decline' blocks the call — the RPC must never fire."""
