@@ -613,7 +613,7 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, all_dirs, ac
 def skill_view(
     name: str, file_path: str | None = None, task_id: str | None = None, preprocess: bool = True) -> str:
     """View a skill (SKILL.md) or a file within its directory, as JSON. ``name`` is a skill name
-    or path ("axolotl", "03-fine-tuning/axolotl"); "plugin:skill" resolves plugin-provided
+    or path ("axolotl", "03-fine-tuning/axolotl"); "<plugin>:<skill>" resolves plugin-provided
     skills. ``preprocess`` applies the configured SKILL.md template / inline shell rendering;
     slash/preload callers render the message themselves."""
     try:
@@ -738,7 +738,7 @@ SKILL_VIEW_SCHEMA = {
         "properties": {
             "name": {
                 "type": "string",
-                "description": "The skill name (use skills_list to see available skills). For plugin-provided skills, use the qualified form 'plugin:skill' (e.g. 'superpowers:writing-plans').",
+                "description": "The skill name (use skills_list to see available skills). For plugin-provided skills, use the qualified form '<plugin>:<skill>' (e.g. 'superpowers:writing-plans').",
             },
             "file_path": {
                 "type": "string",
