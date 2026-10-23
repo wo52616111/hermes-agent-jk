@@ -30,11 +30,10 @@ export function windowsRuntimeProgramArgv(runtime: WindowsRuntime, program: stri
   throw error
 }
 
+// Helpers enter through the launcher's own module dispatch, which owns PM activation;
+// every caller then needs only the launcher path it already carries.
 export function windowsHelperArgv(runtime: WindowsRuntime, operation: string, args: string[] = []): string[] {
-  if (!runtime.runtimeCommand) {return [runtime.python, '-m', 'hermes_cli.windows_ssh_runtime', operation, ...args]}
-
-  return [...windowsRuntimeProgramArgv(runtime,
-    "import runpy; runpy.run_module('hermes_cli.windows_ssh_runtime', run_name='__main__', alter_sys=True)"), operation, ...args]
+  return [runtime.hermesPath, '--run-module', 'hermes_cli.windows_ssh_runtime', operation, ...args]
 }
 
 // Same ancestor/leaf guard as the existing platform and marker probes.
