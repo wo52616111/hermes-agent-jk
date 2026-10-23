@@ -352,22 +352,29 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
     return _find_custom_identity(_entry_serves_model)
 
 
+def _endpoint_identity(base_url: str) -> Optional[str]:
+    """The menu identity that owns ``base_url``: a configured entry, else the managed server."""
+    identity = find_custom_provider_identity(base_url)
+    if identity:
+        return identity
+    # The managed server has no custom-provider config entry. Recover its menu key
+    # from the ownership-checked endpoint, never from a model name or a fixed port.
+    from hermes_cli.local_runtime.endpoint import _state_endpoint
+    endpoint = _state_endpoint()
+    if endpoint and _normalize_base_url_for_match(base_url) == _normalize_base_url_for_match(endpoint["base_url"]):
+        return "llamacpp"
+    return None
+
+
 def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider: Optional[str] = None,
                               model: Optional[str] = None) -> Optional[str]:
     """Recover the durable menu identity for a bare custom provider. Match a configured
     endpoint first, then the ownership-checked managed server, then a configured model or
     provider. Every session persistence/restore path shares this lookup."""
     rp = _rp()
-    if base_url:
-        identity = find_custom_provider_identity(base_url)
-        if identity:
-            return identity
-        # The managed server has no custom-provider config entry. Recover its menu key
-        # from the ownership-checked endpoint, never from a model name or a fixed port.
-        from hermes_cli.local_runtime.endpoint import _state_endpoint
-        endpoint = _state_endpoint()
-        if endpoint and _normalize_base_url_for_match(base_url) == _normalize_base_url_for_match(endpoint["base_url"]):
-            return "llamacpp"
+    identity = _endpoint_identity(base_url) if base_url else None
+    if identity:
+        return identity
     identity = find_custom_provider_identity_by_model(model) if model else None
     if identity:
         return identity
@@ -402,8 +409,9 @@ def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider
 
 def session_provider_identity(provider: Any, requested_provider: Any, base_url: Any, model: Any = None, *,
                               config: Optional[dict[str, Any]] = None) -> str:
-    """A session's identity: the requested entry while it still serves ``base_url`` (an edited entry would
-    pair its new key with the old endpoint on resume), else the endpoint's entry, else the adapter."""
+    """A session's identity: the requested entry while it still serves ``base_url``, else the endpoint's
+    owner, else the adapter. A name for an entry that left ``base_url`` pairs its new key with the old
+    endpoint on resume, so with an endpoint known the model and config fallbacks never apply."""
     adapter = _clean(provider)
     if adapter.lower() != "custom":
         return adapter
@@ -413,7 +421,9 @@ def session_provider_identity(provider: Any, requested_provider: Any, base_url: 
         entry = _get_named_custom_provider(requested, config=config, resolve_credentials=False)
         if entry and _normalize_base_url_for_match(_entry_url(entry)) == url:
             return requested
-    return canonical_custom_identity(base_url=_clean(base_url) or None, model=_clean(model) or None) or adapter
+    if url:
+        return _endpoint_identity(_clean(base_url)) or adapter
+    return canonical_custom_identity(model=_clean(model) or None) or adapter
 
 
 def is_routable_provider(provider: Optional[str]) -> bool:
