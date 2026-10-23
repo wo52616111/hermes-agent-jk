@@ -79,12 +79,17 @@ _TRUST_GATE_ARGUMENTS_MAX_CHARS = 1_200
 _TRUST_GATE_ARGUMENTS_TRUNCATION_MARKER = "\n... [arguments truncated]"
 
 
+def _is_secret_argument_name(key: Any) -> bool:
+    from agent.redact import SECRET_HEADER_NAME_LIST, is_secret_field_name
+    return is_secret_field_name(key) or (isinstance(key, str) and key.casefold() in SECRET_HEADER_NAME_LIST)
+
+
 def _mask_secret_fields(value: Any) -> Any:
-    """Mask string values under credential-named fields (``db_password``, ``client_secret``): the text
-    redactor below only catches the field names and token shapes it knows."""
-    from agent.redact import is_secret_field_name
+    """Mask every value under a credential-named field (``db_password``, ``client_secret``) or API-key
+    header name (``x-api-key``), whatever its type: the text redactor below only catches the
+    ``key: value`` and token shapes it knows."""
     if isinstance(value, dict):
-        return {k: "***" if isinstance(v, str) and v and is_secret_field_name(k) else _mask_secret_fields(v)
+        return {k: "***" if v not in (None, "") and _is_secret_argument_name(k) else _mask_secret_fields(v)
                 for k, v in value.items()}
     if isinstance(value, list):
         return [_mask_secret_fields(v) for v in value]
@@ -161,9 +166,9 @@ def _ask_for_call(server_name: str, tool_name: str, charge, booked: Optional[lis
     if gated:
         head = f"MCP tool '{tool_name}' on UNTRUSTED server '{server_name}' wants to run."
         tail = "This tool is write-capable (no readOnlyHint=true annotation) and may modify external state."
-        # The limit notice leads: the messaging gateway's text fallback keeps only the first ~200 characters.
+        # The limit notice leads, and the arguments trail: a prompt cut to a platform's cap keeps the notice.
         message = " ".join([head, *(["This call goes past the chat's spend limit."] if over else []), *extra, tail])
-        if args:  # after the notice and cost lines, which must stay in the text fallback's first ~200 characters
+        if args:
             message += f"\n\nArguments:\n{_format_trust_gate_arguments(args)}"
         # Over the limit the answer covers this call only: a remembered trust grant must not
         # pre-approve the next over-limit call.
