@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'vitest'
 
 import { listRemoteHermesProfiles, readRemoteInstallId } from './remote-lifecycle'
-import { assertWindowsRemoteInstallUpdateClear, connectWindowsRemote, probeWindowsRemote } from './windows-remote-lifecycle'
+import { assertWindowsRemoteInstallUpdateClear, connectWindowsRemote, probeWindowsRemote, windowsHelperOwnsRuntime } from './windows-remote-lifecycle'
 
 const runtime = {
   os: 'Windows', arch: 'AMD64', hermesHome: 'C:\\Users\\A\\AppData\\Local\\hermes',
@@ -129,4 +129,12 @@ test('the complete connect path keeps atomic spawn off argv and delivers the exp
 
   assert.equal(spawned, true)
   assert.equal(result.remotePort, 5555)
+})
+
+test('Test and Connect share one verdict on a helper too old for a boot-selected backend', () => {
+  const selected = { ...runtime, runtimeCommand: [runtime.python, '-I', '-c', 'boot'] }
+
+  assert.equal(windowsHelperOwnsRuntime(selected, { supported: true }), false)
+  assert.equal(windowsHelperOwnsRuntime(selected, { supported: true, runtimeBootstrapOwnership: 1 }), true)
+  assert.equal(windowsHelperOwnsRuntime(runtime, { supported: true }), true)
 })

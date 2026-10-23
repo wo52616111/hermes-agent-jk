@@ -669,6 +669,12 @@ async function waitForWindowsSpawnCompletion(ssh, runtime, ownershipId, timeoutM
   throw error
 }
 
+// A backend started through the launcher's boot-selecting runtime is recognised as
+// ours only by a helper that advertises it; an older one would orphan or refuse it.
+function windowsHelperOwnsRuntime(runtime, inspection) {
+  return !runtime.runtimeCommand || inspection?.runtimeBootstrapOwnership === 1
+}
+
 async function connectWindowsRemote(deps) {
   const {
     ssh,
@@ -691,7 +697,7 @@ async function connectWindowsRemote(deps) {
   await assertWindowsRemoteInstallUpdateClear(ssh, runtime.hermesHome, runtime.python)
   const inspection = await helper(ssh, runtime, 'inspect', [runtime.hermesPath])
 
-  if (runtime.runtimeCommand && inspection.runtimeBootstrapOwnership !== 1) {
+  if (!windowsHelperOwnsRuntime(runtime, inspection)) {
     const error: any = new Error('The remote Windows SSH helper must be updated with boot-selecting runtime ownership support before connecting.')
     error.kind = 'update-required'
     throw error
@@ -913,5 +919,6 @@ export {
   reusableWindowsLock,
   stripPowerShellNoise,
   terminateOwnedWindowsDashboardForUpdate,
-  validLock
+  validLock,
+  windowsHelperOwnsRuntime
 }

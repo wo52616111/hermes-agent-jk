@@ -684,7 +684,8 @@ import {
   detectRemotePlatform,
   helper,
   probeWindowsRemote,
-  terminateOwnedWindowsDashboardForUpdate
+  terminateOwnedWindowsDashboardForUpdate,
+  windowsHelperOwnsRuntime
 } from './windows-remote-lifecycle'
 import {
   alreadyHasNoSandbox,
@@ -10303,7 +10304,7 @@ async function testDesktopConnectionConfig(input: any = {}) {
             hermesPath = runtime.hermesPath
             const inspection = await helper(ssh, runtime, 'inspect', [runtime.hermesPath])
             hermesVersion = inspection.version
-            supported = inspection.supported
+            supported = inspection.supported && windowsHelperOwnsRuntime(runtime, inspection)
           } else {
             hermesPath = await remoteLifecycle.locateHermes(ssh, sshConfig.remoteHermesPath || '')
             hermesVersion = await remoteLifecycle.probeHermesVersion(ssh, hermesPath)
