@@ -4,7 +4,6 @@ protocol negotiation and initial tool discovery. Split from tools/mcp_tool.py.""
 
 import logging
 import asyncio
-import inspect
 import os
 import urllib.parse
 import urllib.request
@@ -78,19 +77,6 @@ def _mcp_proxy_mounts(httpx_mod, url: str, ssl_verify, client_cert, server_name:
         mounts[f"{scheme}://"] = _make_mcp_body_cap_transport(httpx_mod, httpx_mod.AsyncHTTPTransport(
             proxy=proxy_url, verify=ssl_verify, **_present(cert=client_cert)))
     return mounts or None
-
-
-def _sse_event_limit_kwargs(client_fn) -> dict:
-    """``max_sse_event_size`` at the wire-body cap, for an SDK Streamable HTTP client that takes it.
-
-    Left unset, the SDK parses each SSE event against httpx2's 1 MiB default, a tighter second cap
-    under the wire cap: a server sending ``tools/list`` as one ~1 MiB event (a 162-tool catalog)
-    could not connect at all. Older SDKs take no such argument."""
-    try:
-        accepted = "max_sse_event_size" in inspect.signature(client_fn).parameters
-    except (TypeError, ValueError):
-        accepted = False
-    return {"max_sse_event_size": _MCP_HTTP_MAX_BODY_BYTES} if accepted else {}
 
 
 def _pgroup_alive(pgid: Optional[int]) -> bool:
@@ -600,12 +586,14 @@ class MCPServerTransportMixin:
                                **_present(mounts=_mcp_proxy_mounts(httpx, url, ssl_verify, client_cert, self.name),
                                           auth=oauth_auth)}
 
-        sdk_kwargs = _sse_event_limit_kwargs(_core.streamable_http_client)
-
         @asynccontextmanager
         async def _owned_client_streams():  # the SDK skips cleanup when http_client is provided
             async with _build_client(**client_kwargs) as http_client:
-                async with _core.streamable_http_client(url, http_client=http_client, **sdk_kwargs) as streams:
+                # Without max_sse_event_size the SDK parses each event against httpx2's 1 MiB default,
+                # a tighter second cap under our wire cap: a large tools/list or tool result (an
+                # editor screenshot) failed outright.
+                async with _core.streamable_http_client(url, http_client=http_client,
+                                                        max_sse_event_size=_MCP_HTTP_MAX_BODY_BYTES) as streams:
                     yield streams
         return _owned_client_streams()
 

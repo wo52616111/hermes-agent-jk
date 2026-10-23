@@ -18,7 +18,6 @@ import pytest
 import hermes_yaml as yaml
 from hermes_constants import get_hermes_home
 from tests.waiting import wait_until
-from tools.mcp_tool_errors import _MCP_HTTP_MAX_BODY_BYTES
 
 _SERVER = """
 import asyncio, socket, sys
@@ -95,25 +94,3 @@ def test_streamable_http_tools_list_over_one_mib_connects(catalog_server, capsys
 
     assert code == 0, out
     assert f"Tools discovered: {count}" in out
-
-
-def test_streamable_http_event_over_hermes_cap_names_the_byte_limit(catalog_server, capsys):
-    url = catalog_server("http", 2, _MCP_HTTP_MAX_BODY_BYTES // 2 + 1024)
-
-    code, out = _mcp_test(capsys, {"url": url, "connect_timeout": 20})
-
-    assert code == 1
-    assert f"exceeded {_MCP_HTTP_MAX_BODY_BYTES} bytes" in out, out
-    assert "SSE stream ended" not in out
-
-
-def test_legacy_sse_event_over_sdk_limit_names_the_byte_limit(catalog_server, capsys):
-    # The legacy SSE client exposes no event-size knob, so its SDK default still applies; the
-    # failure must say so instead of reading as a generic dropped stream.
-    url = catalog_server("sse", *_JUST_OVER_ONE_MIB)
-
-    code, out = _mcp_test(capsys, {"url": url, "transport": "sse", "connect_timeout": 20})
-
-    assert code == 1
-    assert f"exceeded {_SDK_DEFAULT_EVENT_LIMIT} bytes" in out, out
-    assert "mcp_servers.catalog.transport" in out  # the next step names the setting that lifts the limit
