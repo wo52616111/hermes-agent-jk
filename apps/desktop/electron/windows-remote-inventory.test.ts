@@ -24,7 +24,8 @@ function streamed(command: string, options: { stdinData?: string } = {}) {
 }
 
 test('the canonical runtime prefix is actually executed, including bootstrap and Unicode arguments', () => {
-  const program = "import json, os, sys; print(json.dumps([os.environ['HERMES_TEST_BOOT'], sys.argv[1], '$&'], ensure_ascii=False))"
+  // Windows Python writes a pipe in the ANSI code page, and -I ignores PYTHONIOENCODING.
+  const program = "import json, os, sys; sys.stdout.reconfigure(encoding='utf-8'); print(json.dumps([os.environ['HERMES_TEST_BOOT'], sys.argv[1], '$&'], ensure_ascii=False))"
   const argv = windowsRuntimeProgramArgv(selected, program)
   const result = spawnSync(argv[0], [...argv.slice(1), '用户/한글'], { encoding: 'utf8' })
 
@@ -35,7 +36,7 @@ test('the canonical runtime prefix is actually executed, including bootstrap and
 })
 
 test('injected Python program survives the observed PowerShell 5.1 double-quote loss', () => {
-  const program = `import json; print(json.dumps({'marker': '用户/quote"path'}, ensure_ascii=False))`
+  const program = `import json, sys; sys.stdout.reconfigure(encoding='utf-8'); print(json.dumps({'marker': '用户/quote"path'}, ensure_ascii=False))`
   const argv = windowsRuntimeProgramArgv(selected, program)
   const tail = argv.at(-1)!
 
