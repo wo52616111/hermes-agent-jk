@@ -498,12 +498,13 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
 
 
 def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str, *, apply: bool = False) -> None:
-    """``--upstream``: merge in a separate worktree; never rewrite the running checkout unless told to.
+    """``--upstream``: merge in a separate worktree, then let the caller apply it.
 
-    Moving the live tree restarts every gateway that serves it, so this is a consent-gated action: without
-    ``--restart`` the merge is prepared in a worktree under the Hermes cache, printed, and left alone — this
-    checkout keeps running the code its gateways loaded. With ``--restart`` the merge commit is fast-forwarded
-    here, which the caller turns into a fleet restart.
+    Moving the live tree is what restarts a gateway, and that restart is drain-first
+    (``agent.restart_after_turn_timeout``): in-flight turns finish before the process stops, so an applied
+    merge never amputates running work — no manual ``restart`` is needed. ``--no-gateway-restart`` means
+    "prepare only": the merge stays in the worktree and this checkout keeps serving the code its gateways
+    loaded (the code-change watcher would otherwise restart it anyway).
     """
     from hermes_cli.update_custody import run_git
     from hermes_constants import get_hermes_home
@@ -539,8 +540,9 @@ def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str
         return
     if not apply:
         print(f"  ✓ {upstream} merged cleanly ({merged_sha[:10]}) — NOT applied: this checkout is still on")
-        print(f"    {head[:10]} and keeps serving it. Apply when you are ready (restarts every gateway):")
-        print("      hermes update --upstream --restart")
+        print(f"    {head[:10]} and keeps serving it. Apply when you are ready — the gateway finishes")
+        print("    in-flight turns before it restarts:")
+        print("      hermes update --upstream")
         print(f"    or by hand: git merge --ff-only {merged_sha}")
         return
     if _git_ok(git_cmd, ["merge", "--ff-only", merged_sha], cwd):

@@ -1,7 +1,9 @@
-"""``hermes update --upstream`` prepares the merge; only ``--restart`` applies it to the live tree.
+"""``hermes update --upstream`` prepares the merge; applying it is the caller's call.
 
-Moving the checkout a gateway is running restarts every session on it, so the default must leave the
-tree (and the sessions) alone and hand the maintainer a ready-to-apply merge.
+Moving the checkout restarts the gateway serving it, and that restart is drain-first, so the normal
+flow applies the merge. ``--no-gateway-restart`` must NOT move the live tree: it hands back a
+ready-to-apply merge in a worktree instead, because the code-change watcher would restart the
+gateway anyway.
 """
 
 import subprocess
@@ -40,7 +42,7 @@ def repos(tmp_path, monkeypatch):
     return fork
 
 
-def test_without_restart_the_checkout_is_untouched(repos, capsys):
+def test_prepare_only_leaves_the_checkout_untouched(repos, capsys):
     fork = repos
     head = _git(fork, "rev-parse", "HEAD")
 
@@ -49,11 +51,11 @@ def test_without_restart_the_checkout_is_untouched(repos, capsys):
     out = capsys.readouterr().out
     assert _git(fork, "rev-parse", "HEAD") == head, "the live checkout must not move without --restart"
     assert _git(fork, "status", "--porcelain") == "", "no half-merge in the live checkout"
-    assert "--restart" in out, "the printed next step must name the consent flag"
+    assert "hermes update --upstream" in out, "the printed next step must be a runnable command"
     assert "NOT applied" in out
 
 
-def test_with_restart_the_checkout_fast_forwards_and_cleans_up(repos, capsys):
+def test_apply_fast_forwards_the_checkout_and_cleans_up(repos, capsys):
     fork = repos
     heads = _git(fork, "rev-parse", "HEAD")
 

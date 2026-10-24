@@ -1537,8 +1537,6 @@ class _UpdateOptions:
     # ``--upstream``: a fork checkout also integrates official upstream/main. Off by default so an
     # update never makes a downstream user resolve OUR merge conflicts.
     upstream_sync: bool = False
-    # ``--restart``: consent to move the live checkout and bounce the fleet right away.
-    restart_ok: bool = False
 
 
 def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
@@ -1574,8 +1572,7 @@ def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
         gw_input_fn=gw_input_fn, assume_yes=assume_yes, keep_stash=keep_stash,
         switch_branch=switch_branch, discard_local_changes=discard_local_changes,
         no_gateway_restart=no_gateway_restart,
-        upstream_sync=bool(getattr(args, "upstream", False)),
-        restart_ok=bool(getattr(args, "restart", False)))
+        upstream_sync=bool(getattr(args, "upstream", False)))
 
 
 def _begin_update_receipt_and_plan(args):
@@ -1965,7 +1962,11 @@ def _cmd_update_impl(args, gateway_mode: bool):
             git_cmd, branch, current_branch, is_fork=is_fork, assume_yes=assume_yes,
             gateway_mode=gateway_mode, gw_input_fn=gw_input_fn, switch_branch=opts.switch_branch,
             target_ref=target_ref, _windows_gateway_resume=_windows_gateway_resume,
-            upstream_sync=opts.upstream_sync, upstream_apply=opts.restart_ok)
+            upstream_sync=opts.upstream_sync,
+            # The gateway drains before it stops (gateway.restart_after_turn_timeout), so an applied
+            # merge waits for in-flight work on its own; --no-gateway-restart still means "do not move
+            # the live tree" — the code-change watcher would restart it anyway.
+            upstream_apply=not opts.no_gateway_restart)
         commit_count = _plan.commit_count
 
         if commit_count == 0:
