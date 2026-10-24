@@ -1042,6 +1042,50 @@ class TestDelegationCredentialResolution(unittest.TestCase):
         from hermes_cli.model_normalize import normalize_model_for_provider
         self.assertEqual(normalize_model_for_provider(rt["model"], rt["provider"]), "deepseek-v4.1-flash")
 
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_routed_model_id_reaches_the_wire_verbatim(self, mock_resolve):
+        """A router decision of ``open-design`` + ``deepseek-v4.1-flash`` must reach the child as that exact
+        PAIR — provider retained, model string byte-identical (no dots→hyphens).
+
+        The same case for ``anthropic`` + ``claude-sonnet-5-5`` must keep working, since Anthropic ids
+        legitimately take dots-as-hyphens (``normalize_model_for_provider``).
+        """
+        from hermes_cli.model_normalize import normalize_model_for_provider
+        from tools.delegate_tool_config import _resolve_child_runtime
+
+        mock_resolve.return_value = {
+            "provider": "custom",
+            "model": "deepseek-v4.1-flash",
+            "base_url": "https://amr-link.open-design.ai/v1",
+            "api_key": "od-key",
+            "api_mode": "chat_completions",
+        }
+        parent = _make_mock_parent(depth=0)
+        creds = _resolve_delegation_credentials(
+            {"provider": "open-design", "model": "deepseek-v4.1-flash"}, parent)
+        rt = _resolve_child_runtime(
+            parent, {}, parent.api_key, model=creds["model"],
+            override_provider=creds["provider"], override_base_url=creds["base_url"],
+            override_api_key=creds["api_key"], override_api_mode=creds["api_mode"],
+            override_acp_command=None, override_acp_args=None, routing_cfg={"fallback_providers": []},
+        )
+        self.assertEqual(creds["provider"], "open-design")
+        self.assertEqual(rt["provider"], "open-design")
+        self.assertEqual(rt["model"], "deepseek-v4.1-flash")
+        self.assertEqual(rt["base_url"], "https://amr-link.open-design.ai/v1")
+        self.assertEqual(normalize_model_for_provider(rt["model"], rt["provider"]), "deepseek-v4.1-flash")
+
+        # The Anthropic lane is untouched by the fix: dashed Claude id through the Messages wire.
+        mock_resolve.return_value = {
+            "provider": "anthropic", "model": "claude-sonnet-5-5",
+            "base_url": "https://api.anthropic.com", "api_key": "sk-ant", "api_mode": "anthropic_messages",
+        }
+        creds = _resolve_delegation_credentials({"provider": "anthropic", "model": "claude-sonnet-5-5"}, parent)
+        self.assertEqual(creds["provider"], "anthropic")
+        self.assertEqual(creds["model"], "claude-sonnet-5-5")
+        self.assertEqual(normalize_model_for_provider(creds["model"], creds["provider"]), "claude-sonnet-5-5")
+
+
 class TestDelegationProviderIntegration(unittest.TestCase):
     """Integration tests: delegation config → _run_single_child → AIAgent construction."""
 
