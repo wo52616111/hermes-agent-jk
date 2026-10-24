@@ -749,3 +749,23 @@ def test_same_job_id_wedged_in_one_profile_does_not_hide_live_run_in_another(mon
     finally:
         sched.release_running_job("daily-brief", home_a)
         sched.release_running_job("daily-brief", home_b)
+
+def test_background_delegations_are_awaited_before_teardown(monkeypatch, tmp_path):
+    """A running ``delegate_task`` child is work to drain, not something to kill at teardown.
+
+    Background delegations live in ``tools.async_delegation``, outside the turn/worker counters, so
+    drain() used to see "0 active", stop immediately and let final-cleanup ``interrupt_all()`` kill
+    them mid-run — a restart amputated exactly the subagents it should have waited for.
+    """
+    from tools import async_delegation
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr("cron.jobs.load_jobs", list)
+    runner, _adapter = make_restart_runner()
+
+    runner_active = runner._active_work_count()
+    runner_awaitable = runner._awaitable_work_count()
+    monkeypatch.setattr(async_delegation, "active_count", lambda: 2)
+
+    assert runner._active_work_count() - runner_active == 2
+    assert runner._awaitable_work_count() - runner_awaitable == 2

@@ -198,6 +198,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + self._active_cron_job_count()
             + self._active_api_run_count()
             + self._active_deferred_agent_worker_count()
+            + _async_delegation_count()
         )
 
     @staticmethod
@@ -1559,6 +1560,7 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
             + managed_turn_count(self)
             + self._active_api_run_count()
             + self._active_deferred_agent_worker_count()
+            + _async_delegation_count()
         )
         return (
             max(0, non_cron - self._wedged_chat_agent_count())
@@ -1601,7 +1603,8 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
                               "wedged": job["job_id"] in wedged,
                               "restart_safe": bool(job.get("restart_safe"))})
         for kind, count in (("managed", managed_turn_count(self)), ("api", self._active_api_run_count()),
-                            ("deferred", self._active_deferred_agent_worker_count())):
+                            ("deferred", self._active_deferred_agent_worker_count()),
+                            ("delegation", _async_delegation_count())):
             units.extend({"kind": kind, "pid": os.getpid()} for _ in range(count))
         return units
 
@@ -2247,3 +2250,17 @@ class GatewayShutdownMixin(GatewaySessionEndMixin):
     async def wait_for_shutdown(self) -> None:
         """Wait for shutdown signal."""
         await self._shutdown_event.wait()
+
+
+def _async_delegation_count() -> int:
+    """Background ``delegate_task`` units still running.
+
+    They live in ``tools.async_delegation``, outside the turn/worker counters, so leaving them out made
+    drain() declare "0 active" and then let final-cleanup ``interrupt_all()`` kill them mid-run: a restart
+    amputated exactly the work the drain was supposed to protect. Module-level rather than a runner method so
+    the accounting keeps working for the light-weight runner stand-ins tests build.
+    """
+    with suppress(Exception):
+        from tools.async_delegation import active_count
+        return int(active_count())
+    return 0
