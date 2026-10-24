@@ -108,6 +108,11 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
         ),
     )
     update_parser.add_argument(
+        "--restart", action="store_true", default=False,
+        help="Allow an update that moves this checkout to also restart the fleet (required for --upstream to "
+             "apply its merge to a live tree; without it the merge is prepared and left for you).",
+    )
+    update_parser.add_argument(
         "--upstream", action="store_true", default=False,
         help="Fork checkouts only: also integrate the official upstream/main into this checkout "
              "(the default update never touches upstream, so downstream users of a fork never merge "

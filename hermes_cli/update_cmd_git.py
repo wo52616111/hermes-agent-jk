@@ -11,6 +11,7 @@ import shlex
 from contextlib import nullcontext, suppress
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone, UTC
 from pathlib import Path
 from typing import Optional
@@ -396,7 +397,8 @@ class UpstreamTargetBroken(Exception):
 
 
 def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: bool = False, input_fn=None,
-                                  checkout_move=None, upstream_requested: bool = False) -> bool:
+                                  checkout_move=None, upstream_requested: bool = False,
+                                  upstream_apply: bool = False) -> bool:
     """Offer to add ``upstream``, compare origin/main vs upstream/main, ff-pull when strictly behind, then push origin.
 
     Returns True only when origin/main was actually verified against upstream/main; False when the check never
@@ -440,7 +442,7 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
         # integration, and return False so the caller never reports the official repo as checked.
         _report_diverged_fork(git_cmd, cwd, upstream, origin_ahead, upstream_ahead,
                               assume_yes=assume_yes, input_fn=input_fn,
-                              upstream_requested=upstream_requested)
+                              upstream_requested=upstream_requested, upstream_apply=upstream_apply)
         return False
     if upstream_ahead == 0:
         print("  ✓ Fork is up to date with upstream")
@@ -495,26 +497,27 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
     return True
 
 
-def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str) -> None:
-    """``--upstream``: merge in a throwaway worktree, then fast-forward this checkout only if it was clean.
+def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str, *, apply: bool = False) -> None:
+    """``--upstream``: merge in a separate worktree; never rewrite the running checkout unless told to.
 
-    The running checkout is never half-merged: a conflict leaves the worktree (with the branch and the file
-    list printed) and this tree untouched, so the maintainer resolves conflicts somewhere the gateway is not.
+    Moving the live tree restarts every gateway that serves it, so this is a consent-gated action: without
+    ``--restart`` the merge is prepared in a worktree under the Hermes cache, printed, and left alone — this
+    checkout keeps running the code its gateways loaded. With ``--restart`` the merge commit is fast-forwarded
+    here, which the caller turns into a fleet restart.
     """
-    import shutil
-    import tempfile
-    import time as _time
     from hermes_cli.update_custody import run_git
+    from hermes_constants import get_hermes_home
     head = _git_stdout(git_cmd, ["rev-parse", "HEAD"], cwd)
     if not head:
         print("  ✗ Could not resolve HEAD. Nothing merged.")
         return
-    branch = f"upstream-sync-{_time.strftime('%Y%m%d-%H%M%S')}"
-    root = Path(tempfile.mkdtemp(prefix="hermes-upstream-"))
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    branch = f"upstream-sync-{stamp}"
+    root = get_hermes_home() / "cache" / "upstream-sync" / stamp
     wt = root / "merge"
+    root.mkdir(parents=True, exist_ok=True)
     if not _git_ok(git_cmd, ["worktree", "add", "-b", branch, str(wt), head], cwd):
         print(f"  ✗ Could not create the merge worktree under {root}. Nothing merged.")
-        shutil.rmtree(root, ignore_errors=True)
         return
     print(f"→ Merging {upstream} in a worktree ({wt})")
     try:
@@ -522,28 +525,35 @@ def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"  ✗ Merge could not run ({exc}); this checkout is unchanged.")
         return
-    if merged.returncode == 0:
-        new = _git_stdout(git_cmd, ["rev-parse", "HEAD"], wt)
-        if new and _git_ok(git_cmd, ["merge", "--ff-only", new], cwd):
-            print("  ✓ upstream/main merged; this checkout fast-forwarded to it.")
-            run_git(git_cmd, ["worktree", "remove", "--force", str(wt)], cwd=cwd, check=False)
-            run_git(git_cmd, ["branch", "-D", branch], cwd=cwd, check=False)
-            shutil.rmtree(root, ignore_errors=True)
-            return
-        print("  ✗ The merge succeeded but this checkout could not fast-forward; resolve manually.")
+    if merged.returncode != 0:
+        files = _git_stdout(git_cmd, ["diff", "--name-only", "--diff-filter=U"], wt) or ""
+        listed = [name for name in files.splitlines() if name.strip()]
+        print(f"  ⚠ Conflicts in {len(listed)} file(s):")
+        for name in listed[:20]:
+            print(f"      {name}")
+        print(f"  Resolve them in {wt} (branch {branch}). This checkout is unchanged.")
         return
-    files = _git_stdout(git_cmd, ["diff", "--name-only", "--diff-filter=U"], wt) or ""
-    listed = [name for name in files.splitlines() if name.strip()]
-    print(f"  ⚠ Conflicts in {len(listed)} file(s):")
-    for name in listed[:20]:
-        print(f"      {name}")
-    print(f"  Resolve them in {wt} (branch {branch}), then:\n"
-          f"      git -C {wt} commit -a && git -C {cwd} merge --ff-only {new or branch}\n"
-          f"  This checkout is unchanged until you do.")
+    merged_sha = _git_stdout(git_cmd, ["rev-parse", "HEAD"], wt)
+    if not merged_sha:
+        print("  ✗ The merge produced no commit. This checkout is unchanged.")
+        return
+    if not apply:
+        print(f"  ✓ {upstream} merged cleanly ({merged_sha[:10]}) — NOT applied: this checkout is still on")
+        print(f"    {head[:10]} and keeps serving it. Apply when you are ready (restarts every gateway):")
+        print("      hermes update --upstream --restart")
+        print(f"    or by hand: git merge --ff-only {merged_sha}")
+        return
+    if _git_ok(git_cmd, ["merge", "--ff-only", merged_sha], cwd):
+        print(f"  ✓ {upstream} merged; this checkout is now at {merged_sha[:10]} (fleet restart follows).")
+        run_git(git_cmd, ["worktree", "remove", "--force", str(wt)], cwd=cwd, check=False)
+        run_git(git_cmd, ["branch", "-D", branch], cwd=cwd, check=False)
+        return
+    print(f"  ✗ Merged as {merged_sha[:10]} but this checkout could not fast-forward; apply it by hand.")
 
 
 def _report_diverged_fork(git_cmd: list[str], cwd: Path, upstream: str, origin_ahead: int, upstream_ahead: int,
-                          *, assume_yes: bool, input_fn, upstream_requested: bool = False) -> None:
+                          *, assume_yes: bool, input_fn, upstream_requested: bool = False,
+                          upstream_apply: bool = False) -> None:
     """A fork with its own commits can't fast-forward: show how far behind and offer to integrate.
 
     Nothing here touches the working tree. The offer pre-tests the merge in memory
@@ -571,7 +581,7 @@ def _report_diverged_fork(git_cmd: list[str], cwd: Path, upstream: str, origin_a
     elif conflicts is not None:
         print(f"  A trial merge in memory has conflicts in {conflicts} file(s); resolve them in a separate worktree.")
     if upstream_requested:
-        _integrate_upstream_in_worktree(git_cmd, cwd, upstream)
+        _integrate_upstream_in_worktree(git_cmd, cwd, upstream, apply=upstream_apply)
         return
     merge_cmd = "git merge upstream/main"
     print(f"  To integrate (keeps your published history):  {merge_cmd}\n"

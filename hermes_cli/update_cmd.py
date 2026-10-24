@@ -1158,7 +1158,8 @@ def _pull_updates(
             try:
                 _m()._sync_with_upstream_if_needed(
                     git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn,
-                    checkout_move=_moves_for(_windows_gateway_resume), upstream_requested=sync_upstream)
+                    checkout_move=_moves_for(_windows_gateway_resume), upstream_requested=sync_upstream,
+                    upstream_apply=upstream_apply)
             except UpstreamTargetBroken as broken:  # refused before its move: the update rolls back
                 _verify_head_after_pull(  # never reset an unexpected branch's ref onto pre
                     git_cmd, branch, movement_baseline, in_place_update=in_place_update,
@@ -1404,7 +1405,7 @@ def _apply_parked_branch_guard(
 
 def _prepare_checkout_for_update(
     git_cmd, branch, current_branch, *, is_fork, assume_yes, gateway_mode, gw_input_fn,
-    switch_branch, target_ref=None, _windows_gateway_resume, upstream_sync=False):
+    switch_branch, target_ref=None, _windows_gateway_resume, upstream_sync=False, upstream_apply=False):
     """Parked-branch guard, land on the target, stash, count new commits. Exits when the
     checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
     date, -1 when tips differ but the shallow count is unrecoverable."""
@@ -1536,6 +1537,8 @@ class _UpdateOptions:
     # ``--upstream``: a fork checkout also integrates official upstream/main. Off by default so an
     # update never makes a downstream user resolve OUR merge conflicts.
     upstream_sync: bool = False
+    # ``--restart``: consent to move the live checkout and bounce the fleet right away.
+    restart_ok: bool = False
 
 
 def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
@@ -1571,7 +1574,8 @@ def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
         gw_input_fn=gw_input_fn, assume_yes=assume_yes, keep_stash=keep_stash,
         switch_branch=switch_branch, discard_local_changes=discard_local_changes,
         no_gateway_restart=no_gateway_restart,
-        upstream_sync=bool(getattr(args, "upstream", False)))
+        upstream_sync=bool(getattr(args, "upstream", False)),
+        restart_ok=bool(getattr(args, "restart", False)))
 
 
 def _begin_update_receipt_and_plan(args):
@@ -1961,7 +1965,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             git_cmd, branch, current_branch, is_fork=is_fork, assume_yes=assume_yes,
             gateway_mode=gateway_mode, gw_input_fn=gw_input_fn, switch_branch=opts.switch_branch,
             target_ref=target_ref, _windows_gateway_resume=_windows_gateway_resume,
-            upstream_sync=opts.upstream_sync)
+            upstream_sync=opts.upstream_sync, upstream_apply=opts.restart_ok)
         commit_count = _plan.commit_count
 
         if commit_count == 0:
