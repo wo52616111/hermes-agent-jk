@@ -4,7 +4,7 @@ import zlib from 'node:zlib'
 import { resolveReadyTimeoutMs } from './remote-lifecycle'
 import { WINDOWS_CHECKOUT_LOCK_PS, WINDOWS_MARKER_JUDGE_PS } from './remote-update-marker-programs'
 import { assertBootstrapNotSuperseded, redactSecrets, SSH_ERROR } from './ssh-connection'
-import { WINDOWS_NO_REPARSE_PS, windowsHelperArgv, windowsRuntimeProgramArgv } from './windows-runtime-command'
+import { WINDOWS_NO_REPARSE_PS, windowsHelperArgv } from './windows-runtime-command'
 
 const LOCKFILE_SCHEMA_VERSION = 2
 const PROTOCOL_VERSION = 1
@@ -218,8 +218,6 @@ async function resolveWindowsLauncher(ssh: any, runtime: any) {
     if (!Array.isArray(resolved?.runtimeCommand) || !resolved.runtimeCommand.every(part => typeof part === 'string' && !part.includes('\0')) || typeof resolved.python !== 'string' || !/^[a-z]:[\\/]/i.test(resolved.python)) {
       throw new Error('Invalid Windows launcher runtime response.')
     }
-
-    windowsRuntimeProgramArgv({ ...runtime, ...resolved }, 'pass')
   } catch (cause: any) {
     if (TRANSPORT_KINDS.has(cause?.kind)) {throw cause}
     const error: any = new Error('Refresh the remote Windows Hermes launcher: its boot-selecting runtime could not be resolved.')

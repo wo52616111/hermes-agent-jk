@@ -435,6 +435,14 @@ def _probe(*_: str) -> dict[str, Any]:
     return {"os": "Windows", "arch": platform.machine(), "hermesHome": str(get_default_hermes_root()), "python": sys.executable}
 
 
+def _inventory(*_: str) -> dict[str, Any]:
+    """Desktop's read-only roster: the canonical root and profile predicate; never mints an identity."""
+    from hermes_cli.install_identity import _INSTALL_ID_FILENAME, _read_existing
+    from hermes_cli.profiles import _iter_named_profile_dirs
+    install_id, _ = _read_existing(get_default_hermes_root() / _INSTALL_ID_FILENAME)
+    return {"profiles": ["default", *[p.name for p in _iter_named_profile_dirs()]], "installId": install_id}
+
+
 def _read_log(ownership_id: str, spawn_nonce: str) -> dict[str, Any]:
     win32con = _win32().win32con
     data = _read_shared(_log_path(ownership_id, spawn_nonce), _MAX_LOG,
@@ -450,6 +458,7 @@ def _write_lock_op(ownership_id: str) -> dict[str, Any]:
 # operation -> (argument count or None for "any", handler(*args)).
 _OPERATIONS: dict[str, tuple[int | None, Any]] = {
     "probe": (None, _probe),
+    "inventory": (None, _inventory),
     "upload-token": (2, lambda o, n: upload_token(o, n, sys.stdin.buffer.read(65))),
     "read-lock": (1, read_lock),
     "write-lock": (1, _write_lock_op),

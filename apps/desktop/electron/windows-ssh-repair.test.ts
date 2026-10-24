@@ -52,7 +52,7 @@ test('Windows roster and install id never dispatch POSIX syntax or hide a failed
 
     if (script.includes('.hermes-update-in-progress')) {return 'CLEAR'}
 
-    return script.includes('install_id') ? JSON.stringify({ id: 'a'.repeat(32) }) : JSON.stringify({ profiles: ['default', 'bob', 'not legal', '.rollback', 'bob'] })
+    return JSON.stringify({ profiles: ['default', 'bob', 'not legal', '.rollback', 'bob'], installId: 'a'.repeat(32) })
   } }
 
   assert.deepEqual(await listRemoteHermesProfiles(ssh, runtime), ['default', 'bob'])

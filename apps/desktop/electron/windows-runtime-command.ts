@@ -9,27 +9,6 @@ export interface WindowsRuntime {
   runtimeCommand?: string[]
 }
 
-export function windowsRuntimeProgramArgv(runtime: WindowsRuntime, program: string): string[] {
-  if (!runtime.runtimeCommand) {return [runtime.python, '-c', program]}
-  const command = [...runtime.runtimeCommand]
-  const codeIndex = command.indexOf('-c')
-  const entry = /runpy\.run_module\((['"])hermes_cli\.main\1,\s*run_name=(['"])__main__\2,\s*alter_sys=True\)\s*$/
-
-  if (codeIndex >= 1 && codeIndex === command.length - 2 && entry.test(command[codeIndex + 1])) {
-    // PowerShell 5.1 strips embedded double quotes when forming native argv.
-    // ASCII hex carries the program losslessly without changing the launcher bootstrap.
-    const encodedProgram = Buffer.from(program, 'utf8').toString('hex')
-    command[codeIndex + 1] = command[codeIndex + 1].replace(entry, () => `exec(bytes.fromhex('${encodedProgram}').decode('utf-8'))`)
-
-    return command
-  }
-
-  // An unrecognized launcher is a capability gap, not permission to drop its bootstrap.
-  const error: any = new Error('The Windows launcher does not expose a supported boot-selecting runtime command; refresh its launcher.')
-  error.kind = 'update-required'
-  throw error
-}
-
 // Helpers enter through the launcher's own module dispatch, which owns PM activation;
 // every caller then needs only the launcher path it already carries.
 export function windowsHelperArgv(runtime: WindowsRuntime, operation: string, args: string[] = []): string[] {

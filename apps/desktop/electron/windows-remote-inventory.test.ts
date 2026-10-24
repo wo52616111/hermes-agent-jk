@@ -6,46 +6,17 @@ import path from 'node:path'
 
 import { test } from 'vitest'
 
-import { WINDOWS_PROFILE_LIST_PY, windowsInventoryScript } from './windows-remote-inventory'
+import { listWindowsRemoteProfiles, readWindowsRemoteInstallId } from './windows-remote-inventory'
 import { atomicWindowsSpawn, atomicWindowsSpawnCommand, compressedPowerShellCommand, decodePowerShellCommand, encodedPowerShell, probeWindowsFiles, probeWindowsRemote } from './windows-remote-lifecycle'
-import { WINDOWS_NO_REPARSE_PS, windowsHelperArgv, windowsRuntimeProgramArgv } from './windows-runtime-command'
+import { WINDOWS_NO_REPARSE_PS } from './windows-runtime-command'
 
-const repo = path.resolve(import.meta.dirname, '../../..')
-const python = process.env.HERMES_TEST_PYTHON || path.join(repo, '.venv/bin/python')
+const python = process.env.HERMES_TEST_PYTHON || process.env.HERMES_PYTHON || 'python'
 const runtime = { os: 'Windows', arch: 'AMD64', hermesHome: 'C:\\hermes', hermesPath: 'C:\\hermes\\bin\\hermes.exe', python: 'C:\\runtime\\python.exe' }
-const bootstrap = "import os, sys, runpy; os.environ['HERMES_TEST_BOOT']='selected'; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
-const selected = { ...runtime, runtimeCommand: [python, '-I', '-c', bootstrap] }
+const bootstrap = "import os, sys, runpy; runpy.run_module('hermes_cli.main', run_name='__main__', alter_sys=True)"
 
 function streamed(command: string) {
   return decodePowerShellCommand(command)
 }
-
-test('the canonical runtime prefix is actually executed, including bootstrap and Unicode arguments', () => {
-  // Windows Python writes a pipe in the ANSI code page, and -I ignores PYTHONIOENCODING.
-  const program = "import json, os, sys; sys.stdout.reconfigure(encoding='utf-8'); print(json.dumps([os.environ['HERMES_TEST_BOOT'], sys.argv[1], '$&'], ensure_ascii=False))"
-  const argv = windowsRuntimeProgramArgv(selected, program)
-  const result = spawnSync(argv[0], [...argv.slice(1), '用户/한글'], { encoding: 'utf8' })
-
-  assert.equal(result.status, 0, result.stderr)
-  assert.deepEqual(JSON.parse(result.stdout), ['selected', '用户/한글', '$&'])
-  assert.ok(windowsHelperArgv(selected, 'inspect', [runtime.hermesPath]).includes('inspect'))
-  assert.throws(() => windowsRuntimeProgramArgv({ ...runtime, runtimeCommand: [python, '-c', 'print(0)'] }, 'pass'), (e: any) => e.kind === 'update-required')
-})
-
-test('injected Python program survives the observed PowerShell 5.1 double-quote loss', () => {
-  const program = `import json, sys; sys.stdout.reconfigure(encoding='utf-8'); print(json.dumps({'marker': '用户/quote"path'}, ensure_ascii=False))`
-  const argv = windowsRuntimeProgramArgv(selected, program)
-  const tail = argv.at(-1)!
-
-  assert.match(tail, /exec\(bytes\.fromhex\('[0-9a-f]+'\)\.decode\('utf-8'\)\)$/)
-  assert.equal(tail.startsWith(bootstrap.split('runpy.run_module')[0]), true)
-  // The transport failure was observed on real Windows by Polaris; this is its loss-channel regression,
-  // not a claim to execute PowerShell 5.1 on a Mac.
-  const result = spawnSync(argv[0], [...argv.slice(1, -1), tail.replace(/"/g, '')], { encoding: 'utf8' })
-
-  assert.equal(result.status, 0, result.stderr)
-  assert.deepEqual(JSON.parse(result.stdout), { marker: '用户/quote"path' })
-})
 
 test('PATH bin launcher is resolved independently of its absent sibling Python, after the marker gate', async () => {
   const calls: string[] = []
@@ -154,47 +125,23 @@ test('Connect refuses an older helper before token upload or backend spawn on a 
   assert.equal(writes, 0)
 })
 
-test('canonical profile predicate really filters tombstones, markerless dirs and rollback junk under a pinned home', () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-canonical-inventory-'))
-  const root = path.join(home, 'state-root')
-  const profiles = path.join(root, 'profiles')
-  fs.mkdirSync(path.join(profiles, '.deleted'), { recursive: true })
-  fs.writeFileSync(path.join(root, 'config.yaml'), '')
+test('inventory reads profiles and install identity through the runtime helper after the marker gate', async () => {
+  const calls: string[] = []
 
-  for (const name of ['bob', 'win-research', 'ghost', 'tombstoned', '.rollback-1', 'bad name']) {
-    fs.mkdirSync(path.join(profiles, name))
+  const ssh = { exec: async (command: string, options: { stdinData?: string } = {}) => {
+    assert.equal(options.stdinData, undefined)
+    const script = streamed(command)
+    calls.push(script)
 
-    if (name !== 'ghost') {fs.writeFileSync(path.join(profiles, name, 'config.yaml'), '')}
-  }
+    if (script.includes('.hermes-update-in-progress')) {return 'CLEAR'}
+    assert.match(script, /'--run-module' 'hermes_cli\.windows_ssh_runtime' 'inventory'/)
 
-  fs.writeFileSync(path.join(profiles, '.deleted', 'tombstoned'), '')
+    return JSON.stringify({ profiles: ['default', 'bob'], installId: 'A'.repeat(32) })
+  } }
 
-  try {
-    for (const hermesHome of [root, path.join(profiles, 'bob')]) {
-      const result = spawnSync(python, ['-c', WINDOWS_PROFILE_LIST_PY], {
-        cwd: repo, encoding: 'utf8', env: { PATH: process.env.PATH || '', HOME: home, HERMES_HOME: hermesHome, PYTHONPATH: repo }
-      })
-
-      assert.equal(result.status, 0, result.stderr)
-      assert.deepEqual(JSON.parse(result.stdout).profiles, ['default', 'bob', 'win-research'])
-    }
-
-    assert.equal(fs.existsSync(path.join(root, 'install_id')), false, 'inventory must not mint an identity')
-  } finally {
-    fs.rmSync(home, { recursive: true, force: true })
-  }
-})
-
-test('inventory programs guard ancestors, keep install-root anchoring and open identity no-follow', () => {
-  const roster = windowsInventoryScript(runtime, 'profiles')
-  const identity = windowsInventoryScript({ ...runtime, hermesHome: 'C:\\hermes\\profiles\\bob' }, 'install-id')
-
-  assert.match(roster, /Assert-NoReparse \$profilesDir \$true/)
-  assert.match(roster, /_iter_named_profile_dirs/)
-  assert.match(identity, /Split-Path -Leaf \$parent\) -ieq "profiles"/)
-  assert.match(identity, /GetFinalPathNameByHandle/)
-  assert.match(identity, /0x00200000/)
-  assert.doesNotMatch(identity, /read_or_create_install_id|WriteAllText|CreateDirectory/)
+  assert.deepEqual(await listWindowsRemoteProfiles(ssh, runtime), ['default', 'bob'])
+  assert.equal(await readWindowsRemoteInstallId(ssh, runtime), 'a'.repeat(32))
+  assert.deepEqual(calls.map(script => script.includes('.hermes-update-in-progress')), [true, false, true, false])
 })
 
 test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real local PowerShell runs a long compressed script, preserving Unicode and piped JSON', () => {
@@ -237,19 +184,16 @@ test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real outer PowerShell rejects
   }
 })
 
-test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real PowerShell parser accepts emitted probe, inventory, spawn and no-follow C# programs', async () => {
+test.runIf(Boolean(process.env.HERMES_TEST_PWSH))('real PowerShell parser accepts emitted probe and spawn programs', async () => {
   const pwsh = String(process.env.HERMES_TEST_PWSH)
-  const scripts = [windowsInventoryScript(runtime, 'profiles'), windowsInventoryScript(runtime, 'install-id')]
-  scripts.push(streamed(atomicWindowsSpawnCommand(runtime)))
+  const scripts = [streamed(atomicWindowsSpawnCommand(runtime))]
   await probeWindowsFiles({ exec: async (command: string) => {
     scripts.push(streamed(command))
 
     return JSON.stringify(runtime)
   } })
   const list = scripts.map(script => `'${encodedPowerShell(script)}'`).join(',')
-  const compile = windowsInventoryScript(runtime, 'install-id').match(/Add-Type -TypeDefinition @'[\s\S]*?'@/)?.[0]
-  assert.ok(compile)
-  const program = `$errorsFound=@();foreach($b in @(${list})){$text=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b));$tokens=$null;$parseErrors=$null;[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$parseErrors)|Out-Null;$errorsFound+=@($parseErrors)};${compile};if($errorsFound.Count){$errorsFound|ForEach-Object {$_.Message};exit 1};'HERMES_PS_PROGRAMS_PARSE_OK'`
+  const program = `$errorsFound=@();foreach($b in @(${list})){$text=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($b));$tokens=$null;$parseErrors=$null;[Management.Automation.Language.Parser]::ParseInput($text,[ref]$tokens,[ref]$parseErrors)|Out-Null;$errorsFound+=@($parseErrors)};if($errorsFound.Count){$errorsFound|ForEach-Object {$_.Message};exit 1};'HERMES_PS_PROGRAMS_PARSE_OK'`
 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'hermes-ps-parse-'))
   const file = path.join(dir, 'parse.ps1')
