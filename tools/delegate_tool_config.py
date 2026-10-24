@@ -435,7 +435,12 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
 
     if values["base_url"] and not is_native_sdk_provider:
         return _direct_endpoint_credentials(values, explicit_request_overrides)
-    if not values["provider"]:
+    # ``auto`` is the model-picker's "inherit" value for delegation ("inherit the parent agent's provider, model,
+    # and credentials", configuration.md), NOT a provider name. Resolving it through the runtime system returned the
+    # CONFIG DEFAULT provider while the model still came from the parent, so a session on a named custom provider
+    # delegated children to ``anthropic`` carrying that provider's model id — paired with the wrong wire, whose
+    # dots→hyphens rewrite turned ``deepseek-v4.1-flash`` into ``deepseek-v4-1-flash`` and 404'd (1024-340).
+    if not values["provider"] or values["provider"].strip().lower() == "auto":
         # Pure inherit; explicit request_overrides still merge OVER the parent's.
         return _credential_bundle(
             values["model"], None, None, None, None,
