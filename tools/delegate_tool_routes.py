@@ -13,7 +13,7 @@ import contextlib
 import json
 import logging
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Optional
 
@@ -45,6 +45,9 @@ class TaskRoute:
     subagent_id: Optional[str] = None
     routed: Optional[dict[str, Any]] = None
     router_cfg: Optional[dict[str, Any]] = None
+    # The backend's raw answer for THIS task plus the provider that gave it, so result finalization can offer the
+    # settled entry back to a backend that reports outcomes (``task_finished``). Never logged or serialized.
+    answer: Optional[dict[str, Any]] = field(default=None, repr=False)
 
     def report(self) -> Optional[dict[str, Any]]:
         """The ``route`` a backend-routed task's result carries (None for the default backend's unlabelled route)."""
@@ -291,8 +294,34 @@ def _undeclared_error(provider: DelegationProvider, index: int, names: list[str]
             f"{listed}; if this session's delegate_task tool offers {listed}, {fix}.")
 
 
+def _parent_context(parent_agent: Any) -> dict[str, Any]:
+    """What a routing backend may know about the parent session: its identity (``provider`` is ``custom`` for a
+    named custom provider, so the name and endpoint travel too) and the fallback chain it would inherit, trimmed
+    to what a route needs — never secrets."""
+    from tools.delegate_tool_config import _resolve_child_fallback_chain
+    chain = _resolve_child_fallback_chain(parent_agent, None, pinned=False)
+    trimmed = []
+    for entry in chain or []:
+        if isinstance(entry, Mapping) and entry.get("provider"):
+            item = {"provider": entry.get("provider")}
+            for key in ("model", "base_url"):
+                if entry.get(key):
+                    item[key] = entry.get(key)
+            trimmed.append(item)
+    return {
+        "provider": getattr(parent_agent, "provider", None),
+        "requested_provider": getattr(parent_agent, "requested_provider", None),
+        "base_url": getattr(parent_agent, "base_url", None),
+        "model": getattr(parent_agent, "model", None),
+        "fallback_providers": trimmed,
+    }
+
+
 def _route_one(provider: DelegationProvider, declared: dict[str, dict[str, Any]], index: int,
-               task: Mapping[str, Any], config: Mapping[str, Any]) -> dict[str, Any]:
+               task: Mapping[str, Any], config: Mapping[str, Any],
+               parent: Optional[Mapping[str, Any]] = None) -> tuple[dict[str, Any], dict[str, Any]]:
+    """``(cleaned route, raw answer)``. The raw answer keeps the backend's private keys (a router decision id), which
+    ``_clean_route`` strips from the route itself."""
     undeclared = sorted(name for name, value in task.items()
                         if value is not None and name not in declared and name not in RESERVED_TASK_PARAMETERS)
     if undeclared:
@@ -303,8 +332,12 @@ def _route_one(provider: DelegationProvider, declared: dict[str, dict[str, Any]]
         if error:
             raise DelegationRouteError(error)
     payload = {"goal": task.get("goal"), "context": task.get("context"), "index": index, **params}
+    if parent is not None:
+        # After the declared params: a plugin can never shadow the trusted parent context.
+        payload["parent"] = dict(parent)
     try:
-        return _clean_route(provider.name, provider.route_task(payload, config))
+        raw = provider.route_task(payload, config)
+        return _clean_route(provider.name, raw), raw if isinstance(raw, dict) else {}
     except DelegationRouteError as exc:
         raise DelegationRouteError(f"Task {index}: {exc}") from exc
     except Exception as exc:
@@ -326,13 +359,19 @@ def resolve_task_routes(task_list: list[dict[str, Any]], config: Mapping[str, An
     except DelegationRouteError as exc:
         return [], str(exc)
     declared = _declared_parameters(provider, config)
+    supports_outcomes = callable(getattr(provider, "task_finished", None))
+    parent = _parent_context(parent_agent) if supports_outcomes else None
     cache: dict[str, TaskRoute] = {}
     routes: list[TaskRoute] = []
     for i, task in enumerate(task_list):
         try:
-            route = _route_one(provider, declared, i, task, config)
+            route, raw = _route_one(provider, declared, i, task, config, parent)
             _check_backend_effort(i, route, config)
-            routes.append(_route_to_task_route(route, parent_agent, cache, config, provider.name))
+            resolved = _route_to_task_route(route, parent_agent, cache, config, provider.name)
+            if supports_outcomes:
+                # Per task, AFTER the shared cache: two tasks with the same route must keep their own decision id.
+                resolved = replace(resolved, answer={"provider": provider, "raw": raw})
+            routes.append(resolved)
         except ValueError as exc:  # DelegationRouteError, the credential resolver's and the tier check's refusals
             routes.append(TaskRoute({}, {}, backend=provider.name, error=str(exc)))
     return routes, None

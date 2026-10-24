@@ -491,6 +491,10 @@ def _build_children(
         if getattr(route, "routed", None):
             child._delegate_routed = route.routed
             child._delegate_router_cfg = getattr(route, "router_cfg", None) or {}
+        # A backend that reports outcomes keeps its raw answer on the child for result finalization
+        # (``task_finished``); None for every other backend.
+        if getattr(route, "answer", None) is not None:
+            child._delegate_answer = route.answer
         if _task_schema is not None:
             with _quiet("Could not attach output schema to child %d", i):
                 child._delegate_output_schema = _task_schema
@@ -522,6 +526,10 @@ def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credential
     every task's route; otherwise the active delegation provider decides each one."""
     from tools.delegate_tool_routes import resolve_task_routes, route_for_config
     if credentials_cfg is None:
+        # An explicit ``delegation.backend`` wins over the legacy ``provider: auto`` path; the two coexist until
+        # the plugin is live on every machine (then the legacy path is deleted).
+        if cfg.get("backend"):
+            return resolve_task_routes(task_list, cfg, parent_agent)
         # ``delegation.provider: auto`` asks the external router per child; everything downstream is the
         # same route path a delegation backend's answer takes.
         if is_auto(cfg):

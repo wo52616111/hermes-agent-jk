@@ -423,9 +423,33 @@ def _finalize_child_results(
             entry.update(redact_child_result(entry, schema, force=False))
             if isinstance(summary, str) and isinstance(entry.get("summary"), str):
                 entry["summary"] = parent_copy(entry["summary"], forced)
+        _fire_delegation_outcomes(results, task_list, child_by_index)
         _apply_summary_budget(results, parent_agent)
         _notify_memory_manager(results, task_list, child_by_index, parent_agent)
         _rollup_children_cost(parent_agent, _fire_subagent_stop_hooks(results, child_by_index, parent_agent))
+
+def _fire_delegation_outcomes(results: list[dict[str, Any]], task_list: list[dict[str, Any]],
+                             child_by_index: dict[int, Any]) -> None:
+    """Offer each settled entry to the routing backend that produced it (``task_finished``), once per entry.
+
+    The backend's raw answer rides the child (``_delegate_answer``), so no registry lookup and no config are needed
+    here. Never raises: a bookkeeping callback must not fail a completed batch.
+    """
+    for entry in results:
+        child = child_by_index.get(entry.get("task_index"))
+        answer = getattr(child, "_delegate_answer", None) if child is not None else None
+        if not isinstance(answer, dict):
+            continue
+        callback = getattr(answer.get("provider"), "task_finished", None)
+        if not callable(callback):
+            continue
+        index = entry.get("task_index")
+        task = task_list[index] if isinstance(index, int) and 0 <= index < len(task_list) else {}
+        try:
+            callback(task, answer.get("raw") or {}, entry)
+        except Exception:
+            logger.debug("delegation outcome callback failed", exc_info=True)
+
 
 def _run_child_lifecycle(task_index: int, goal: str, child=None, parent_agent=None) -> dict[str, Any]:
     """Run one child and apply the same host lifecycle used by delegate_task."""

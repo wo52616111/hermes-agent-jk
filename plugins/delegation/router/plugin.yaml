@@ -1,0 +1,5 @@
+name: router
+version: 1.0.0
+description: "Quota-aware per-child routing: an external router command (eva-model.py) picks provider/model per task, with the router's fallback chain. Adds route_role / author_vendor to delegate_task; a router failure inherits the parent unless the parent itself is on a blocked provider."
+author: junkai
+kind: backend
