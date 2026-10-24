@@ -396,7 +396,7 @@ class UpstreamTargetBroken(Exception):
 
 
 def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: bool = False, input_fn=None,
-                                  checkout_move=None) -> bool:
+                                  checkout_move=None, upstream_requested: bool = False) -> bool:
     """Offer to add ``upstream``, compare origin/main vs upstream/main, ff-pull when strictly behind, then push origin.
 
     Returns True only when origin/main was actually verified against upstream/main; False when the check never
@@ -439,7 +439,8 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
         # skipped to preserve them. That is NOT "verified up to date": say how far behind, offer the
         # integration, and return False so the caller never reports the official repo as checked.
         _report_diverged_fork(git_cmd, cwd, upstream, origin_ahead, upstream_ahead,
-                              assume_yes=assume_yes, input_fn=input_fn)
+                              assume_yes=assume_yes, input_fn=input_fn,
+                              upstream_requested=upstream_requested)
         return False
     if upstream_ahead == 0:
         print("  ✓ Fork is up to date with upstream")
@@ -494,8 +495,55 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
     return True
 
 
+def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str) -> None:
+    """``--upstream``: merge in a throwaway worktree, then fast-forward this checkout only if it was clean.
+
+    The running checkout is never half-merged: a conflict leaves the worktree (with the branch and the file
+    list printed) and this tree untouched, so the maintainer resolves conflicts somewhere the gateway is not.
+    """
+    import shutil
+    import tempfile
+    import time as _time
+    from hermes_cli.update_custody import run_git
+    head = _git_stdout(git_cmd, ["rev-parse", "HEAD"], cwd)
+    if not head:
+        print("  ✗ Could not resolve HEAD. Nothing merged.")
+        return
+    branch = f"upstream-sync-{_time.strftime('%Y%m%d-%H%M%S')}"
+    root = Path(tempfile.mkdtemp(prefix="hermes-upstream-"))
+    wt = root / "merge"
+    if not _git_ok(git_cmd, ["worktree", "add", "-b", branch, str(wt), head], cwd):
+        print(f"  ✗ Could not create the merge worktree under {root}. Nothing merged.")
+        shutil.rmtree(root, ignore_errors=True)
+        return
+    print(f"→ Merging {upstream} in a worktree ({wt})")
+    try:
+        merged = run_git(git_cmd, ["merge", "--no-edit", upstream], cwd=wt, capture_output=True, text=True, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"  ✗ Merge could not run ({exc}); this checkout is unchanged.")
+        return
+    if merged.returncode == 0:
+        new = _git_stdout(git_cmd, ["rev-parse", "HEAD"], wt)
+        if new and _git_ok(git_cmd, ["merge", "--ff-only", new], cwd):
+            print("  ✓ upstream/main merged; this checkout fast-forwarded to it.")
+            run_git(git_cmd, ["worktree", "remove", "--force", str(wt)], cwd=cwd, check=False)
+            run_git(git_cmd, ["branch", "-D", branch], cwd=cwd, check=False)
+            shutil.rmtree(root, ignore_errors=True)
+            return
+        print("  ✗ The merge succeeded but this checkout could not fast-forward; resolve manually.")
+        return
+    files = _git_stdout(git_cmd, ["diff", "--name-only", "--diff-filter=U"], wt) or ""
+    listed = [name for name in files.splitlines() if name.strip()]
+    print(f"  ⚠ Conflicts in {len(listed)} file(s):")
+    for name in listed[:20]:
+        print(f"      {name}")
+    print(f"  Resolve them in {wt} (branch {branch}), then:\n"
+          f"      git -C {wt} commit -a && git -C {cwd} merge --ff-only {new or branch}\n"
+          f"  This checkout is unchanged until you do.")
+
+
 def _report_diverged_fork(git_cmd: list[str], cwd: Path, upstream: str, origin_ahead: int, upstream_ahead: int,
-                          *, assume_yes: bool, input_fn) -> None:
+                          *, assume_yes: bool, input_fn, upstream_requested: bool = False) -> None:
     """A fork with its own commits can't fast-forward: show how far behind and offer to integrate.
 
     Nothing here touches the working tree. The offer pre-tests the merge in memory
@@ -522,13 +570,20 @@ def _report_diverged_fork(git_cmd: list[str], cwd: Path, upstream: str, origin_a
         print("  A trial merge in memory is conflict-free.")
     elif conflicts is not None:
         print(f"  A trial merge in memory has conflicts in {conflicts} file(s); resolve them in a separate worktree.")
+    if upstream_requested:
+        _integrate_upstream_in_worktree(git_cmd, cwd, upstream)
+        return
     merge_cmd = "git merge upstream/main"
     print(f"  To integrate (keeps your published history):  {merge_cmd}\n"
           "  To replay your commits on top instead (rewrites history, needs a force-push):  git rebase upstream/main")
-    if assume_yes or (input_fn is None and not (sys.stdin.isatty() and sys.stdout.isatty())):
-        return  # non-interactive: the reminder above is the whole offer; never mutate history unasked
-    if conflicts != 0:
-        return  # only an in-memory conflict-free merge is safe to offer as one step
+    # ``hermes update --upstream`` reached here on purpose: integrate in a SEPARATE worktree so the running
+    # checkout is never half-merged. Conflict-free ⇒ fast-forward the checkout; conflicts ⇒ leave the worktree
+    # for the maintainer and touch nothing here.
+    if not upstream_requested:
+        if assume_yes or (input_fn is None and not (sys.stdin.isatty() and sys.stdout.isatty())):
+            return  # non-interactive: the reminder above is the whole offer; never mutate history unasked
+        if conflicts != 0:
+            return  # only an in-memory conflict-free merge is safe to offer as one step
     if input_fn is not None:
         reply = input_fn("Merge upstream/main into your checkout now? [y/N]", "n").strip().lower()
     else:

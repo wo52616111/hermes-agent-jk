@@ -108,6 +108,12 @@ def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
         ),
     )
     update_parser.add_argument(
+        "--upstream", action="store_true", default=False,
+        help="Fork checkouts only: also integrate the official upstream/main into this checkout "
+             "(the default update never touches upstream, so downstream users of a fork never merge "
+             "upstream themselves).",
+    )
+    update_parser.add_argument(
         "--no-gateway-restart", action="store_true", default=False,
         help="Update code and dependencies but defer the fleet restart. Use for updates "
              "running inside a gateway cgroup, then restart gateways separately.",

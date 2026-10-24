@@ -1158,7 +1158,7 @@ def _pull_updates(
             try:
                 _m()._sync_with_upstream_if_needed(
                     git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn,
-                    checkout_move=_moves_for(_windows_gateway_resume))
+                    checkout_move=_moves_for(_windows_gateway_resume), upstream_requested=sync_upstream)
             except UpstreamTargetBroken as broken:  # refused before its move: the update rolls back
                 _verify_head_after_pull(  # never reset an unexpected branch's ref onto pre
                     git_cmd, branch, movement_baseline, in_place_update=in_place_update,
@@ -1495,7 +1495,8 @@ def _prepare_checkout_for_update(
         try:
             upstream_checked = _m()._sync_with_upstream_if_needed(
                 git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn,
-                checkout_move=_moves_for(_windows_gateway_resume))
+                checkout_move=_moves_for(_windows_gateway_resume),
+                upstream_requested=bool(getattr(args, "upstream", False)))
         except UpstreamTargetBroken as broken:  # nothing moved; local edits stay parked, like a rollback
             if auto_stash_ref is not None:
                 print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
@@ -1532,6 +1533,9 @@ class _UpdateOptions:
     switch_branch: bool
     discard_local_changes: bool
     no_gateway_restart: bool = False
+    # ``--upstream``: a fork checkout also integrates official upstream/main. Off by default so an
+    # update never makes a downstream user resolve OUR merge conflicts.
+    upstream_sync: bool = False
 
 
 def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
@@ -1566,7 +1570,8 @@ def _resolve_update_options(args, gateway_mode: bool) -> _UpdateOptions:
         pre_update_version=pre_update_version,
         gw_input_fn=gw_input_fn, assume_yes=assume_yes, keep_stash=keep_stash,
         switch_branch=switch_branch, discard_local_changes=discard_local_changes,
-        no_gateway_restart=no_gateway_restart)
+        no_gateway_restart=no_gateway_restart,
+        upstream_sync=bool(getattr(args, "upstream", False)))
 
 
 def _begin_update_receipt_and_plan(args):
@@ -1981,7 +1986,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
             gw_input_fn=gw_input_fn, discard_local_changes=opts.discard_local_changes,
             keep_stash=opts.keep_stash, target_ref=target_ref, pre_sync_sha=_plan.pre_sync_sha,
             rollback_branch=_plan.rollback_branch,
-            sync_upstream=is_fork and branch == "main" and not release_sha, assume_yes=assume_yes,
+            sync_upstream=(is_fork and branch == "main" and not release_sha and opts.upstream_sync),
+            assume_yes=assume_yes,
             in_place_update=_plan.in_place_update, _windows_gateway_resume=_windows_gateway_resume,
             expected_sha=completion_request.get("expected_sha"))
         _apply_pulled_update(
