@@ -47,6 +47,7 @@ import { ArtifactCard } from './artifact-card'
 import { SessionRefLink } from './directive-text'
 import { detectEmbed, extractAlert, MarkdownAlert, RichCodeBlock, UrlEmbed } from './embeds'
 import { ResizableMarkdownTable, ResizableMarkdownTh } from './markdown-table'
+import { ToolMediaSlot } from './tool-media-slot'
 import { paragraphPlainText, TranscriptDirectiveLeaf, useResolvedParagraph } from './transcript-directive'
 
 // Math rendering plugin (KaTeX). Configured once at module scope — the
@@ -286,21 +287,22 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
     // download: route it to the preview rail (which renders .md with a
     // rendered/source toggle) instead of the download-link fallback that
     // `mediaKind() === 'file'` would produce. (#84951)
-    if (isMarkdownDocumentPath(mediaPath)) {
-      return <PreviewAttachment target={mediaPath} />
-    }
-
+    //
     // Non-media files (PDFs, data files, anything outside MEDIA_BY_EXT):
     // MediaAttachment's kind==='file' branch is a degraded dead-end (bare
     // "Open <name>" anchor). Route through the preview pipeline instead —
     // the same file card + "Open preview" the bare-path markdown-link
     // branch below produces — so MEDIA: uniformly delivers the richest
     // rendering for every file type.
-    if (mediaKind(mediaPath) === 'file') {
-      return <PreviewAttachment target={mediaPath} />
-    }
+    const builtIn =
+      isMarkdownDocumentPath(mediaPath) || mediaKind(mediaPath) === 'file' ? (
+        <PreviewAttachment target={mediaPath} />
+      ) : (
+        <MediaAttachment path={mediaPath} />
+      )
 
-    return <MediaAttachment path={mediaPath} />
+    // The plugin that owns the tool which produced this file may draw it instead.
+    return <ToolMediaSlot path={mediaPath}>{builtIn}</ToolMediaSlot>
   }
 
   const previewTarget = previewTargetFromMarkdownHref(href)
@@ -330,10 +332,14 @@ function MarkdownLink({ children, className, href, ...props }: ComponentProps<'a
     const fileHref = href && !href.startsWith('#') && isFileMediaPath(href) ? href : null
 
     if (fileHref) {
-      return mediaKind(fileHref) === 'file' ? (
-        <PreviewAttachment target={fileHref} />
-      ) : (
-        <MediaAttachment path={fileHref} />
+      return (
+        <ToolMediaSlot path={fileHref}>
+          {mediaKind(fileHref) === 'file' ? (
+            <PreviewAttachment target={fileHref} />
+          ) : (
+            <MediaAttachment path={fileHref} />
+          )}
+        </ToolMediaSlot>
       )
     }
 

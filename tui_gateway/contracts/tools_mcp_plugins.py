@@ -713,6 +713,10 @@ class AgentPluginRow(Result):
     update_target: str | None = None
     pinned_sha: str | None = None
     settings_schema: list[PluginSettingField] | None = None
+    # Tools this package's own code registered (native names; MCP ``mcp__<server>__`` namespaces):
+    # Desktop renders a plugin's tool-media renderer only for these.
+    tools: list[str] = Field(default_factory=list)
+    tool_prefixes: list[str] = Field(default_factory=list)
 
 
 class PluginLiveServer(Result):

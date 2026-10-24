@@ -5559,6 +5559,20 @@
             ],
             "default": null,
             "title": "Settings Schema"
+          },
+          "tools": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tools",
+            "type": "array"
+          },
+          "tool_prefixes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tool Prefixes",
+            "type": "array"
           }
         },
         "required": [

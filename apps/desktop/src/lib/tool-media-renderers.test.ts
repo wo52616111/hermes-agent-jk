@@ -1,0 +1,103 @@
+import { describe, expect, it, vi } from 'vitest'
+
+import {
+  claimPatternOwned,
+  findProducingToolCall,
+  ownerOfTool,
+  refusedClaimPatterns,
+  resolveToolMediaClaim,
+  type ToolOwnership
+} from './tool-media-renderers'
+
+const call = (toolName: string, result: unknown, extra: Record<string, unknown> = {}) => ({
+  type: 'tool-call',
+  toolCallId: `${toolName}-id`,
+  toolName,
+  args: {},
+  result,
+  ...extra
+})
+
+describe('findProducingToolCall', () => {
+  const path = '/tmp/out/model.glb'
+
+  it('picks the earliest call in the turn whose result names the path (a later ls only mentions it)', () => {
+    const messages = [
+      { id: 'u0', role: 'user', content: [] },
+      { id: 'a0', role: 'assistant', content: [call('mcp__meshy__download', { path })] },
+      { id: 'u1', role: 'user', content: [] },
+      { id: 'a1', role: 'assistant', content: [call('mcp__meshy__download', `saved to ${path}`)] },
+      { id: 'a2', role: 'assistant', content: [call('terminal', { output: path }), { type: 'text', text: 'MEDIA' }] }
+    ]
+
+    expect(findProducingToolCall(messages, 'a2', path)?.toolCallId).toBe('mcp__meshy__download-id')
+    // The previous turn's call never counts for this turn.
+    expect(findProducingToolCall(messages.slice(2), 'a2', path)?.toolName).toBe('mcp__meshy__download')
+    expect(findProducingToolCall([messages[2], messages[4]], 'a2', path)?.toolName).toBe('terminal')
+  })
+
+  it('ignores failed calls and finds Windows paths inside JSON results', () => {
+    const win = 'C:\\Users\\me\\out\\clip.wav'
+
+    const messages = [
+      { id: 'u', role: 'user', content: [] },
+      {
+        id: 'a',
+        role: 'assistant',
+        content: [call('sfx', { path }, { isError: true }), call('sfx', JSON.stringify({ win }))]
+      }
+    ]
+
+    expect(findProducingToolCall(messages, 'a', path)).toBeNull()
+    expect(findProducingToolCall(messages, 'a', win)?.toolName).toBe('sfx')
+    expect(findProducingToolCall(messages, 'missing', win)).toBeNull()
+  })
+})
+
+describe('ownership', () => {
+  const owners = new Map<string, ToolOwnership>([
+    ['sfx', { prefixes: [], tools: new Set(['sfx_make']) }],
+    ['meshy', { prefixes: ['mcp__meshy__'], tools: new Set() }],
+    ['nested', { prefixes: ['mcp__meshy__x__'], tools: new Set() }]
+  ])
+
+  it('resolves a tool to exactly one package, longest MCP namespace first', () => {
+    expect(ownerOfTool('sfx_make', owners)).toBe('sfx')
+    expect(ownerOfTool('mcp__meshy__download', owners)).toBe('meshy')
+    expect(ownerOfTool('mcp__meshy__x__gen', owners)).toBe('nested')
+    expect(ownerOfTool('text_to_speech', owners)).toBeNull()
+  })
+
+  it('lets a wildcard claim only inside the package’s own namespace', () => {
+    expect(claimPatternOwned('mcp__meshy__*', owners.get('meshy'))).toBe(true)
+    expect(claimPatternOwned('mcp__*', owners.get('meshy'))).toBe(false)
+    expect(claimPatternOwned('sfx_*', owners.get('sfx'))).toBe(false)
+    expect(claimPatternOwned('text_to_speech', owners.get('sfx'))).toBe(false)
+    expect(claimPatternOwned('sfx_make', undefined)).toBe(false)
+  })
+
+  it('serves the first claim whose package owns the tool and reports every other match', () => {
+    const render = () => null
+
+    const packages: Record<string, string | null> = {
+      'plugin:meshy': 'meshy',
+      'plugin:thief': 'thief',
+      'plugin:solo': null
+    }
+
+    const claims = [
+      { id: 'thief:x', source: 'plugin:thief', data: { tools: ['mcp__meshy__*'], render } },
+      { id: 'solo:x', source: 'plugin:solo', data: { tools: ['mcp__meshy__download'], render } },
+      { id: 'meshy:x', source: 'plugin:meshy', data: { tools: ['mcp__meshy__*'], render } }
+    ]
+
+    const onRefused = vi.fn()
+    const packageOf = (source?: string) => (source ? (packages[source] ?? null) : null)
+
+    expect(resolveToolMediaClaim(claims, 'mcp__meshy__download', { onRefused, owners, packageOf })?.id).toBe('meshy:x')
+    expect(onRefused.mock.calls.map(([c]) => c.id)).toEqual(['thief:x', 'solo:x'])
+    // The nested server's tools are not meshy's, even through meshy's own wildcard.
+    expect(resolveToolMediaClaim(claims, 'mcp__meshy__x__gen', { owners, packageOf })).toBeNull()
+    expect(refusedClaimPatterns(claims, owners, packageOf).map(r => r.claim.id)).toEqual(['thief:x', 'solo:x'])
+  })
+})

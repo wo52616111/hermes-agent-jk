@@ -58,5 +58,35 @@ def _plugin_server_rows(
     return rows
 
 
+def _plugin_tool_ownership() -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+    """Which tools each loaded plugin's OWN code produces, by manifest key: ``(tools, prefixes)``.
+
+    Desktop lets a plugin's desktop half render media only from these tools, so the answer comes
+    from the loader's records, never from a manifest claim. Native: names the plugin registered,
+    minus built-in tool names (an approved override of ``text_to_speech`` is still the core voice
+    reply to the user) and minus any name two plugins list. Portable: one ``mcp__<server>__``
+    prefix per MCP server the loader attributed to the package (duplicate server names are refused
+    at load, and a clamped long tool name keeps its prefix)."""
+    plugins_mod = _tools_mod("hermes_cli.plugins")
+    toolsets = _tools_mod("toolsets")
+    schema = _tools_mod("tools.mcp_tool_schema")
+    plugins_mod.discover_plugins()
+    manager = plugins_mod.get_plugin_manager()
+    builtin = set(toolsets._HERMES_CORE_TOOLS)
+    for entry in toolsets.TOOLSETS.values():
+        builtin.update(entry.get("tools", ()))
+    listed = {key: set(loaded.tools_registered) - builtin for key, loaded in manager._plugins.items()}
+    seen: dict[str, int] = {}
+    for names in listed.values():
+        for name in names:
+            seen[name] = seen.get(name, 0) + 1
+    tools = {key: sorted(n for n in names if seen[n] == 1) for key, names in listed.items()}
+    prefixes: dict[str, list[str]] = {}
+    for server, owner in manager.get_portable_mcp_server_plugins().items():
+        prefix = f"{schema.MCP_TOOL_NAME_PREFIX}{schema.sanitize_mcp_name_component(server)}__"
+        prefixes.setdefault(owner, []).append(prefix)
+    return tools, {key: sorted(values) for key, values in prefixes.items()}
+
+
 def register(server) -> None:
     bind_module(globals(), server)
