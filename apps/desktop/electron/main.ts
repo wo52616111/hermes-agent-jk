@@ -682,10 +682,9 @@ import { buildPathExtCandidates, chooseUpdaterArgs, resolveVenvHermesCommand } f
 import {
   connectWindowsRemote,
   detectRemotePlatform,
-  helper,
+  inspectWindowsSupport,
   probeWindowsRemote,
-  terminateOwnedWindowsDashboardForUpdate,
-  windowsHelperOwnsRuntime
+  terminateOwnedWindowsDashboardForUpdate
 } from './windows-remote-lifecycle'
 import {
   alreadyHasNoSandbox,
@@ -10302,9 +10301,9 @@ async function testDesktopConnectionConfig(input: any = {}) {
           if (platform.os === 'Windows') {
             const runtime = platform
             hermesPath = runtime.hermesPath
-            const inspection = await helper(ssh, runtime, 'inspect', [runtime.hermesPath])
+            const inspection = await inspectWindowsSupport(ssh, runtime)
             hermesVersion = inspection.version
-            supported = inspection.supported && windowsHelperOwnsRuntime(runtime, inspection)
+            supported = inspection.supported
           } else {
             hermesPath = await remoteLifecycle.locateHermes(ssh, sshConfig.remoteHermesPath || '')
             hermesVersion = await remoteLifecycle.probeHermesVersion(ssh, hermesPath)
@@ -10340,7 +10339,7 @@ async function testDesktopConnectionConfig(input: any = {}) {
         }
       }
     } catch (error: any) {
-      return { reachable: false, sshError: error.kind || 'unknown', error: redactSecrets(String(error?.message || error)) }
+      return { reachable: false, sshError: error.kind || 'unknown', error: redactSecrets(String(error.message)) }
     } finally {
       try {
         await ssh.close()

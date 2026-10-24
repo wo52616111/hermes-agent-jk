@@ -741,6 +741,13 @@ function windowsHelperOwnsRuntime(runtime, inspection) {
   return !runtime.runtimeCommand || inspection?.runtimeBootstrapOwnership === 1
 }
 
+// Test answers with Connect's own capability bar.
+async function inspectWindowsSupport(ssh, runtime) {
+  const inspection = await helper(ssh, runtime, 'inspect', [runtime.hermesPath])
+
+  return { version: inspection.version, supported: inspection.supported && windowsHelperOwnsRuntime(runtime, inspection) }
+}
+
 async function connectWindowsRemote(deps) {
   const {
     ssh,
@@ -979,6 +986,7 @@ export {
   encodedPowerShell,
   helper,
   helperCommand,
+  inspectWindowsSupport,
   powerShellCommand,
   probeWindowsFiles,
   probeWindowsRemote,
