@@ -63,15 +63,12 @@ class _Batch:
 
     def run_child(self, i: int, task: dict[str, Any], child: Any) -> dict[str, Any]:
         from tools.delegate_tool import _run_single_child
-        from tools.delegate_tool_routing import finish_routed_child
         try:
             entry = _run_single_child(
                 task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
         except BaseException:
-            finish_routed_child(child, {"status": "error"})  # delegation.provider: auto outcome; never raises
             _refresh_child_quota(child)
             raise
-        finish_routed_child(child, entry)
         _refresh_child_quota(child)
         return entry
 

@@ -236,7 +236,7 @@ class RouterDelegationProvider(DelegationProvider):
         if is_blocked(provider=parent.get("provider"), requested_provider=parent.get("requested_provider"),
                       base_url=parent.get("base_url")):
             raise DelegationRouteError(
-                f"delegation.provider: auto could not route this task ({reason}) and the parent runs on a blocked "
+                f"the 'router' delegation backend could not route this task ({reason}) and the parent runs on a blocked "
                 f"provider ({parent.get('requested_provider') or parent.get('provider')}), which delegated children "
                 f"must never inherit. Fix the router (delegation.backends.router.router_command) or pin "
                 f"delegation.provider/model explicitly."

@@ -39,12 +39,6 @@ class TaskRoute:
     label: Optional[str] = None
     backend: str = "default"
     error: Optional[str] = None
-    # ``delegation.provider: auto`` only: the id pre-allocated for the router call (so the router's task id and
-    # the child's id are the same), the router's decision for the result entry, and the config its outcome is
-    # reported back with.
-    subagent_id: Optional[str] = None
-    routed: Optional[dict[str, Any]] = None
-    router_cfg: Optional[dict[str, Any]] = None
     # The backend's raw answer for THIS task plus the provider that gave it, so result finalization can offer the
     # settled entry back to a backend that reports outcomes (``task_finished``). Never logged or serialized.
     answer: Optional[dict[str, Any]] = field(default=None, repr=False)

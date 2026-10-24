@@ -36,9 +36,6 @@ from tools.delegate_tool_config import (
     _subagent_auto_approve, _subagent_auto_deny,
 )
 from tools.delegate_tool_dispatch import _Batch, _announce_batch, _capture_origin, _run_batch
-from tools.delegate_tool_routing import (
-    ROUTER_ROLES, inherited_routing_cfg, is_auto, is_blocked_provider, routed_child_route, without_auto,
-)
 from tools.delegate_tool_progress import (
     DelegateEvent, SUBAGENT_FAILURE_STATUSES, _batch_prefix, _build_child_progress_callback,
     _build_child_system_prompt, _clean_error_text, _emit_parent_console, _quiet, _resolve_workspace_hint,
@@ -228,8 +225,6 @@ def _build_child_agent(
     routing_cfg: Optional[dict[str, Any]] = None,
     # Legacy; accepted for wire compat but ignored (capability is depth-derived).
     role: str = "leaf",
-    # Pre-allocated id (delegation.provider: auto routes the child before it is built).
-    subagent_id: Optional[str] = None,
     # Per-task route from the delegation provider (tools/delegate_tool_routes.py): a reasoning
     # effort that beats delegation.reasoning_effort, and the profile home the child runs as.
     override_reasoning_effort: Any = None,
@@ -251,7 +246,7 @@ def _build_child_agent(
 
     # One subagent_id shared by the progress callback, spawn_requested event and
     # the live registry; parent_id is set when THIS parent is itself a subagent.
-    subagent_id = subagent_id or f"sa-{task_index}-{_uuid.uuid4().hex[:8]}"
+    subagent_id = f"sa-{task_index}-{_uuid.uuid4().hex[:8]}"
     parent_subagent_id = getattr(parent_agent, "_subagent_id", None)
 
     # General delegation behavior (reasoning, compression, capabilities) stays
@@ -458,7 +453,6 @@ def _build_children(
 ) -> tuple[list[tuple], Optional[str]]:
     """Build every child on the main thread (construction is not thread-safe), each on its task's route;
     ``(children, None)`` or ``([], error)`` on an explicit-pin preflight failure."""
-    import uuid as _uuid
     from tools.delegation_live_log import wrap_progress_callback
     from tools.delegation_output_schema import append_output_contract
     children = []
@@ -470,14 +464,12 @@ def _build_children(
         _child_context = t.get("context")
         if _task_schema is not None:
             _child_context = append_output_contract(_child_context, _task_schema)
-        subagent_id = getattr(route, "subagent_id", None) or f"sa-{i}-{_uuid.uuid4().hex[:8]}"
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i, goal=t["goal"], context=_child_context,
                 toolsets=None,  # always inherit the parent's toolsets
                 model=route.creds["model"], max_iterations=max_iterations, task_count=len(task_list),
-                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role),
-                subagent_id=subagent_id, **_route_overrides(route),
+                parent_agent=parent_agent, role=_normalize_role(t.get("role") or top_role), **_route_overrides(route),
             )
         except ValueError as exc:
             # An owner refusal can land mid-batch: the siblings built so far hold reservations.
@@ -486,11 +478,6 @@ def _build_children(
                 _close_child(built, "Failed to close child after a refused sibling")
             return [], str(exc)
         pin_child_service_tier(child, route.creds)
-        # A router-routed child (delegation.provider: auto) keeps the router's decision so
-        # ``finish_routed_child`` can stamp the result entry and report the outcome back.
-        if getattr(route, "routed", None):
-            child._delegate_routed = route.routed
-            child._delegate_router_cfg = getattr(route, "router_cfg", None) or {}
         # A backend that reports outcomes keeps its raw answer on the child for result finalization
         # (``task_finished``); None for every other backend.
         if getattr(route, "answer", None) is not None:
@@ -526,74 +513,12 @@ def _routes_for(task_list: list[dict[str, Any]], cfg: dict[str, Any], credential
     every task's route; otherwise the active delegation provider decides each one."""
     from tools.delegate_tool_routes import resolve_task_routes, route_for_config
     if credentials_cfg is None:
-        # An explicit ``delegation.backend`` wins over the legacy ``provider: auto`` path; the two coexist until
-        # the plugin is live on every machine (then the legacy path is deleted).
-        if cfg.get("backend"):
-            return resolve_task_routes(task_list, cfg, parent_agent)
-        # ``delegation.provider: auto`` asks the external router per child; everything downstream is the
-        # same route path a delegation backend's answer takes.
-        if is_auto(cfg):
-            return _auto_routes(task_list, cfg, parent_agent)
-        # The router hints are advertised "ignored otherwise" (DELEGATE_TASK_SCHEMA): a backend that does
-        # not declare them would refuse the whole task, so they never reach a non-auto route.
-        _drop_router_hints(task_list)
         return resolve_task_routes(task_list, cfg, parent_agent)
-    _drop_router_hints(task_list)
     try:
         route = route_for_config(credentials_cfg, parent_agent)
     except ValueError as exc:
         return [], str(exc)
     return [route] * len(task_list), None
-
-
-def _drop_router_hints(task_list: list[dict[str, Any]]) -> None:
-    """Strip the router-only task hints from tasks that will not go through the router."""
-    for t in task_list:
-        t.pop("route_role", None)
-        t.pop("author_vendor", None)
-
-
-def _auto_routes(task_list: list[dict[str, Any]], cfg: dict[str, Any],
-                 parent_agent: Any) -> tuple[list[Any], Optional[str]]:
-    """``delegation.provider: auto`` — the external router picks each task's provider/model.
-
-    The router's answer becomes a ``TaskRoute`` exactly like a delegation backend's, so child construction,
-    credential pinning and fallback policy stay on one path. Router trouble inherits the parent, unless the
-    parent runs on a provider children must never inherit — then that task is refused with the fix.
-    """
-    import uuid as _uuid
-    from tools.delegate_tool_routes import TaskRoute, resolve_task_routes
-    base_cfg = without_auto(cfg)
-    routes: list[Any] = []
-    for i, t in enumerate(task_list):
-        # Pre-allocated so the router's ``--task-id`` and the child's id are the same id.
-        subagent_id = f"sa-{i}-{_uuid.uuid4().hex[:8]}"
-        routed = routed_child_route(cfg, t, subagent_id)
-        if routed is not None:
-            routes.append(TaskRoute(
-                creds=routed["creds"], routing_cfg=routed["routing_cfg"], backend="router",
-                subagent_id=subagent_id, routed=routed["routed"], router_cfg=cfg,
-            ))
-            continue
-        parent_provider = getattr(parent_agent, "provider", None)
-        if is_blocked_provider(parent_provider):
-            routes.append(TaskRoute(
-                creds={}, routing_cfg={}, backend="router", subagent_id=subagent_id, router_cfg=cfg,
-                error=(f"delegation.provider: auto could not route task {i} and the parent runs on "
-                       f"{parent_provider!r}, which delegated children must never inherit. Fix the router "
-                       f"(delegation.router_command) or pin delegation.provider/model explicitly."),
-            ))
-            continue
-        inherit_cfg = inherited_routing_cfg(base_cfg, parent_agent, {})
-        inherited, err = resolve_task_routes([t], inherit_cfg, parent_agent)
-        if err:
-            return [], err
-        for inherited_route in inherited:
-            inherited_route.backend = "router-inherit"
-            inherited_route.subagent_id = subagent_id
-            inherited_route.router_cfg = cfg
-            routes.append(inherited_route)
-    return routes, None
 
 
 def _settle_refused_transcripts(refused: list[dict[str, Any]], live_deleg_id: Optional[str], live_writers: list,
@@ -896,15 +821,6 @@ DELEGATE_TASK_SCHEMA = {
                             "pixels on their first turn; non-vision children get path hints for vision_analyze. Text "
                             "files do NOT belong here — put paths in 'context' instead.",
                             items={"type": "string"},
-                        ),
-                        "route_role": _p(
-                            "string",
-                            "Optional quota-routing lane that picks this child's model when delegation.provider is "
-                            "auto (default code-core); ignored otherwise.",
-                            enum=list(ROUTER_ROLES),
-                        ),
-                        "author_vendor": _p(
-                            "string", "Optional vendor that authored the work under review (routing hint).",
                         ),
                         "group": _p(
                             "string",

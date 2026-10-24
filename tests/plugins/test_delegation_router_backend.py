@@ -180,3 +180,35 @@ def test_record_argv_derivation():
 
 def test_blocked_constants_are_not_empty():
     assert "aftership-codex-proxy" in BLOCKED_PROVIDERS and BLOCKED_HOSTS
+
+
+def test_an_absent_route_role_falls_back_to_the_configured_default(provider, tmp_path):
+    script = tmp_path / "eva-model.py"
+    script.write_text("")
+    router = _Router()
+    cfg = {"backends": {"router": {"router_command": f"python3 {script} route --json", "default_role": "screen"}}}
+    with patch("subprocess.run", side_effect=router):
+        provider.route_task({"goal": "x", "index": 0, "parent": PARENT}, cfg)
+    argv = router.calls[0][0]
+    assert argv[argv.index("--task-id") - 1] == "screen"
+
+
+def test_a_failed_entry_records_failed(provider):
+    answer = {"provider": "openrouter", "model": "m",
+              "_router": {"decision_id": "d-1", "record_argv": ["python3", "/x.py", "record"]}}
+    calls = []
+    with patch("subprocess.run", side_effect=lambda argv, **k: calls.append(list(argv)) or
+               subprocess.CompletedProcess(argv, 0, "", "")):
+        provider.task_finished({}, answer, {"status": "error"})
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not calls:
+            time.sleep(0.01)
+    assert calls and "failed" in calls[0]
+
+
+def test_a_fully_blocked_parent_chain_disables_fallback(provider):
+    router = _Router(subprocess.CompletedProcess([], 1, "", "down"))
+    parent = {**PARENT, "fallback_providers": [{"provider": "aftership-codex-proxy", "model": "x"}]}
+    with patch("subprocess.run", side_effect=router):
+        route = provider.route_task({"goal": "x", "index": 0, "parent": parent}, {})
+    assert route["fallback_providers"] == []
