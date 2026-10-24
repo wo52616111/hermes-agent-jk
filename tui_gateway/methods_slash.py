@@ -145,7 +145,11 @@ def _usage_account_blocks(session: dict) -> list[str]:
                 lines += render_account_usage_lines(fetch_account_usage(
                     provider, base_url=getattr(agent, "base_url", None), api_key=getattr(agent, "api_key", None)))
         with contextlib.suppress(Exception):
-            lines += nous_credits_lines()
+            # Window plans: the last reply's gauges lift the portal's lagging percents (``is True``: a
+            # Mock agent's attribute is not a plan). Every other account: exactly main's call.
+            state = getattr(agent, "_credits_state", None)
+            window = getattr(state, "is_usage_window", False) is True
+            lines += nous_credits_lines(credits_state=state) if window else nous_credits_lines()
     return lines
 
 
@@ -155,10 +159,18 @@ def _format_live_usage_output(sid: str, session: dict, arg: str) -> str:
     return "\n\n".join(filter(None, [tokens, "\n".join(extra)])) or _NO_AGENT_USAGE
 
 
+def _quota_keys() -> tuple[str, ...]:
+    """The capacity-row keys (``gateway/session_usage.py``'s one definition, never a copy here)."""
+    from gateway.session_usage import QUOTA_KEYS
+    return QUOTA_KEYS
+
+
 def _format_live_usage_tokens(session: dict) -> str:
     agent = session.get("agent")
     usage = _session_usage_snapshot(session)
-    if agent is None and not usage:
+    if agent is None and not (set(usage) - set(_quota_keys())):
+        # A pre-agent snapshot still carries the capacity row (``account_usage*``); those are not
+        # token figures, so a session with no agent and nothing else has no token table to print.
         return ""
     if session.get("_metadata_message_count") is not None:
         message_count = int(session.get("_metadata_message_count") or 0)
@@ -180,7 +192,8 @@ def _format_live_usage_tokens(session: dict) -> str:
     rows += [("Messages:", f"{message_count:,}"), ("Compressions:", n("compressions"))]
     model = usage.get("model") or _metadata_mirror(session).get("model") or getattr(agent, "model", "") or "(unknown)"
     lines = ["Session Token Usage", "────────────────────────────────────────", f"Model: {model}"]
-    return "\n".join(lines + [f"{label:<30}{value}" for label, value in rows])
+    lines += [f"{label:<30}{value}" for label, value in rows]
+    return "\n".join(lines)
 
 
 def _live_session_messages(session: dict) -> Optional[list]:

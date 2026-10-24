@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Literal
 
 from .base import JsonValue, Params, Result
-from .common import McpServerStatus, OpenModel, ProjectRef
+from .common import AccountUsage, AccountUsageGroup, McpServerStatus, OpenModel, PlanGauge, ProjectRef
 from .events import SkinPayload
 from .groups_bot_relay import RoomParams, RoomTaskReceipt
 from .prompt_voice import ClarifyLockParams, ClarifyLockResult
@@ -169,7 +169,6 @@ class SessionInventoryFields(Result):
     tool_availability: dict[str, JsonValue] | None = None
     # Classic CLI surface (``source: cli``) only: main's startup lines under the banner (Rich markup).
     tool_availability_warnings: list[str] | None = None
-    browser_backend_notice: str | None = None
     unknown_toolsets: list[str] | None = None  # main's "Unknown toolsets" warning, judged by the gateway
 
 
@@ -237,6 +236,13 @@ class SessionStats(Result):
     model: str
     provider: str
     fallback_model: str | None = None
+    # ``gateway/session_usage.py::quota_fields``: the capacity row rides the same dict as the
+    # counters so ``/usage`` and the post-resume read show quota without a second round trip.
+    account_usage: AccountUsage | None = None
+    account_usage_all: list[AccountUsageGroup] | None = None
+    account_usage_active: str | None = None
+    account_usage_active_account: str | None = None
+    plan_gauge: PlanGauge | None = None
 
 
 canonical_method("session.stats", params=SessionStatsParams, result=SessionStats,

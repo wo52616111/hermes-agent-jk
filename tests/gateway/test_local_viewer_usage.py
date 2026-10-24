@@ -9,6 +9,9 @@ import pytest
 
 from gateway.config import Platform
 
+# The capacity row rides the same dict (``gateway/session_usage.py::quota_fields``).
+QUOTA_KEYS = {'account_usage', 'account_usage_all', 'account_usage_active', 'account_usage_active_account'}
+
 FIELDS = {'input_tokens', 'output_tokens', 'cache_read_tokens', 'cache_write_tokens', 'prompt_tokens',
           'completion_tokens', 'total_tokens', 'reasoning_tokens', 'api_calls', 'last_prompt_tokens',
           'context_tokens', 'context_length', 'config_context_length', 'context_source', 'compression_count',
@@ -65,9 +68,13 @@ def test_each_api_step_publishes_usage_only_for_local_viewers(platform):
         frame = next(payload for kind, payload in published if kind == 'session.usage')
         # One frame, both views: the loose counters the classic CLI / TUI mirror reads, and the TUI
         # view the Desktop status bar reads (without it its meters sit at the empty placeholder).
-        assert {key: value for key, value in frame.items() if key != 'usage'} == usage_stats(_agent())
+        assert {key: value for key, value in frame.items()
+                if key != 'usage' and key not in QUOTA_KEYS} == usage_stats(_agent())
         assert frame['api_calls'] == 2
         assert frame['usage']['calls'] == 2 and frame['usage']['avg_tps'] == 10.0
+        # The capacity row rides the same frame (``quota_fields``): a viewer that only ever sees
+        # ticks still paints every provider's quota row.
+        assert set(frame) == FIELDS | QUOTA_KEYS | {'usage'}
         EVENTS['session.usage'].payload.model_validate(frame)
     else:
         assert 'session.usage' not in kinds
@@ -90,7 +97,8 @@ async def test_session_stats_returns_the_same_dict(tmp_path, monkeypatch):
         reply = await connection.dispatch({'id': 2, 'method': 'session.stats', 'params': {'session_id': 's'}})
         assert 'result' in reply, reply
         from gateway.session_usage import usage_stats
-        assert reply['result'] == usage_stats(agent)
+        assert {key: value for key, value in reply['result'].items() if key in FIELDS} == usage_stats(agent)
+        assert QUOTA_KEYS <= set(reply['result'])
         CANONICAL_METHODS['session.stats'].result.model_validate(reply['result'])
     finally:
         await connection.close()
@@ -173,6 +181,28 @@ def test_published_usage_view_matches_the_embedded_ticker(agent):
     kind, frame = published[-1]
     assert kind == 'session.usage'
     assert frame['usage'] == _get_usage(agent)
+
+
+def test_a_window_plans_gauge_rides_the_canonical_usage_feed():
+    """The Desktop status bar's plan allowance reads ``usage.plan_gauge``; a normal local session's
+    ticks and turn-end usage come from the gateway (``usage_frame`` / ``tui_usage``), not ``_get_usage``."""
+    from agent.credits_tracker import CreditsState
+    from agent.usage_gauges import WindowGauge
+    from gateway.session_usage import publish_usage, tui_usage, usage_stats
+    from tui_gateway.contracts.registry import CANONICAL_METHODS, EVENTS
+    from tui_gateway.server import _get_usage
+
+    day = WindowGauge(id='day', scope='all', label='today', used_bp=4_200, resets_at_ms=4_000_000_000_000)
+    agent = _agent()
+    agent._credits_state = CreditsState(denominator_kind='usage_window', gauges=(day,))
+    published = []
+    publish_usage(_turn(Platform.LOCAL, published, agent), agent)
+    frame = published[-1][1]
+    expected = {'id': 'day', 'label': 'today', 'used_bp': 4_200, 'resets_at_ms': 4_000_000_000_000}
+    assert frame['usage']['plan_gauge'] == expected == _get_usage(agent)['plan_gauge']
+    assert tui_usage(usage_stats(agent))['plan_gauge'] == expected  # message.complete.usage
+    EVENTS['session.usage'].payload.model_validate(frame)
+    CANONICAL_METHODS['session.stats'].result.model_validate(usage_stats(agent))
 
 
 def test_turn_end_publishes_the_agents_banner_info():

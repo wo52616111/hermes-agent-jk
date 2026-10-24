@@ -1,4 +1,4 @@
-import type { SessionStats, SessionUsagePayload, Usage } from './gateway-contract.generated.js'
+import type { PlanGauge, SessionStats, SessionUsagePayload, Usage } from './gateway-contract.generated.js'
 
 /** The owner's `session.usage` tick (`SessionUsagePayload`, canonical counters at the top level or the classic sidecar ticker's nested `usage`) or its `session.stats` reply (`SessionStats`). */
 export type UsageTickPayload = SessionStats | SessionUsagePayload
@@ -6,6 +6,11 @@ export type UsageTickPayload = SessionStats | SessionUsagePayload
 /** What `usageFromTick` computes from top-level counters: the `Usage` fields both status bars read. */
 export interface TickUsage {
   active_subagents?: number
+  /** The capacity-row keys, carried on the same frame as the counters (`gateway/session_usage.py::quota_fields`). */
+  account_usage?: Usage['account_usage']
+  account_usage_active?: Usage['account_usage_active']
+  account_usage_active_account?: Usage['account_usage_active_account']
+  account_usage_all?: Usage['account_usage_all']
   avg_latency_s?: number
   avg_tps?: number
   cache_hit_pct?: number
@@ -20,6 +25,7 @@ export interface TickUsage {
   input: number
   model?: string
   output: number
+  plan_gauge?: PlanGauge
   prompt: number
   reasoning: number
   total: number
@@ -103,6 +109,33 @@ function rateFields(p: UsageTickPayload): Partial<TickUsage> {
   return fields
 }
 
+/**
+ * The capacity-row keys, passed through from the payload that carried them. They ride the same frame
+ * as the counters (`gateway/session_usage.py::quota_fields`), so a viewer that only ever sees ticks
+ * still paints every provider's quota row; absent keys stay absent rather than becoming an empty bar.
+ */
+const QUOTA_KEYS = [
+  'account_usage',
+  'account_usage_all',
+  'account_usage_active',
+  'account_usage_active_account'
+] as const
+
+function quotaFields(p: Partial<Record<(typeof QUOTA_KEYS)[number], unknown>>): Partial<TickUsage> | undefined {
+  const fields: Partial<TickUsage> = {}
+
+  for (const key of QUOTA_KEYS) {
+    const value = p[key]
+
+    if (value !== null && value !== undefined) {
+      // The wire type is the contract's own (`Usage`); the payload is read structurally.
+      ;(fields as Record<string, unknown>)[key] = value
+    }
+  }
+
+  return Object.keys(fields).length > 0 ? fields : undefined
+}
+
 /** A canonical local viewer's `session.usage` tick carries the owner's session-cumulative counters at the top level; the classic sidecar ticker's nested `usage` passes through unchanged. Each figure maps only when its source is present, so a partial tick never zeroes a counter it did not carry (`session_usage.tui_usage` is the Python twin used for `message.complete.usage`). */
 export function usageFromTick<Nested = Usage>(
   payload: null | undefined | (UsageTickPayload & { usage?: Nested | null })
@@ -115,6 +148,8 @@ export function usageFromTick<Nested = Usage>(
     return payload.usage
   }
 
+  const quota = quotaFields(payload)
+
   const usage: Partial<TickUsage> = {}
 
   for (const [key, sources] of COUNTERS) {
@@ -126,11 +161,29 @@ export function usageFromTick<Nested = Usage>(
     }
   }
 
-  const derived = { ...usage, ...contextFields(payload), ...rateFields(payload) }
+  const derived: Partial<TickUsage> = { ...usage, ...contextFields(payload), ...rateFields(payload), ...quota }
+
+  if (payload.plan_gauge) {
+    derived.plan_gauge = payload.plan_gauge
+  }
 
   if (Object.keys(derived).length === 0) {
     return undefined
   }
 
   return payload.model ? { ...derived, model: payload.model } : derived
+}
+
+/** Merge a usage payload into the stored one: a partial tick keeps the fields it omits, but the plan gauge follows the latest complete payload. Both builders (`gateway/session_usage.py::tui_usage`, `tui_gateway/server.py::_get_usage`) always send `calls` and send `plan_gauge` only on a window plan, so a complete payload without it means the session is off the plan (or the allowance reset) and the old gauge goes. */
+export function mergeUsage<P extends object, N extends { calls?: number; plan_gauge?: unknown }>(
+  previous: P,
+  next: N | null | undefined
+): P & Partial<N> {
+  const merged = { ...previous, ...next }
+
+  if (next?.calls !== undefined && next.plan_gauge == null) {
+    delete (merged as { plan_gauge?: unknown }).plan_gauge
+  }
+
+  return merged
 }

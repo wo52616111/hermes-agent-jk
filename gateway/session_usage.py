@@ -10,6 +10,13 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import logging
+import time
+
+logger = logging.getLogger(__name__)
+# The status-bar quota keys, as `agent/quota_wire.py::fields` returns them.
+QUOTA_KEYS = ("account_usage", "account_usage_all", "account_usage_active",
+              "account_usage_active_account")
 
 _COUNTERS = (("input_tokens", "session_input_tokens"), ("output_tokens", "session_output_tokens"),
              ("cache_read_tokens", "session_cache_read_tokens"),
@@ -57,6 +64,23 @@ def _rate_limit(agent):
     return None
 
 
+def plan_gauge(agent) -> dict | None:
+    """Window plans only: the allowance the status bar shows at a glance (today's, else the one that binds),
+    from the reply headers the agent already tracks — no extra round trip, None for everyone else."""
+    with contextlib.suppress(Exception):
+        state = getattr(agent, "_credits_state", None)
+        if getattr(state, "is_usage_window", False) is True:  # `is True`: a Mock agent's attribute is not a plan
+            binding = state.binding_gauge
+            day = next((g for g in state.gauges if g.id == "day" and g.scope == "all"), None)
+            # A full allowance is what blocks, so it wins over today's; a passed reset is no longer current.
+            gauge = binding if binding is not None and binding.full else (day or binding)
+            reset = getattr(gauge, "resets_at_ms", None)
+            if gauge is not None and not (isinstance(reset, int) and 0 < reset <= int(time.time() * 1000)):
+                return {"id": gauge.id, "label": gauge.label, "used_bp": int(gauge.used_bp),
+                        "resets_at_ms": gauge.resets_at_ms}
+    return None
+
+
 def usage_stats(agent) -> dict:
     """The frozen ``session.usage`` / ``session.stats`` dict; zeros before the first turn built an agent."""
     stats: dict = {key: int(getattr(agent, attr, 0) or 0) for key, attr in _COUNTERS}
@@ -80,7 +104,24 @@ def usage_stats(agent) -> dict:
                  model=str(getattr(agent, "model", "") or ""), provider=str(getattr(agent, "provider", "") or ""),
                  fallback_model=(str(getattr(agent, "model", "") or "") or None)
                  if getattr(agent, "_fallback_activated", False) is True else None)
+    if (gauge := plan_gauge(agent)) is not None:  # absent off a window plan, as on the embedded path
+        stats["plan_gauge"] = gauge
     return stats
+
+
+def quota_fields(agent) -> dict:
+    """Provider quota groups for the capacity row (``account_usage*``).
+
+    Same builder as the legacy TUI backend (``agent/quota_wire``): the status bar is one surface,
+    so a provider's windows must not depend on which transport carried the session. A failed read
+    leaves the keys out rather than fabricating an empty bar.
+    """
+    try:
+        from agent import quota_wire
+        return quota_wire.fields(agent)
+    except Exception:
+        logger.debug("quota wire fields failed", exc_info=True)
+        return {}
 
 
 def carried_compression_count(live, agent=None) -> int:
@@ -134,6 +175,11 @@ def tui_usage(stats: dict) -> dict:
             usage[key] = round(float(stats[source_key]), 1)
     if isinstance(stats.get("active_subagents"), int):
         usage["active_subagents"] = stats["active_subagents"]
+    for key in QUOTA_KEYS:
+        if stats.get(key) is not None:
+            usage[key] = stats[key]
+    if isinstance(stats.get("plan_gauge"), dict):
+        usage["plan_gauge"] = stats["plan_gauge"]
     return usage
 
 
@@ -172,6 +218,7 @@ def publish_usage(turn, agent, *, record: bool = False) -> None:
         return
     with contextlib.suppress(Exception):
         stats = usage_stats(agent)
+        stats.update(quota_fields(agent))
         turn._publish_execution("session.usage", usage_frame(stats))
         if record:
             from gateway.session_results import execution_result
@@ -189,4 +236,5 @@ async def stats(connection, ref, params):
     agent = connection.authority.agent(ref)
     result = usage_stats(agent)
     result["compression_count"] = carried_compression_count(connection.authority.sessions.get(ref.session_id), agent)
+    result.update(quota_fields(agent))
     return result

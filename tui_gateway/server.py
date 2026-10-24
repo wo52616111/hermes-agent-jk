@@ -17,6 +17,8 @@ import sys
 import threading
 import time
 import uuid
+# Load-bearing beyond this module: split handlers are rebound to THIS module's globals
+# (``method_ctx.bind_module``), so ``methods_session`` resolves bare ``datetime``/``timezone`` here.
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, NamedTuple, Optional
@@ -1052,7 +1054,6 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
         resolved = cwd if cwd is not None else (str(sess.get("cwd") or "") if sess is not None else "")
         source = _resolve_session_platform()
         profile = _current_profile_name()
-        browser_control_principal = browser_control_transport_family = ""
         # Live conversation id for subprocess HERMES_SESSION_ID: an explicitly empty contextvar is authoritative
         # (no os.environ fallback), so never leave it "" — agent's durable session_id, then session_key.
         session_id = session_key
@@ -1061,16 +1062,9 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             # App-global backends multiplex profiles: prefer the live session's own home.
             profile = profile_name_for_home(sess.get("profile_home")) or profile
             session_id = getattr(sess.get("agent"), "session_id", None) or session_key
-            identity = getattr(sess.get("transport"), "auth_identity", None)
-            if _methods_browser_control._is_authenticated_identity(identity):
-                browser_control_principal = _methods_browser_control._principal_digest(identity)
-                browser_control_transport_family = _methods_browser_control._CLOUD_TRANSPORT_FAMILY
         return set_session_vars(
             session_key=session_key, session_id=session_id, source=source,
-            profile=profile,
-            browser_control_principal=browser_control_principal,
-            browser_control_transport_family=browser_control_transport_family, cwd=resolved,
-            ui_session_id=ui_session_id, cron_session="")
+            profile=profile, cwd=resolved, ui_session_id=ui_session_id, cron_session="")
     return []
 
 
@@ -1421,6 +1415,10 @@ def _get_usage(agent) -> dict:
             for _key, _val in (("avg_latency_s", _total_lat / _n), ("avg_tps", _avg_vel)):
                 if _val is not None and _val == _val and 0 < _val < 1e6:  # guard NaN/negative/absurd provider timings
                     usage[_key] = round(float(_val), 1)
+    # Window plans only: the desktop status bar's allowance (the canonical feed carries the same one).
+    from gateway.session_usage import plan_gauge
+    if (gauge := plan_gauge(agent)) is not None:
+        usage["plan_gauge"] = gauge
     # Live count of background/async subagents (CLI status bar ⛓ parity, same async_delegation registry).
     with contextlib.suppress(Exception):
         from tools.async_delegation import active_count as _async_active_count
@@ -1431,6 +1429,13 @@ def _get_usage(agent) -> dict:
             spent = agent.get_credits_spent_micros()
             if spent is not None:
                 usage["dev_credits_spent_micros"] = int(spent)
+    # The capacity row rides this same view (`agent/quota_wire.py` is the one builder): a client that
+    # reads the nested `usage` must not lose a provider's windows because the other transport carried
+    # them. Only figures that exist are added — `session_usage.tui_usage` applies the same rule, and
+    # the two views are asserted equal (`tests/gateway/test_local_viewer_usage.py`).
+    with contextlib.suppress(Exception):
+        from agent import quota_wire
+        usage.update({k: v for k, v in quota_wire.fields(agent).items() if v is not None})
     return usage
 
 
@@ -1537,7 +1542,7 @@ def _refresh_account_usage_async(sid: str, session: dict):
         try:
             from agent import quota_state
 
-            with getattr(sys.modules[__name__], "_session_profile_runtime_scope")(session):
+            with sys.modules[__name__]._session_profile_runtime_scope(session):
                 for provider in quota_state.SUPPORTED:
                     try:
                         quota_state.refresh(provider)
@@ -1564,169 +1569,19 @@ def _refresh_account_usage_async(sid: str, session: dict):
     return thread
 
 
-def _account_usage_window_wire(window: dict) -> dict:
-    """One quota window as the wire carries it (the per-account view's own window shape)."""
-    return {k: window.get(k) for k in
-            ("period", "used_percent", "reset_at", "rolled", "status", "window_seconds")}
-
-
-def _account_usage_account_wire(provider: str, account: dict) -> dict:
-    """One credential of a ``quota_aware`` provider's view (D19/D26). ``error_status`` is read from
-    the account's stored FACTS (the view keeps only the message) so the UI can mark a 429 read
-    without parsing text."""
-    from agent import quota_state
-    out = {
-        "fingerprint": account.get("fingerprint"),
-        "label": account.get("label"),
-        "entry_id": account.get("entry_id"),
-        "state": account.get("state"),
-        "metered": bool(account.get("metered")),
-        "read_health": account.get("read_health"),
-        "windows": [_account_usage_window_wire(w) for w in account.get("windows") or []],
-        "fetched_at": account.get("fetched_at"),
-        "age_s": account.get("age_s"),
-        "attempted_at": account.get("attempted_at"),
-        "last_error": account.get("last_error"),
-        "error_status": None,
-        "backoff_until": account.get("backoff_until"),
-        "recovery_at": account.get("recovery_at"),
-    }
-    try:
-        fingerprint = account.get("fingerprint")
-        if isinstance(fingerprint, str) and fingerprint:
-            facts = quota_state.read_account_facts(provider, fingerprint) or {}
-            out["error_status"] = (facts.get("error") or {}).get("status")
-    except Exception:
-        logger.debug("account facts read failed for %s", provider, exc_info=True)
-    return out
-
-
-def _account_usage_group_from_view(provider: str, view: dict) -> dict:
-    """A capacity-row group built from a ``quota_aware`` provider's per-profile view (D41).
-
-    The provider line carries the SERVING account's own windows - never a sum or an average
-    (D14/D34) - plus every account's own row, so a multi-account pool stops reporting empty
-    windows. ``serving`` is the shared fact; the session-local active account is added in
-    ``_session_usage_snapshot``.
-    """
-    from agent import quota_state
-    accounts = list(view.get("accounts") or [])
-    serving = quota_state.serving_account(view)
-    return {
-        "provider": provider,
-        "fetched_at": serving.get("fetched_at"),
-        "age_s": serving.get("age_s"),
-        "error": None,
-        "backoff_until": serving.get("backoff_until"),
-        "windows": [_account_usage_window_wire(w) for w in serving.get("windows") or []],
-        "hint": None,
-        "multi_account": len(accounts) > 1,
-        "serving": view.get("serving"),
-        "serving_since": view.get("serving_since"),
-        "states": dict(view.get("states") or {}),
-        "strategy": view.get("strategy"),
-        "accounts": [_account_usage_account_wire(provider, a) for a in accounts],
-    }
-
-
-def _account_usage_view_groups() -> list[dict]:
-    """Per-account groups for every provider whose profile-scoped view exists (D41)."""
-    from agent import quota_state
-    profile = quota_state.current_profile()
-    groups = []
-    for provider in quota_state.SUPPORTED:
-        try:
-            view = quota_state.read_view(profile, provider)
-        except Exception:
-            logger.debug("quota view read failed for %s", provider, exc_info=True)
-            continue
-        if view and view.get("accounts"):
-            groups.append(_account_usage_group_from_view(provider, view))
-    return groups
-
-
 def _account_usage_all_wire() -> list[dict]:
     """Every provider with stored quota, for the capacity row (status bar).
 
-    Legacy providers come from ``quota_state.status_groups()`` unchanged; a provider with a
-    ``quota_aware`` per-profile view (D41) is replaced by its per-account group, which carries
-    every account's own windows.
+    One builder for every surface: ``agent/quota_wire`` owns the shape, the legacy TUI
+    backend and the canonical gateway both read it. Kept as a module-level seam because
+    the payload tests patch it here.
     """
-    try:
-        from agent import quota_state
-        groups = quota_state.status_groups()
-    except Exception:
-        logger.debug("quota status read failed", exc_info=True)
-        groups = []
-    try:
-        view_groups = _account_usage_view_groups()
-    except Exception:
-        logger.debug("quota view groups read failed", exc_info=True)
-        return groups
-    if not view_groups:
-        return groups
-    by_provider = {g["provider"]: g for g in view_groups}
-    merged = [by_provider.pop(g["provider"], g) for g in groups]
-    merged.extend(by_provider.values())
-    return merged
-
-
-def _active_account_fingerprint(agent, provider: str) -> str | None:
-    """Fingerprint of the credential THIS session is on (D19/D29). Resolved from the live agent's
-    own key so two sessions on different accounts do not share one "active" flag; None when
-    unresolved (the TUI then falls back to the group's ``serving``)."""
-    if not provider:
-        return None
-    try:
-        from agent import quota_state
-        return quota_state.served_fingerprint(provider, api_key=getattr(agent, "api_key", None))
-    except Exception:
-        logger.debug("active account resolution failed for %s", provider, exc_info=True)
-        return None
-
-
-def _legacy_account_usage_wire(provider: str, groups: list[dict]) -> dict | None:
-    for group in groups:
-        if group.get("provider") == provider and group.get("windows"):
-            return {"provider": provider, "fetched_at": group.get("fetched_at"),
-                    "windows": [{k: w.get(k) for k in ("period", "used_percent", "reset_at")}
-                                for w in group["windows"]]}
-    return None
-
-
-def _age_account_usage_groups(groups: list[dict], now: datetime | None = None) -> list[dict]:
-    """Recompute snapshot ages from stored fetch times without touching credentials or providers."""
-    now = now or datetime.now().astimezone()
-    aged = []
-    for group in groups:
-        next_group = _reaged(group, now)
-        accounts = group.get("accounts")
-        if isinstance(accounts, list):
-            # Each account ages from ITS OWN ``fetched_at``: the idle clock must not leave an
-            # account's ``age_s`` frozen at the value the view was read with, or a stale account
-            # keeps looking fresh while the provider line's age advances.
-            next_group["accounts"] = [
-                _reaged(account, now) if isinstance(account, dict) else account for account in accounts
-            ]
-        aged.append(next_group)
-    return aged
-
-
-def _reaged(record: dict, now: datetime) -> dict:
-    """A copy of ``record`` with ``age_s`` recomputed from its own ``fetched_at`` (left untouched
-    when the timestamp is missing or unparseable)."""
-    next_record = dict(record)
-    try:
-        fetched = datetime.fromisoformat(str(record.get("fetched_at") or "").replace("Z", "+00:00"))
-        if fetched.tzinfo is None:
-            fetched = fetched.astimezone()
-        next_record["age_s"] = max(0, int((now - fetched).total_seconds()))
-    except (TypeError, ValueError):
-        pass
-    return next_record
+    from agent import quota_wire
+    return quota_wire.all_groups()
 
 
 def _session_usage_snapshot(session: dict | None, *, account_usage_groups: list[dict] | None = None) -> dict:
+    from agent import quota_wire
     sess = session or {}
     mirror_usage = _metadata_mirror(session).get("usage")
     if sess.get("agent") is not None and not (sess.get("_compute_host_active") and isinstance(mirror_usage, dict)):
@@ -1739,8 +1594,9 @@ def _session_usage_snapshot(session: dict | None, *, account_usage_groups: list[
         sess["_account_usage_all"] = groups
         usage["account_usage_all"] = groups
         usage["account_usage_active"] = wire_provider or None
-        usage["account_usage_active_account"] = _active_account_fingerprint(agent, wire_provider)
-        usage["account_usage"] = _legacy_account_usage_wire(wire_provider, groups) or _account_usage_wire(
+        usage["account_usage_active_account"] = quota_wire.active_fingerprint(
+            wire_provider, api_key=getattr(agent, "api_key", None))
+        usage["account_usage"] = quota_wire.legacy_account_usage(wire_provider, groups) or _account_usage_wire(
             sess.get("_account_usage_snapshot"),
             wire_provider,
         )
@@ -2001,9 +1857,10 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None
             if row and _resumable_stored_cwd(row.get("cwd"), profile_home):
-                # An ssh session's stored cwd is its workspace: explicit, so the remote terminal uses it instead of
-                # the profile's ~. Other backends keep main's semantics (resolved outside the sessions lock: I/O).
-                remote = _cwd_is_remote(profile_home)
+                # An ssh or sandbox session's stored cwd is its workspace: explicit, so the remote terminal uses it
+                # instead of the backend default (an unpicked launch dir is never persisted for them). Host backends
+                # keep main's semantics (resolved outside the sessions lock: I/O).
+                remote = not _host_cwd_is_terminal_cwd(profile_home)
                 with _sessions_lock:
                     if sid in _sessions:
                         _sessions[sid]["cwd"] = row["cwd"]
@@ -2430,7 +2287,7 @@ from . import (
     compute_host_bridge as _compute_host_bridge, session_workdir as _session_workdir,
     session_lifecycle as _session_lifecycle, session_reaper as _session_reaper,
     session_transports as _session_transports, prompt_turn as _prompt_turn, billing_view as _billing_view,
-    methods_browser_control as _methods_browser_control, methods_bot_relay as _methods_bot_relay,
+    methods_bot_relay as _methods_bot_relay,
     methods_complete as _methods_complete, methods_config as _methods_config,
     methods_config_set as _methods_config_set, methods_images as _methods_images,
     methods_profiles as _methods_profiles, methods_prompt as _methods_prompt, methods_session as _methods_session,
@@ -2449,7 +2306,7 @@ for _m in (
     _session_compression, _change_watcher, _tool_progress, _session_notifications,
     _prompt_attachments, _session_history, _agent_callbacks, _session_auto_continue, _plugin_inject, _rpc_dispatch,
     _methods_complete_helpers, _methods_slash, _methods_voice, _methods_browser,
-    _methods_browser_control, _methods_session, _methods_prompt, _methods_config,
+    _methods_session, _methods_prompt, _methods_config,
     _methods_config_set, _methods_complete, _methods_tools, _methods_tools_plugin_servers, _methods_profiles, _methods_images,
     _methods_bot_relay, _prompt_turn, _billing_view, _methods_projects, _methods_session_foreign,
     _methods_session_control, _methods_subagents, _methods_vault, _methods_free_tier, _methods_connectors,
