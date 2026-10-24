@@ -10,7 +10,7 @@ import fsp from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { publishDesktopTree, writeDesktopHalfMarker } from './desktop-plugins-root'
+import { publishDesktopTree, withDesktopPluginsRoot, writeDesktopHalfMarker } from './desktop-plugins-root'
 import { execGit, hiddenGitSpawnSpec } from './no-console-git'
 
 const GITHUB_BROWSER_SEGMENTS = new Set(['tree', 'blob', 'commit'])
@@ -440,47 +440,51 @@ export async function installDesktopPluginFromGit(
       const targetDir = path.join(desktopPluginsRoot, pluginName)
       const targetPlugin = path.join(targetDir, 'plugin.js')
 
-      if ((await pathIsDirectory(targetDir)) || (await pathIsFile(targetPlugin))) {
-        if (!force) {
-          return {
-            ok: false,
-            error: `Desktop plugin '${pluginName}' already exists. Enable force reinstall to replace it.`
+      // Under the root's writer lock: the exists check and the publish must not
+      // interleave with a reconcile pass copying the same package folder.
+      return await withDesktopPluginsRoot<DesktopPluginInstallResult>(desktopPluginsRoot, async () => {
+        if ((await pathIsDirectory(targetDir)) || (await pathIsFile(targetPlugin))) {
+          if (!force) {
+            return {
+              ok: false,
+              error: `Desktop plugin '${pluginName}' already exists. Enable force reinstall to replace it.`
+            }
           }
+
+          await fsp.rm(targetDir, { recursive: true, force: true })
         }
 
-        await fsp.rm(targetDir, { recursive: true, force: true })
-      }
+        // Staged copy + rename: a failed copy must not leave an empty `targetDir`
+        // that turns every retry into "already exists. Enable force reinstall".
+        // The half of a unified package is stamped with the package marker as
+        // part of that publication — without it the Plugins page cannot tell this
+        // copy belongs to the agent row (it sits on "copying…" forever) and the
+        // half loads default-enabled instead of opt-in.
+        await publishDesktopTree(sourceDir, targetDir, async staged => {
+          if (!packageName) {
+            return
+          }
 
-      // Staged copy + rename: a failed copy must not leave an empty `targetDir`
-      // that turns every retry into "already exists. Enable force reinstall".
-      // The half of a unified package is stamped with the package marker as
-      // part of that publication — without it the Plugins page cannot tell this
-      // copy belongs to the agent row (it sits on "copying…" forever) and the
-      // half loads default-enabled instead of opt-in.
-      await publishDesktopTree(sourceDir, targetDir, async staged => {
-        if (!packageName) {
-          return
-        }
-
-        await writeDesktopHalfMarker(staged, {
-          package: packageName,
-          repo: gitUrl,
-          // The published folder, not the temp clone. The clone is deleted
-          // below; a source that disappears is ghost-pruned on the next
-          // reconcile when no local `plugins/<name>/desktop` exists to
-          // re-copy from (remote backend, or Desktop UI only). A later pass
-          // that does find the agent package still replaces this copy,
-          // because this path is not that package's `desktop/` dir.
-          source: targetDir,
-          sourceMtimeMs: (await fsp.stat(path.join(staged, 'plugin.js'))).mtimeMs
+          await writeDesktopHalfMarker(staged, {
+            package: packageName,
+            repo: gitUrl,
+            // The published folder, not the temp clone. The clone is deleted
+            // below; a source that disappears is ghost-pruned on the next
+            // reconcile when no local `plugins/<name>/desktop` exists to
+            // re-copy from (remote backend, or Desktop UI only). A later pass
+            // that does find the agent package still replaces this copy,
+            // because this path is not that package's `desktop/` dir.
+            source: targetDir,
+            sourceMtimeMs: (await fsp.stat(path.join(staged, 'plugin.js'))).mtimeMs
+          })
         })
+
+        if (!(await pathIsFile(targetPlugin))) {
+          return { ok: false, error: `Install completed but ${targetPlugin} is missing.` }
+        }
+
+        return { ok: true, pluginName, path: targetDir }
       })
-
-      if (!(await pathIsFile(targetPlugin))) {
-        return { ok: false, error: `Install completed but ${targetPlugin} is missing.` }
-      }
-
-      return { ok: true, pluginName, path: targetDir }
     } finally {
       await fsp.rm(cloneRoot, { recursive: true, force: true }).catch(() => undefined)
     }
