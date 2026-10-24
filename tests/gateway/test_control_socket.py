@@ -282,7 +282,7 @@ def test_home_refusing_sockets_listens_on_private_fallback_both_clients_reach(sh
 
     from hermes_cli.gateway_runtime_discovery import query_identify
 
-    home = short_home
+    home = short_home.resolve()  # the server resolves its home; macOS /tmp is a symlink to /private/tmp
     home.chmod(0o700)
     stale = home / "gateway.sock"
     attempts = _refusing_start_unix_server(monkeypatch, refuse_under=home, err=errno.EOPNOTSUPP)
@@ -318,7 +318,7 @@ def test_home_refusing_sockets_listens_on_private_fallback_both_clients_reach(sh
 def test_bind_refused_for_other_reasons_still_fails(short_home: Path, monkeypatch):
     # A live sibling (EADDRINUSE) must keep failing loudly — no silent fallback
     # that would let two gateways for one home both look healthy.
-    home = short_home
+    home = short_home.resolve()  # match the server's resolved home (macOS /tmp -> /private/tmp)
     attempts = _refusing_start_unix_server(monkeypatch, refuse_under=home, err=errno.EADDRINUSE)
 
     async def scenario():
