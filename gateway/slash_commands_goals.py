@@ -206,16 +206,31 @@ class GatewayGoalCommandsMixin:
         event carries no gateway route and never re-enters this chat."""
         args = (event.get_command_args() or "").strip()
         quick_key, agent, error = self._idle_cached_agent_or_error(event, "review")
+        snapshot = list(getattr(agent, "_session_messages", None) or [])
+        cold_session_id = None
+        if agent is None and quick_key and quick_key not in self._running_agents:
+            # The cached agent was evicted (idle TTL, pressure, /moa): review the stored transcript.
+            from gateway.session_cold_review import cold_review_history
+            from gateway.session_transcript import TranscriptReadError
+            from gateway.slash_commands_status import history_unreadable
+            try:
+                cold_session_id, snapshot = await cold_review_history(self, event.source)
+            except TranscriptReadError:
+                return history_unreadable()
+            error = None
         if error:
             return error
-        snapshot = list(getattr(agent, "_session_messages", None) or [])
         from tools.approval_context import reset_current_session_key, set_current_session_key
 
         def _dispatch():
+            from agent.review_engine import start_review
+            from gateway.session_cold_review import cold_review_parent
             token = set_current_session_key(quick_key)
             try:
-                from agent.review_engine import start_review
-                return start_review(agent, snapshot, args)
+                if cold_session_id is None:
+                    return start_review(agent, snapshot, args)
+                with cold_review_parent(self, event.source, quick_key, cold_session_id) as parent:
+                    return start_review(parent, snapshot, args)
             finally:
                 reset_current_session_key(token)
 
