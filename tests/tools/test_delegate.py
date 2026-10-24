@@ -979,6 +979,69 @@ class TestDelegationCredentialResolution(unittest.TestCase):
             requested="crof.ai", target_model="deepseek-v4-pro-CEER"
         )
 
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_auto_provider_inherits_parent_runtime(self, mock_resolve):
+        """``delegation.provider: auto`` is the picker's "inherit" value (configuration.md: "Its ``auto``
+        means 'inherit the parent agent's provider, model, and credentials'"), so it must take the
+        pure-inherit branch — never a runtime resolution.
+
+        Resolving it through the runtime system instead picked the CONFIG DEFAULT provider while the
+        model still came from the parent, so a gateway session on a named custom provider delegated
+        children pinned to ``anthropic`` carrying that provider's model id (HTTP 404, 1024-340).
+        """
+        mock_resolve.return_value = {
+            "provider": "anthropic",  # what the config default resolves to
+            "base_url": "https://api.anthropic.com",
+            "api_key": "sk-ant-default",
+            "api_mode": "anthropic_messages",
+        }
+        parent = _make_mock_parent(depth=0)
+        creds = _resolve_delegation_credentials({"model": "", "provider": "auto"}, parent)
+        mock_resolve.assert_not_called()
+        self.assertIsNone(creds["provider"])
+        self.assertIsNone(creds["base_url"])
+        self.assertIsNone(creds["api_key"])
+        self.assertIsNone(creds["api_mode"])
+        self.assertIsNone(creds["model"])
+
+    @patch("hermes_cli.runtime_provider.resolve_runtime_provider")
+    def test_auto_provider_child_keeps_parent_model_on_parent_provider(self, mock_resolve):
+        """End-to-end half of 1024-340: with ``provider: auto`` and no ``delegation.model`` the child must
+        keep the parent's provider/model PAIR.
+
+        The 404 came from the pair being split: provider ``anthropic`` (config default) + model
+        ``deepseek-v4.1-flash`` (the parent's), which ``normalize_model_for_provider`` then rewrote to
+        ``deepseek-v4-1-flash`` because Anthropic ids take dots-as-hyphens.
+        """
+        from tools.delegate_tool_config import _resolve_child_runtime
+
+        mock_resolve.return_value = {
+            "provider": "anthropic",
+            "base_url": "https://api.anthropic.com",
+            "api_key": "sk-ant-default",
+            "api_mode": "anthropic_messages",
+        }
+        parent = _make_mock_parent(depth=0)
+        parent.provider = "custom"
+        parent.requested_provider = "open-design"
+        parent.base_url = "https://amr-link.open-design.ai/v1"
+        parent.api_mode = "chat_completions"
+        parent.model = "deepseek-v4.1-flash"
+        creds = _resolve_delegation_credentials({"model": "", "provider": "auto"}, parent)
+        rt = _resolve_child_runtime(
+            parent, {}, parent.api_key, model=creds["model"],
+            override_provider=creds["provider"], override_base_url=creds["base_url"],
+            override_api_key=creds["api_key"], override_api_mode=creds["api_mode"],
+            override_acp_command=None, override_acp_args=None, routing_cfg={"fallback_providers": []},
+        )
+        self.assertEqual(rt["model"], "deepseek-v4.1-flash")
+        self.assertEqual(rt["provider"], "custom")
+        self.assertEqual(rt["base_url"], "https://amr-link.open-design.ai/v1")
+        self.assertEqual(rt["api_mode"], "chat_completions")
+        # The model id reaches the wire verbatim: no dots→hyphens for a non-Anthropic provider.
+        from hermes_cli.model_normalize import normalize_model_for_provider
+        self.assertEqual(normalize_model_for_provider(rt["model"], rt["provider"]), "deepseek-v4.1-flash")
+
 class TestDelegationProviderIntegration(unittest.TestCase):
     """Integration tests: delegation config → _run_single_child → AIAgent construction."""
 
