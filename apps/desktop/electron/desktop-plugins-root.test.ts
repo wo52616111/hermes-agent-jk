@@ -274,11 +274,15 @@ describe('reconcileUnifiedDesktopHalves', () => {
     write(path.join(home, 'plugins', 'media', 'desktop', 'plugin.js'), 'default home copy')
     write(path.join(home, 'profiles', 'workbot', 'plugins', 'media', 'desktop', 'plugin.js'), 'profile copy')
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let passes: string[][]
 
-    const passes = await Promise.all([1, 2, 3].map(() => reconcileUnifiedDesktopHalves(home, appRoot)))
+    try {
+      passes = await Promise.all([1, 2, 3].map(() => reconcileUnifiedDesktopHalves(home, appRoot)))
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
 
-    warn.mockRestore()
-    expect(warn).not.toHaveBeenCalled()
     expect(passes.flat()).toEqual([path.join(appRoot, 'media')])
     expect(fs.readFileSync(path.join(appRoot, 'media', 'plugin.js'), 'utf8')).toBe('default home copy')
     expect(fs.readdirSync(appRoot)).toEqual(['media'])
