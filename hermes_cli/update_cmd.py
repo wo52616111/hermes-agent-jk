@@ -1404,7 +1404,7 @@ def _apply_parked_branch_guard(
 
 def _prepare_checkout_for_update(
     git_cmd, branch, current_branch, *, is_fork, assume_yes, gateway_mode, gw_input_fn,
-    switch_branch, target_ref=None, _windows_gateway_resume):
+    switch_branch, target_ref=None, _windows_gateway_resume, upstream_sync=False):
     """Parked-branch guard, land on the target, stash, count new commits. Exits when the
     checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
     date, -1 when tips differ but the shallow count is unrecoverable."""
@@ -1496,7 +1496,7 @@ def _prepare_checkout_for_update(
             upstream_checked = _m()._sync_with_upstream_if_needed(
                 git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn,
                 checkout_move=_moves_for(_windows_gateway_resume),
-                upstream_requested=bool(getattr(args, "upstream", False)))
+                upstream_requested=upstream_sync)
         except UpstreamTargetBroken as broken:  # nothing moved; local edits stay parked, like a rollback
             if auto_stash_ref is not None:
                 print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
@@ -1960,7 +1960,8 @@ def _cmd_update_impl(args, gateway_mode: bool):
         _plan = _prepare_checkout_for_update(
             git_cmd, branch, current_branch, is_fork=is_fork, assume_yes=assume_yes,
             gateway_mode=gateway_mode, gw_input_fn=gw_input_fn, switch_branch=opts.switch_branch,
-            target_ref=target_ref, _windows_gateway_resume=_windows_gateway_resume)
+            target_ref=target_ref, _windows_gateway_resume=_windows_gateway_resume,
+            upstream_sync=opts.upstream_sync)
         commit_count = _plan.commit_count
 
         if commit_count == 0:
