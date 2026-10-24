@@ -4516,7 +4516,6 @@ export interface AgentPluginRow {
   pinned_sha?: string | null
   settings_schema?: PluginSettingField[] | null
   tools?: string[]
-  tool_prefixes?: string[]
 }
 export interface PluginServerRow {
   name: string
