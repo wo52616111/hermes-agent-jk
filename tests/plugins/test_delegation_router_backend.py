@@ -155,12 +155,16 @@ def test_task_finished_reports_the_decision(provider):
         calls.append(list(argv))
         return subprocess.CompletedProcess(argv, 0, "", "")
 
+    entry_routed = [None]
     with patch("subprocess.run", side_effect=_run):
-        provider.task_finished({"goal": "x"}, answer, {"status": "completed"})
+        entry = {"status": "completed"}
+        provider.task_finished({"goal": "x"}, answer, entry)
+        entry_routed[0] = entry.get("routed")
         deadline = time.monotonic() + 2
         while time.monotonic() < deadline and not calls:
             time.sleep(0.01)
     assert calls and calls[0][3:] == ["d-9", "done", "provider=openrouter", "model=m"]
+    assert entry_routed[0] == {"decision_id": "d-9", "provider": "openrouter", "model": "m", "reason": None}
 
 
 def test_task_finished_ignores_an_unrouted_answer(provider):

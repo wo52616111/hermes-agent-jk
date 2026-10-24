@@ -192,7 +192,16 @@ class RouterDelegationProvider(DelegationProvider):
     def task_finished(self, task: Mapping[str, Any], answer: Mapping[str, Any], entry: dict[str, Any]) -> None:
         """Report the settled outcome to the router; never blocks the tool result, never raises."""
         meta = answer.get("_router") if isinstance(answer, Mapping) else None
-        if not isinstance(meta, Mapping) or not meta.get("decision_id") or not meta.get("record_argv"):
+        if not isinstance(meta, Mapping) or not meta.get("decision_id"):
+            return
+        # The routed evidence rides the result entry; the decision id is what joins it to the routing log.
+        entry["routed"] = {
+            "decision_id": meta["decision_id"],
+            "provider": answer.get("provider"),
+            "model": answer.get("model"),
+            "reason": meta.get("reason"),
+        }
+        if not meta.get("record_argv"):
             return
         outcome = "done" if entry.get("status") == "completed" else "failed"
         argv = list(meta["record_argv"]) + [
