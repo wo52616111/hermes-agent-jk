@@ -825,6 +825,26 @@ def _warn_incomplete_gateway_fleet_restart(failed_units: list) -> None:
         print("    launchctl kickstart -k gui/$UID/<label>   # macOS (or user/$UID)")
 
 
+def _launchd_drain_budget() -> float:
+    """How long an update waits for a launchd gateway to drain before forcing the restart.
+
+    The gateway's own after-turn wait is capped by ``agent.restart_after_turn_timeout`` (1800s default), so
+    the updater must outlast that cap rather than race it: a 45s budget would force-kill a gateway that is
+    still politely waiting for a long delegation.
+    """
+    from hermes_cli.gateway import _get_restart_exit_wait_budget
+    base = _get_restart_exit_wait_budget()
+    cap = 0.0
+    with suppress(Exception):
+        from hermes_cli.config_defaults import DEFAULT_CONFIG
+        from hermes_cli.config_effective import load_user_config_effective
+        cfg = load_user_config_effective() or {}
+        # The effective cap, defaults included: an unset key still means the gateway waits 1800s.
+        cap = float((cfg.get("agent") or {}).get("restart_after_turn_timeout")
+                    or DEFAULT_CONFIG["agent"]["restart_after_turn_timeout"] or 0.0)
+    return max(base, cap + 60.0) if cap > 0 else base
+
+
 def _restart_launchd_gateway_after_update(
     *, supervision_verify: bool = True, self_restart_pending: set | None = None,
 ) -> tuple[list, list]:
@@ -856,7 +876,19 @@ def _restart_launchd_gateway_after_update(
         # Snapshot BEFORE the restart: "supervising some pid" was true before too, so only a pid that
         # actually changed distinguishes a restart from a no-op (the sibling loop's contract). Read-only
         # and verification-only — the restart itself is never gated on `launchctl list` (#74973).
-        old_pid = _launchctl_supervised_pid(current_label) if supervision_verify else None
+        # Always resolve the PID: the drain needs it. `supervision_verify` only decides whether a NEW pid
+        # must appear afterwards, so keep that snapshot separate.
+        old_pid = _launchctl_supervised_pid(current_label)
+        verify_old_pid = old_pid if supervision_verify else None
+        # Drain-first, like the systemd path: SIGUSR1 → request_restart(via_service=True) → the gateway
+        # finishes in-flight turns AND background delegations → exits → KeepAlive respawns. Going straight
+        # to `launchctl kickstart -k` is a SIGNALLED planned stop whose drain budget is
+        # `agent.restart_drain_timeout` (0 by default), so it killed running subagents after 0.00s.
+        if old_pid:
+            with suppress(Exception):
+                _drain_or_signal_gateway_for_update(
+                    old_pid, _launchd_drain_budget(), current_label,
+                    self_restart_pending=self_restart_pending)
         try:
             launchd_restart()
         except subprocess.CalledProcessError as e:
@@ -880,12 +912,12 @@ def _restart_launchd_gateway_after_update(
 
     if not supervision_verify:
         return [current_label], []
-    if old_pid is not None and _is_pid_ancestor_of_current_process(old_pid):
+    if verify_old_pid is not None and _is_pid_ancestor_of_current_process(verify_old_pid):
         # launchd_restart() handed the restart to the gateway this updater runs INSIDE (cron job in
         # the gateway tree, #100179): it exits only after this process does, so no fresh supervised
         # pid can appear while we wait. Record it as pending for the fleet matrix (#119597).
         if self_restart_pending is not None:
-            self_restart_pending.add(old_pid)
+            self_restart_pending.add(verify_old_pid)
         return [current_label], []
 
     # launchd_restart() returning only means "restart REQUESTED" (async). A helper dying
@@ -894,7 +926,7 @@ def _restart_launchd_gateway_after_update(
     # domain locate fails on macOS-26 per-user domains.
     # launchd_restart() returning is only "restart REQUESTED" — the self-restart branch hands work to the
     # running gateway, a plist reload to a detached helper; both asynchronous. See #88848.
-    if wait_for_launchd_gateway_supervision(label=current_label, old_pid=old_pid):
+    if wait_for_launchd_gateway_supervision(label=current_label, old_pid=verify_old_pid):
         return [current_label], []
     print(
         f"  ✗ {current_label} restarted but launchd is not supervising a new process for it.\n"
