@@ -319,12 +319,14 @@ def skills_list(category: str | None = None, task_id: str | None = None) -> str:
 
 def _legacy_portable_skill_name(pm, namespace, bare):
     """Portable plugin skills were named ``agent-plugin-<slug>-<sha8>:<skill>`` before they took the
-    plugin's own name; prompts and cron jobs saved since then may still carry that form."""
+    plugin's own name; prompts and cron jobs saved since then may still carry that form. Resolved
+    through what that exact plugin registered, so a skill it lost to a name clash is not found."""
     if not namespace.startswith("agent-plugin-"):
         return None
-    from hermes_cli.plugins_manifest import _portable_slug
-    return next((f"{_portable_slug(loaded.manifest.name)}:{bare}" for loaded in pm._plugins.values()
-                 if loaded.manifest.portable and loaded.manifest.data_namespace == namespace), None)
+    keys = {key for key, loaded in pm._plugins.items()
+            if loaded.manifest.portable and loaded.manifest.data_namespace == namespace}
+    return next((qualified for qualified, entry in pm._plugin_skills.items()
+                 if entry.get("plugin_key") in keys and entry.get("bare_name") == bare), None)
 
 
 def _resolve_plugin_skill(name, file_path, task_id, preprocess):
