@@ -37,8 +37,18 @@ def _ogg_opus_duration(data: bytes) -> Optional[float]:
     if data[head:head + 8] != b"OpusHead" or len(data) < head + 12:
         return None
     pre_skip = int.from_bytes(data[head + 10:head + 12], "little")
-    last = data.rfind(b"OggS\x00")
-    granule = int.from_bytes(data[last + 6:last + 14], "little", signed=True)
+    granule, pos = None, 0
+    # Walk page headers by their segment tables: an "OggS" byte run inside packet data is not a page.
+    while data[pos:pos + 4] == b"OggS" and pos + 27 <= len(data):
+        body_start = pos + 27 + data[pos + 26]
+        if body_start > len(data):
+            break
+        page_granule = int.from_bytes(data[pos + 6:pos + 14], "little", signed=True)
+        if page_granule != -1:  # -1: no packet ends on this page
+            granule = page_granule
+        pos = body_start + sum(data[pos + 27:body_start])
+    if granule is None:
+        return None
     secs = (granule - pre_skip) / _OPUS_GRANULE_RATE
     return secs if secs > 0 else None
 
