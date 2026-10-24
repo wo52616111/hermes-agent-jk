@@ -317,6 +317,16 @@ def skills_list(category: str | None = None, task_id: str | None = None) -> str:
         return tool_error(str(e), success=False)
 
 
+def _legacy_portable_skill_name(pm, namespace, bare):
+    """Portable plugin skills were named ``agent-plugin-<slug>-<sha8>:<skill>`` before they took the
+    plugin's own name; prompts and cron jobs saved since then may still carry that form."""
+    if not namespace.startswith("agent-plugin-"):
+        return None
+    from hermes_cli.plugins_manifest import _portable_slug
+    return next((f"{_portable_slug(loaded.manifest.name)}:{bare}" for loaded in pm._plugins.values()
+                 if loaded.manifest.portable and loaded.manifest.data_namespace == namespace), None)
+
+
 def _resolve_plugin_skill(name, file_path, task_id, preprocess):
     """``plugin:skill`` dispatch: ``(result_json, None)`` when answered, else ``(None,
     local_category_name)`` to fall through to the flat-tree scan — categorized local skills also use
@@ -328,6 +338,9 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
         return _fail(f"Invalid namespace '{namespace}' in '{name}'. Namespaces must match [a-zA-Z0-9_-]+."), None
     discover_plugins()  # idempotent
     pm = get_plugin_manager()
+    if legacy := _legacy_portable_skill_name(pm, namespace, bare):
+        name = legacy
+        namespace = legacy.partition(":")[0]
     active_memory_provider = None
     try:
         from plugins.memory import _get_active_memory_provider, _prune_inactive_memory_provider_skills

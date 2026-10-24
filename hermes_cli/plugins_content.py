@@ -29,6 +29,7 @@ def register_skill(
     is enabled. Not copied into ``~/.hermes/skills/``. Raises ``ValueError`` (``':'``/invalid
     chars) or ``FileNotFoundError``."""
     from agent.skill_utils import _NAMESPACE_RE
+    from hermes_cli.plugins_manifest import _portable_slug
     if ":" in name:
         raise ValueError(f"Skill name '{name}' must not contain ':' (the namespace is derived from the "
                          f"plugin name '{self.manifest.name}' automatically).")
@@ -40,10 +41,11 @@ def register_skill(
     path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"SKILL.md not found at {path}")
-    namespace = self.manifest.skill_namespace or self.manifest.name
+    namespace = _portable_slug(self.manifest.name) if self.manifest.portable else self.manifest.name
     qualified = f"{namespace}:{name}"
     if self.manifest.portable and qualified in self._manager._plugin_skills:
-        raise ValueError(f"Plugin skill '{qualified}' is already registered")
+        owner = self._manager._plugin_skills[qualified].get("plugin_key", "?")
+        raise ValueError(f"Plugin skill '{qualified}' is already registered by plugin '{owner}'")
     entry = {
         "path": path, "plugin": namespace, "plugin_key": self.plugin_id, "bare_name": name,
         "description": description, "frontmatter": dict(frontmatter or {}),
