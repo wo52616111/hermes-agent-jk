@@ -50,17 +50,61 @@ export const resolveEditor = (
   return [found ?? 'vi']
 }
 
-/** Suspend Ink, open ``initial`` in $EDITOR, return the edited text (null if aborted). */
+
+const shQuote = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`
+
+/**
+ * Run the editor on ``file`` and return its exit status (null if it never ran).
+ *
+ * Inside tmux the editor opens in a pane BELOW this one and Ink is NOT
+ * suspended, so the conversation stays visible above while you reply.
+ * Elsewhere: suspend Ink and hand the whole terminal to the editor.
+ */
+export async function runEditor(cmd: string, args: string[], file: string): Promise<null | number> {
+  if (process.env.TMUX) {
+    const dir = mkdtempSync(join(tmpdir(), 'hermes-pane-'))
+    const statusFile = join(dir, 'status')
+    const channel = `hermes-edit-${process.pid}-${Date.now()}`
+    // tmux runs the command through the user's login shell (fish has no `$?`), so hop to sh first.
+    const line = [cmd, ...args, file].map(shQuote).join(' ')
+
+    try {
+      const split = spawnSync(
+        'tmux',
+        ['split-window', '-v', '-l', '40%', '-c', process.cwd(), `sh -c ${shQuote(`${line}; echo $? > ${shQuote(statusFile)}; tmux wait-for -S ${channel}`)}`],
+        { stdio: 'ignore' }
+      )
+
+      if (split.status === 0) {
+        spawnSync('tmux', ['wait-for', channel], { stdio: 'ignore' })
+
+        const code = parseInt(readFileSync(statusFile, 'utf8').trim(), 10)
+
+        return Number.isNaN(code) ? null : code
+      }
+    } catch {
+      // fall through to the full-screen path
+    } finally {
+      rmSync(dir, { force: true, recursive: true })
+    }
+  }
+
+  let status: null | number = null
+
+  await withInkSuspended(async () => {
+    status = spawnSync(cmd, [...args, file], { stdio: 'inherit' }).status
+  })
+
+  return status
+}
+
+/** Open ``initial`` in $EDITOR, return the edited text (null if aborted). */
 export async function openInEditor(initial: string, suffix = '.txt'): Promise<null | string> {
   const dir = mkdtempSync(join(tmpdir(), 'hermes-edit-'))
   const file = join(dir, `edit${suffix}`)
   writeFileSync(file, initial)
   const [cmd, ...args] = resolveEditor()
-  let status: null | number = null
-
-  await withInkSuspended(async () => {
-    status = spawnSync(cmd!, [...args, file], { stdio: 'inherit' }).status
-  })
+  const status = await runEditor(cmd!, args, file)
 
   try {
     return status === 0 ? readFileSync(file, 'utf8') : null

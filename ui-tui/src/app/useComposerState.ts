@@ -1,9 +1,8 @@
-import { spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { useStdin, withInkSuspended } from '@hermes/ink'
+import { useStdin } from '@hermes/ink'
 import { useStore } from '@nanostores/react'
 import { useCallback, useMemo, useRef, useState } from 'react'
 
@@ -16,7 +15,7 @@ import { useInputHistory } from '../hooks/useInputHistory.js'
 import { useQueue } from '../hooks/useQueue.js'
 import { t } from '../i18n/runtime.js'
 import { isUsableClipboardText, readClipboardText } from '../lib/clipboard.js'
-import { resolveEditor } from '../lib/editor.js'
+import { resolveEditor, runEditor } from '../lib/editor.js'
 import { stageClipboardImage, stageImagePath } from '../lib/imageAttachments.js'
 import { readOsc52Clipboard } from '../lib/osc52.js'
 import { isRemoteShellSession } from '../lib/terminalSetup.js'
@@ -553,11 +552,7 @@ export function useComposerState({ gw, submitRef, sys }: UseComposerStateOptions
 
     writeFileSync(file, [...inputBuf, input].join('\n'))
 
-    let exitCode: null | number = null
-
-    await withInkSuspended(async () => {
-      exitCode = spawnSync(cmd!, [...args, file], { stdio: 'inherit' }).status
-    })
+    const exitCode = await runEditor(cmd!, args, file)
 
     try {
       if (exitCode !== 0) {
