@@ -53,12 +53,47 @@ export const resolveEditor = (
 
 const shQuote = (v: string): string => `'${v.replace(/'/g, `'\\''`)}'`
 
+const launchPane = (layout: string[], cwd: string, inner: string, channel: string): boolean => {
+  const split = spawnSync(
+    'tmux',
+    ['split-window', ...layout, '-c', cwd, `sh -c ${shQuote(`${inner}; tmux wait-for -S ${channel}`)}`],
+    { stdio: 'ignore' }
+  )
+
+  if (split.status !== 0) {
+    return false
+  }
+
+  spawnSync('tmux', ['wait-for', channel], { stdio: 'ignore' })
+
+  return true
+}
+
+/** Pane size of the Hermes pane itself (not the tmux window), so side-by-side columns are accounted for. */
+const tmuxPaneSize = (): { cols: number; rows: number } | null => {
+  const out = spawnSync('tmux', ['display-message', '-p', '-t', process.env.TMUX_PANE ?? '', '#{pane_width} #{pane_height}'], {
+    encoding: 'utf8'
+  })
+
+  const [cols, rows] = (out.stdout ?? '').trim().split(' ').map(Number)
+
+  return out.status === 0 && cols && rows ? { cols, rows } : null
+}
+
+/** Rows needed above the editor pane for the conversation to stay readable. */
+const MIN_ROWS_FOR_BOTTOM_PANE = 24
+const MIN_COLS_FOR_SIDE_PANE = 100
+const EDITOR_PANE_ROWS = 10
+
 /**
  * Run the editor on ``file`` and return its exit status (null if it never ran).
  *
- * Inside tmux the editor opens in a pane BELOW this one and Ink is NOT
- * suspended, so the conversation stays visible above while you reply.
- * Elsewhere: suspend Ink and hand the whole terminal to the editor.
+ * Inside tmux Ink is NOT suspended (suspending blanks the screen), and the
+ * editor is placed by the size of THIS pane so it works on a phone too:
+ *   tall enough  -> {EDITOR_PANE_ROWS}-row pane below, conversation visible above
+ *   wide enough  -> pane to the right, half width
+ *   otherwise    -> full-screen popup over the pane (nothing is resized)
+ * Outside tmux: suspend Ink and hand the whole terminal to the editor.
  */
 export async function runEditor(cmd: string, args: string[], file: string): Promise<null | number> {
   if (process.env.TMUX) {
@@ -67,17 +102,25 @@ export async function runEditor(cmd: string, args: string[], file: string): Prom
     const channel = `hermes-edit-${process.pid}-${Date.now()}`
     // tmux runs the command through the user's login shell (fish has no `$?`), so hop to sh first.
     const line = [cmd, ...args, file].map(shQuote).join(' ')
+    const inner = `${line}; echo $? > ${shQuote(statusFile)}`
+    const size = tmuxPaneSize()
+    const cwd = process.cwd()
 
     try {
-      const split = spawnSync(
-        'tmux',
-        ['split-window', '-v', '-l', '10', '-c', process.cwd(), `sh -c ${shQuote(`${line}; echo $? > ${shQuote(statusFile)}; tmux wait-for -S ${channel}`)}`],
-        { stdio: 'ignore' }
-      )
+      let ran = false
 
-      if (split.status === 0) {
-        spawnSync('tmux', ['wait-for', channel], { stdio: 'ignore' })
+      if (size && size.rows >= MIN_ROWS_FOR_BOTTOM_PANE) {
+        ran = launchPane(['-v', '-l', String(EDITOR_PANE_ROWS)], cwd, inner, channel)
+      } else if (size && size.cols >= MIN_COLS_FOR_SIDE_PANE) {
+        ran = launchPane(['-h', '-l', '50%'], cwd, inner, channel)
+      } else {
+        // display-popup blocks until the editor exits
+        ran = spawnSync('tmux', ['display-popup', '-E', '-w', '100%', '-h', '100%', '-d', cwd, `sh -c ${shQuote(inner)}`], {
+          stdio: 'ignore'
+        }).status === 0
+      }
 
+      if (ran) {
         const code = parseInt(readFileSync(statusFile, 'utf8').trim(), 10)
 
         return Number.isNaN(code) ? null : code
