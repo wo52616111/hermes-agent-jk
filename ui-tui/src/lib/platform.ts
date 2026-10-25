@@ -29,7 +29,7 @@ export const isActionMod = (key: { ctrl: boolean; meta: boolean; super?: boolean
 export const isMacActionFallback = (
   key: { ctrl: boolean; meta: boolean; super?: boolean },
   ch: string,
-  target: 'a' | 'd' | 'e' | 'u' | 'k' | 'w'
+  target: 'a' | 'd' | 'e' | 'g' | 'u' | 'k' | 'w'
 ): boolean => isMac && key.ctrl && !key.meta && key.super !== true && ch.toLowerCase() === target
 
 /** Match action-modifier + a single character (case-insensitive). */

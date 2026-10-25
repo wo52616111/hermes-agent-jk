@@ -832,10 +832,10 @@ export function useInputHandlers(ctx: InputHandlerContext): InputHandlerResult {
       return voiceRecordToggle()
     }
 
-    // Cmd/Ctrl+G, plus Alt+G fallback for VSCode/Cursor (they bind the
+    // Cmd/Ctrl+G (raw Ctrl+G on macOS too), plus Alt+G fallback for VSCode/Cursor (they bind the
     // primary keystroke to "Find Next" before the TUI sees it; Alt+G
     // arrives as meta+g across platforms).
-    if (ch.toLowerCase() === 'g' && (isAction(key, ch, 'g') || key.meta)) {
+    if (ch.toLowerCase() === 'g' && (isAction(key, ch, 'g') || isMacActionFallback(key, ch, 'g') || key.meta)) {
       return void cActions.openEditor().catch((err: unknown) => {
         actions.sys(
           err instanceof Error
