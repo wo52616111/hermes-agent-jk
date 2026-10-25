@@ -71,7 +71,7 @@ export async function runEditor(cmd: string, args: string[], file: string): Prom
     try {
       const split = spawnSync(
         'tmux',
-        ['split-window', '-v', '-l', '40%', '-c', process.cwd(), `sh -c ${shQuote(`${line}; echo $? > ${shQuote(statusFile)}; tmux wait-for -S ${channel}`)}`],
+        ['split-window', '-v', '-l', '10', '-c', process.cwd(), `sh -c ${shQuote(`${line}; echo $? > ${shQuote(statusFile)}; tmux wait-for -S ${channel}`)}`],
         { stdio: 'ignore' }
       )
 
