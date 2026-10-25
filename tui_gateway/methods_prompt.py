@@ -714,11 +714,37 @@ SESSION_OWNER_BUSY = "SESSION_OWNER_BUSY"
 SESSION_OWNER_UNCONFIRMED = "SESSION_OWNER_UNCONFIRMED"
 
 
+def _log_submit_refusal(sid, session, refusal, *, reason, detail) -> None:
+    """One line per refused ``prompt.submit``.
+
+    The client only paints "delivery unconfirmed" and then refuses to resend (an identityless write cannot be
+    deduped), so a stuck queue used to leave no server-side trace at all — no way to tell a busy owner from a
+    dead one after the fact. Record the verdict, the ledger's own status for the session and whether an owner
+    process was discoverable, so the next incident is diagnosable from the log instead of by guesswork.
+
+    Local imports only: this module's functions are rebound onto server.py's globals (method_ctx.bind_module),
+    so a bare helper name here must not depend on them.
+    """
+    import logging
+    owner_state = "unprobed"
+    try:
+        from hermes_constants import get_hermes_home
+        from tui_gateway import owner_forward
+        owner_state = "found" if owner_forward.discover_owner(get_hermes_home()) else "absent"
+    except Exception:  # diagnostics must never fail the refusal path it describes
+        owner_state = "unprobed"
+    logging.getLogger("tui_gateway.methods_prompt").warning(
+        "prompt.submit refused (%s): session=%s sid=%s ledger=%s owner=%s refusal=%r detail=%s",
+        reason, session.get("session_key") or "", sid, getattr(refusal, "ledger_status", None),
+        owner_state, str(refusal), detail)
+
+
 def _slot_refusal(rid, sid, session, text, params, refusal, internal_hosted_submit) -> dict:
     """The answer to a refused slot: a ledger refusal of a client submit goes to the owner's FIFO."""
     if getattr(refusal, "ledger_status", None) is not None and not internal_hosted_submit:
         return _submit_to_ledger_owner(rid, sid, session, text, params, refusal)
     reason = getattr(refusal, "reason", None)
+    _log_submit_refusal(sid, session, refusal, reason=reason or "REFUSED", detail="not a ledger refusal")
     return _err(rid, 4090, str(refusal), {"reason": reason} if reason else None)
 
 
@@ -732,6 +758,8 @@ def _submit_to_ledger_owner(rid, sid, session, text, params, refusal) -> dict:
     from tui_gateway import owner_forward
     not_owned = _err(rid, 4090, str(refusal), {"reason": getattr(refusal, "reason", None) or "SESSION_NOT_OWNED"})
     if getattr(refusal, "ledger_status", None) == "unknown":
+        _log_submit_refusal(sid, session, refusal, reason="SESSION_LEDGER_UNKNOWN",
+                            detail="ledger admission outcome unknown; not forwardable")
         return not_owned
     why = None
     if not owner_forward.forwardable(refusal, session, text, params):
@@ -743,12 +771,18 @@ def _submit_to_ledger_owner(rid, sid, session, text, params, refusal) -> dict:
         try:
             receipt = owner_forward.forward_prompt(sid, session, text)
         except owner_forward.OwnerNotRunning:
+            _log_submit_refusal(sid, session, refusal, reason="SESSION_OWNER_NOT_RUNNING",
+                                detail="no gateway owns the ledger's work; it will not end on its own")
             return not_owned  # no gateway runs the ledger's work: it will not end on its own
         except owner_forward.OwnerUnconfirmed:
+            _log_submit_refusal(sid, session, refusal, reason=SESSION_OWNER_UNCONFIRMED,
+                                detail="owner did not confirm the forward in time (may already be queued)")
             return _err(rid, 4090, "The gateway is running a turn in this chat and did not confirm your message"
                         " in time. It may already be queued there: check the chat before sending it again.",
                         {"reason": SESSION_OWNER_UNCONFIRMED})
         except Exception as exc:  # every owner failure is the same named refusal
+            _log_submit_refusal(sid, session, refusal, reason=f"OWNER_FORWARD_FAILED:{type(exc).__name__}",
+                                detail="forwarding to the owner raised")
             logger.info("forwarding prompt for %s to the owner failed: %s",
                         session.get("session_key") or sid, exc, exc_info=True)
             why = str(exc) if isinstance(exc, owner_forward.OwnerUnavailable) else "the gateway refused it"
@@ -757,6 +791,7 @@ def _submit_to_ledger_owner(rid, sid, session, text, params, refusal) -> dict:
                 return _ok(rid, {"voice_stopped": True})  # the owner ended its voice chat; nothing queued
             return _ok(rid, {"status": "queued", "admission_id": receipt.get("admission_id"),
                              "forwarded": True})
+    _log_submit_refusal(sid, session, refusal, reason=SESSION_OWNER_BUSY, detail=why)
     return _err(rid, 4090, "The gateway is running a turn in this chat and " + why
                 + ". Nothing was sent. Send it again when the current turn ends.",
                 {"reason": SESSION_OWNER_BUSY})
