@@ -645,6 +645,7 @@ export interface AccountUsageGroup {
 export interface AccountUsageError {
   status: number
   message?: string
+  kind?: string | null
 }
 export interface AccountUsageGroupWindow {
   period: string
@@ -668,6 +669,7 @@ export interface AccountUsageAccount {
   attempted_at?: string | null
   last_error?: string | null
   error_status?: number | null
+  error_kind?: string | null
   backoff_until?: string | null
   recovery_at?: string | null
 }

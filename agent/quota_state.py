@@ -92,12 +92,86 @@ def _dt(value) -> Optional[datetime]:
         return None
 
 
+# ---------------------------------------------------------------- read-failure classification (D51)
+#
+# The status code alone cannot say WHY a read failed: 403 is a lapsed subscription for one provider,
+# a missing OAuth scope for another, and an edge/WAF block (Cloudflare 1010) for a third; only the
+# response body names which. So a failure is classified once, where the body still exists, and the
+# class is stored beside the error (``error.kind``). The display hides the kinds that mean "this
+# account is not entitled to be read" and keeps everything else: a spent plan stays visible (its
+# windows carry it), and a rate-limited or blocked read is a read problem, not an entitlement one.
+FAILURE_KINDS = ("auth", "unentitled", "scope", "blocked", "rate_limit", "transient")
+# The only two kinds that hide a provider/account row from the capacity display.
+ROW_HIDING_KINDS = ("auth", "unentitled")
+_BLOCKED_MARKERS = ("cloudflare", "browser_signature_banned", "error 1010", "access denied",
+                    "just a moment", "attention required", "captcha")
+_SCOPE_MARKERS = ("permission_error", "oauth_scope_insufficient", "insufficient_scope",
+                  "does not meet scope", "user:profile", "missing scope")
+# A read that never reached the provider because the pool could not hand out a credential at all.
+_NO_CREDENTIAL_MARKERS = ("no available", "no credential", "not signed in", "missing credential",
+                          "credential in credential pool")
+
+
+def failure_kind(status, message: str = "") -> str:
+    """Classify one failed quota read (see ``FAILURE_KINDS``). Pure; the message carries the body."""
+    try:
+        code = int(status or 0)
+    except (TypeError, ValueError):
+        code = 0
+    text = str(message or "").lower()
+    if code in (401, 402):
+        # 402 is the provider's own "payment required": the plan behind this credential is gone.
+        return "auth"
+    if code == 429:
+        return "rate_limit"
+    if code == 403:
+        if any(marker in text for marker in _BLOCKED_MARKERS):
+            return "blocked"
+        if any(marker in text for marker in _SCOPE_MARKERS):
+            return "scope"
+        return "unentitled"
+    if not code and any(marker in text for marker in _NO_CREDENTIAL_MARKERS):
+        return "auth"
+    return "transient"
+
+
+def error_kind(error: Optional[dict]) -> Optional[str]:
+    """The classification of a STORED error record, or None when it carries no usable evidence.
+
+    Records written before the classification existed carry only a status and a message; the two
+    unambiguous kinds are derived from those, and a bare 403 stays None - the number alone cannot
+    tell a subscription refusal from an edge block, and a row is not hidden on a guess.
+    """
+    if not error:
+        return None
+    stored = error.get("kind")
+    if stored in FAILURE_KINDS:
+        return str(stored)
+    status = error.get("status")
+    message = str(error.get("message") or "")
+    try:
+        code = int(status or 0)
+    except (TypeError, ValueError):
+        code = 0
+    if code in (401, 402):
+        return "auth"
+    if not code and any(marker in message.lower() for marker in _NO_CREDENTIAL_MARKERS):
+        return "auth"
+    return None
+
+
+def hides_row(error: Optional[dict]) -> bool:
+    """True when this failed read means the account is not entitled, so no row may claim its quota."""
+    return error_kind(error) in ROW_HIDING_KINDS
+
+
 @dataclass
 class QuotaFetchError(Exception):
     provider: str
     status: int                      # HTTP status, 0 = network/other
     retry_after_s: Optional[int]
     message: str
+    kind: str = ""                   # ``failure_kind`` of this failure (D51)
 
     def __str__(self) -> str:
         return f"{self.provider} quota fetch failed ({self.status}): {self.message}"
@@ -115,7 +189,12 @@ class QuotaFetchError(Exception):
                 retry_after = int(float(raw)) if raw is not None else None
             except ValueError:
                 retry_after = None
-        return cls(provider, status, retry_after, str(exc)[:300])
+        # The body is what separates an unentitled account from a blocked or under-scoped read, and
+        # it only exists here: keep a bounded copy inside the message that gets stored. A response
+        # that reached ``raise_for_status`` has its content already read.
+        body = str(getattr(response, "text", "") or "")[:200]
+        message = f"{exc} {body}".strip()[:300]
+        return cls(provider, status, retry_after, message, failure_kind(status, message))
 
 
 # ---------------------------------------------------------------- files
@@ -474,7 +553,8 @@ def _fetch_and_store(provider: str, fetcher: Callable, now: datetime) -> str:
         _write_json_atomic(_path("snapshot", provider, ".json"), {
             "provider": provider, "fetched_at": prev.get("fetched_at"), "attempted_at": now.isoformat(),
             "windows": prev.get("windows") or [],
-            "error": {"status": err.status, "message": err.message, "backoff_s": wait},
+            "error": {"status": err.status, "message": err.message, "backoff_s": wait,
+                      "kind": err.kind or failure_kind(err.status, err.message)},
             "backoff_until": (now + timedelta(seconds=wait)).isoformat(),
         })
         return "error"
@@ -688,7 +768,8 @@ def status_groups(now: Optional[datetime] = None,
             "provider": provider,
             "fetched_at": snap.get("fetched_at"),
             "age_s": int((now - fetched).total_seconds()) if fetched else None,
-            "error": {"status": err.get("status"), "message": err.get("message")} if err else None,
+            "error": {"status": err.get("status"), "message": err.get("message"),
+                      "kind": error_kind(err)} if err else None,
             "backoff_until": snap.get("backoff_until"),
             "windows": [{k: w.get(k) for k in ("period", "used_percent", "reset_at", "rolled") if k in w}
                         for w in snap["windows"]],
@@ -991,7 +1072,8 @@ def fetch_account_facts(
         store_account_facts(
             name, fingerprint, prev.get("windows") or [], entries=entries,
             attempted_at=now.isoformat(),
-            error={"status": err.status, "message": err.message, "backoff_s": wait},
+            error={"status": err.status, "message": err.message, "backoff_s": wait,
+                   "kind": err.kind or failure_kind(err.status, err.message)},
             backoff_until=(now + timedelta(seconds=wait)).isoformat(), now=now,
         )
         return "error"
@@ -1355,6 +1437,7 @@ def _compose_view(
             "age_s": int((now - fetched).total_seconds()) if fetched else None,
             "attempted_at": facts.get("attempted_at"),
             "last_error": (facts.get("error") or {}).get("message"),
+            "error_kind": error_kind(facts.get("error")),
             "backoff_until": facts.get("backoff_until"),
             "recovery_at": qstate.effective_recovery(
                 windows, facts.get("metered_exhausted_until"), now

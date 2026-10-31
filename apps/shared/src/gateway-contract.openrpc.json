@@ -4907,6 +4907,18 @@
             "default": null,
             "title": "Error Status"
           },
+          "error_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Error Kind"
+          },
           "backoff_until": {
             "anyOf": [
               {
@@ -4952,6 +4964,18 @@
             "default": "",
             "title": "Message",
             "type": "string"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Kind"
           }
         },
         "required": [

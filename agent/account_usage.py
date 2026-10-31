@@ -882,6 +882,21 @@ def _anthropic_usage_fallback_tokens(*, exclude: str) -> list[str]:
     return out
 
 
+def _most_informative_usage_failure(provider: str, failures: list) -> Exception:
+    """The failure to record when every credential of a provider was refused (D51).
+
+    ``the login itself is refused`` (401/402 - a lapsed, revoked or unpaid subscription) outranks
+    ``this token may not read usage`` (a setup token without ``user:profile``, which answers 403):
+    the first is what the display has to act on, and recording the second instead would keep a
+    provider nobody can read on screen forever.
+    """
+    from agent.quota_state import QuotaFetchError, ROW_HIDING_KINDS
+    for failure in failures:
+        if QuotaFetchError.from_exception(provider, failure).kind in ROW_HIDING_KINDS:
+            return failure
+    return failures[0]
+
+
 def _fetch_anthropic_account_usage(
     base_url: Optional[str] = None, api_key: Optional[str] = None
 ) -> Optional[AccountUsageSnapshot]:
@@ -907,6 +922,7 @@ def _fetch_anthropic_account_usage(
         if exc.response.status_code != 403:
             raise
         payload = None
+        failures = [exc]
         for alt in _anthropic_usage_fallback_tokens(exclude=token):
             try:
                 payload = _get_json("https://api.anthropic.com/api/oauth/usage",
@@ -915,8 +931,9 @@ def _fetch_anthropic_account_usage(
             except httpx.HTTPStatusError as alt_exc:
                 if alt_exc.response.status_code not in (401, 403):
                     raise
+                failures.append(alt_exc)
         if payload is None:
-            raise
+            raise _most_informative_usage_failure("anthropic", failures)
     windows = _usage_windows(
         payload, (("five_hour", "Current session"), ("seven_day", "Current week"), ("seven_day_opus", "Opus week"),
                   ("seven_day_sonnet", "Sonnet week")), "utilization", "resets_at", fraction=True,

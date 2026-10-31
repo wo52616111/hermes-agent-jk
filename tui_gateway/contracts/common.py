@@ -48,6 +48,10 @@ class AccountUsageGroupWindow(Result):
 class AccountUsageError(Result):
     status: int
     message: str = ""
+    # Why the read failed, classified where the response body still existed (spec D51): auth /
+    # unentitled / scope / blocked / rate_limit / transient. None on a record written before the
+    # classification existed, or on the legacy ``multi_account`` marker.
+    kind: str | None = None
 
 
 class AccountUsageStates(Result):
@@ -80,6 +84,9 @@ class AccountUsageAccount(Result):
     # The failed read's HTTP status (429 rotates), surfaced so the UI can mark an account whose
     # last read was rate-limited without parsing ``last_error``.
     error_status: int | None = None
+    # The same failure, classified (spec D51): only ``auth``/``unentitled`` keep a row off the
+    # capacity display; a spent plan still shows through its own windows.
+    error_kind: str | None = None
     backoff_until: str | None = None
     recovery_at: str | None = None
 

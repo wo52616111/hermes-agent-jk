@@ -38,6 +38,7 @@ def account_wire(provider: str, account: dict) -> dict:
         "attempted_at": account.get("attempted_at"),
         "last_error": account.get("last_error"),
         "error_status": None,
+        "error_kind": account.get("error_kind"),
         "backoff_until": account.get("backoff_until"),
         "recovery_at": account.get("recovery_at"),
     }
@@ -45,37 +46,60 @@ def account_wire(provider: str, account: dict) -> dict:
         fingerprint = account.get("fingerprint")
         if isinstance(fingerprint, str) and fingerprint:
             facts = quota_state.read_account_facts(provider, fingerprint) or {}
-            out["error_status"] = (facts.get("error") or {}).get("status")
+            error = facts.get("error") or {}
+            out["error_status"] = error.get("status")
+            out["error_kind"] = quota_state.error_kind(error) or out["error_kind"]
     except Exception:
         logger.debug("account facts read failed for %s", provider, exc_info=True)
     return out
 
 
-def group_from_view(provider: str, view: dict) -> dict:
+def _hides_account(account: dict) -> bool:
+    """True when this account's last read says it is not entitled, so it claims no row (D51)."""
+    from agent import quota_state
+    kind = account.get("error_kind")
+    if kind:
+        return kind in quota_state.ROW_HIDING_KINDS
+    return quota_state.hides_row({"status": account.get("error_status"),
+                                  "message": account.get("last_error")})
+
+
+def group_from_view(provider: str, view: dict) -> dict | None:
     """A capacity-row group built from a ``quota_aware`` provider's per-profile view (D41).
 
     The provider line carries the SERVING account's own windows - never a sum or an average
     (D14/D34) - plus every account's own row, so a multi-account pool stops reporting empty
     windows. ``serving`` is the shared fact; the session-local active account is added by
     :func:`fields`.
+
+    An account whose last read says it is not entitled claims no row (D51), and a pool left with
+    no entitled account claims no row at all: its numbers could not be refreshed anyway. The line
+    falls back to the first remaining account when the serving one is the hidden one.
     """
     from agent import quota_state
     accounts = list(view.get("accounts") or [])
+    visible = [wire for wire in (account_wire(provider, a) for a in accounts)
+               if not _hides_account(wire)]
+    if not visible:
+        logger.debug("quota row hidden for %s: no entitled account", provider)
+        return None
     serving = quota_state.serving_account(view)
+    serving_fp = serving.get("fingerprint")
+    line = next((a for a in visible if serving_fp and a.get("fingerprint") == serving_fp), visible[0])
     return {
         "provider": provider,
-        "fetched_at": serving.get("fetched_at"),
-        "age_s": serving.get("age_s"),
+        "fetched_at": line.get("fetched_at"),
+        "age_s": line.get("age_s"),
         "error": None,
-        "backoff_until": serving.get("backoff_until"),
-        "windows": [window_wire(w) for w in serving.get("windows") or []],
+        "backoff_until": line.get("backoff_until"),
+        "windows": [window_wire(w) for w in line.get("windows") or []],
         "hint": None,
         "multi_account": len(accounts) > 1,
         "serving": view.get("serving"),
         "serving_since": view.get("serving_since"),
         "states": dict(view.get("states") or {}),
         "strategy": view.get("strategy"),
-        "accounts": [account_wire(provider, a) for a in accounts],
+        "accounts": visible,
     }
 
 
@@ -91,7 +115,9 @@ def view_groups() -> list[dict]:
             logger.debug("quota view read failed for %s", provider, exc_info=True)
             continue
         if view and view.get("accounts"):
-            groups.append(group_from_view(provider, view))
+            group = group_from_view(provider, view)
+            if group is not None:
+                groups.append(group)
     return groups
 
 
@@ -101,10 +127,14 @@ def all_groups() -> list[dict]:
     Legacy providers come from ``quota_state.status_groups()`` unchanged; a provider with a
     ``quota_aware`` per-profile view (D41) is replaced by its per-account group, which carries
     every account's own windows.
+
+    A group whose last read says the credential is not entitled is dropped here rather than in the
+    renderer (D51): every surface that shows this row gets the same answer, and ``quota_state``
+    keeps its own full view for selection and for ``hermes usage``.
     """
     try:
         from agent import quota_state
-        groups = quota_state.status_groups()
+        groups = [g for g in quota_state.status_groups() if not quota_state.hides_row(g.get("error"))]
     except Exception:
         logger.debug("quota status read failed", exc_info=True)
         groups = []
