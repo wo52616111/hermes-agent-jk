@@ -497,6 +497,102 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path, *, assume_yes: 
     return True
 
 
+_SYNC_BRANCH_PREFIX = "upstream-sync-"
+_SYNC_WORKTREE_NAME = "merge"
+
+
+def _sync_worktree_for_branch(git_cmd: list[str], cwd: Path, branch: str) -> Optional[Path]:
+    """The worktree that has *branch* checked out, if this repo still has one."""
+    listing = _git_stdout(git_cmd, ["worktree", "list", "--porcelain"], cwd) or ""
+    current: Optional[Path] = None
+    for line in listing.splitlines():
+        if line.startswith("worktree "):
+            current = Path(line.split(" ", 1)[1])
+        elif current is not None and line.strip() == f"branch refs/heads/{branch}":
+            return current
+    return None
+
+
+def _sync_worktrees(git_cmd: list[str], cwd: Path) -> list[tuple[Path, str]]:
+    """``(path, branch)`` for every worktree this mechanism created (``upstream-sync-*``)."""
+    listing = _git_stdout(git_cmd, ["worktree", "list", "--porcelain"], cwd) or ""
+    found: list[tuple[Path, str]] = []
+    path: Optional[Path] = None
+    branch: Optional[str] = None
+    for line in listing.splitlines() + [""]:
+        if line.startswith("worktree "):
+            path, branch = Path(line.split(" ", 1)[1]), None
+        elif line.startswith("branch refs/heads/"):
+            branch = line.split("branch refs/heads/", 1)[1].strip()
+        elif not line.strip() and path is not None:
+            if branch and branch.startswith(_SYNC_BRANCH_PREFIX):
+                found.append((path, branch))
+            path, branch = None, None
+    return found
+
+
+def _find_prepared_upstream_merge(git_cmd: list[str], cwd: Path, upstream: str):
+    """An earlier ``--upstream`` run's merge of the SAME upstream tip.
+
+    ``_integrate_upstream_in_worktree`` merges in a worktree and, on conflict, stops with the worktree
+    in progress. Resolving it is real work — a re-run must pick that work up instead of stacking a
+    second worktree on the same tip, or the resolution can never reach the checkout.
+
+    Returns ``(branch, merge_sha, worktree, unfinished)`` for the newest such merge, else ``None``.
+    ``merge_sha`` is the commit to apply — the ready branch tip, which carries the resolved merge plus
+    any follow-up commits made on it. It is ``None`` and ``unfinished`` True while the worktree still
+    holds the paused merge or uncommitted resolution work.
+    """
+    tip = _git_stdout(git_cmd, ["rev-parse", "-q", "--verify", f"{upstream}^{{commit}}"], cwd)
+    if not tip:
+        return None
+    head = _git_stdout(git_cmd, ["rev-parse", "HEAD"], cwd)
+    # A paused merge leaves no merge commit yet — the worktree's MERGE_HEAD is the evidence — and an
+    # uncommitted resolution is equally not ready to apply.
+    # Newest attempt first: the stamps in the branch names sort lexicographically, and the most recent
+    # attempt is the one a person is working on.
+    worktrees = sorted(_sync_worktrees(git_cmd, cwd), key=lambda row: row[1], reverse=True)
+    for path, branch in worktrees:
+        if _git_stdout(git_cmd, ["rev-parse", "-q", "--verify", "MERGE_HEAD"], path) == tip:
+            return branch, None, path, True
+        if _git_stdout(git_cmd, ["status", "--porcelain", "--untracked-files=no"], path) or "":
+            return branch, None, path, True
+    branches = _git_stdout(git_cmd, ["for-each-ref", "--sort=-committerdate", "--format=%(refname:short)",
+                                     f"refs/heads/{_SYNC_BRANCH_PREFIX}*"], cwd) or ""
+    for branch in (name.strip() for name in branches.splitlines()):
+        if not branch:
+            continue
+        ready = _git_stdout(git_cmd, ["rev-parse", "-q", "--verify", f"{branch}^{{commit}}"], cwd)
+        if not ready or not head or not _git_ok(git_cmd, ["merge-base", "--is-ancestor", head, ready], cwd):
+            continue  # not fast-forwardable onto this checkout: not the work in flight
+        # The merge of THIS tip has the tip as its second parent; follow-up commits on the branch sit
+        # on top of it, so search the commits this checkout does not have yet.
+        merges = _git_stdout(git_cmd, ["rev-list", "--merges", f"{head}..{ready}"], cwd) or ""
+        if any(_git_stdout(git_cmd, ["rev-parse", "-q", "--verify", f"{sha}^2"], cwd) == tip
+               for sha in merges.split()):
+            return branch, ready, _sync_worktree_for_branch(git_cmd, cwd, branch), False
+    return None
+
+
+def _drop_sync_worktree(git_cmd: list[str], cwd: Path, branch: str, worktree: Optional[Path]) -> None:
+    from hermes_cli.update_custody import run_git
+    if worktree is not None:
+        run_git(git_cmd, ["worktree", "remove", "--force", str(worktree)], cwd=cwd, check=False)
+    run_git(git_cmd, ["branch", "-D", branch], cwd=cwd, check=False)
+
+
+def _apply_prepared_merge(git_cmd: list[str], cwd: Path, upstream: str, branch: str, merge_sha: str,
+                          worktree: Optional[Path]) -> None:
+    """Fast-forward the checkout onto an already-resolved merge and retire its worktree."""
+    if _git_ok(git_cmd, ["merge", "--ff-only", merge_sha], cwd):
+        print(f"  ✓ Applied the resolved {upstream} merge; this checkout is now at {merge_sha[:10]}"
+              " (fleet restart follows).")
+        _drop_sync_worktree(git_cmd, cwd, branch, worktree)
+        return
+    print(f"  ✗ The resolved merge {merge_sha[:10]} is prepared, but this checkout cannot fast-forward to it.")
+    print(f"    Merge it by hand (branch {branch}) — nothing else was changed.")
+
+
 def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str, *, apply: bool = False) -> None:
     """``--upstream``: merge in a separate worktree, then let the caller apply it.
 
@@ -505,6 +601,10 @@ def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str
     merge never amputates running work — no manual ``restart`` is needed. ``--no-gateway-restart`` means
     "prepare only": the merge stays in the worktree and this checkout keeps serving the code its gateways
     loaded (the code-change watcher would otherwise restart it anyway).
+
+    The merge of one upstream tip happens ONCE. A run that finds an earlier one for the same tip
+    resumes it: still-unresolved conflicts are reported (never duplicated into a second worktree), and a
+    resolved, committed merge is applied — so "resolve the conflicts, run it again" is the whole flow.
     """
     from hermes_cli.update_custody import run_git
     from hermes_constants import get_hermes_home
@@ -512,10 +612,27 @@ def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str
     if not head:
         print("  ✗ Could not resolve HEAD. Nothing merged.")
         return
+    prepared = _find_prepared_upstream_merge(git_cmd, cwd, upstream)
+    if prepared is not None:
+        branch, merge_sha, worktree, unfinished = prepared
+        where = str(worktree) if worktree is not None else f"branch {branch}"
+        if unfinished or merge_sha is None:
+            print(f"  ⚠ {upstream} is already being merged in {where} — resolve it there:")
+            print("      # edit the conflicted files, then")
+            print("      git add -A && git commit --no-edit")
+            print("    Then run this command again: it applies that merge. This checkout is unchanged.")
+            return
+        if not apply:
+            print(f"  ✓ {upstream} is already merged as {merge_sha[:10]} ({where}) — NOT applied: this checkout")
+            print(f"    is still on {head[:10]}. Apply the resolution the worktree already holds:")
+            print("      hermes update --upstream")
+            return
+        _apply_prepared_merge(git_cmd, cwd, upstream, branch, merge_sha, worktree)
+        return
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    branch = f"upstream-sync-{stamp}"
+    branch = f"{_SYNC_BRANCH_PREFIX}{stamp}"
     root = get_hermes_home() / "cache" / "upstream-sync" / stamp
-    wt = root / "merge"
+    wt = root / _SYNC_WORKTREE_NAME
     root.mkdir(parents=True, exist_ok=True)
     if not _git_ok(git_cmd, ["worktree", "add", "-b", branch, str(wt), head], cwd):
         print(f"  ✗ Could not create the merge worktree under {root}. Nothing merged.")
@@ -533,6 +650,8 @@ def _integrate_upstream_in_worktree(git_cmd: list[str], cwd: Path, upstream: str
         for name in listed[:20]:
             print(f"      {name}")
         print(f"  Resolve them in {wt} (branch {branch}). This checkout is unchanged.")
+        print("    Resolve, then `git add -A && git commit --no-edit` there, then run this command again —")
+        print("    it applies that merge to this checkout instead of merging the same upstream tip twice.")
         return
     merged_sha = _git_stdout(git_cmd, ["rev-parse", "HEAD"], wt)
     if not merged_sha:
