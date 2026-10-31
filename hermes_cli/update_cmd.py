@@ -1096,7 +1096,7 @@ def _move_checkout_to(git_cmd, branch, merge_ref, target_sha, pre_pull_sha) -> N
 def _pull_updates(
     git_cmd, branch, auto_stash_ref, *, prompt_for_restore, gw_input_fn, discard_local_changes,
     keep_stash, target_ref=None, pre_sync_sha=None, rollback_branch=None, sync_upstream=False, assume_yes=False,
-    in_place_update=False, _windows_gateway_resume=None, expected_sha=None):
+    in_place_update=False, _windows_gateway_resume=None, expected_sha=None, upstream_apply=False):
     """Fast-forward onto ``origin/<branch>`` and settle the autostash. Divergence by shape:
     custom branch -> merge, same branch -> rescue ref then reset; a
     post-pull syntax error in a critical file rolls back. Exits on failure; returns the SHA HEAD had to move off."""
@@ -1500,7 +1500,7 @@ def _prepare_checkout_for_update(
             upstream_checked = _m()._sync_with_upstream_if_needed(
                 git_cmd, _m().PROJECT_ROOT, assume_yes=assume_yes, input_fn=gw_input_fn,
                 checkout_move=_moves_for(_windows_gateway_resume),
-                upstream_requested=upstream_sync)
+                upstream_requested=upstream_sync, upstream_apply=upstream_apply)
         except UpstreamTargetBroken as broken:  # nothing moved; local edits stay parked, like a rollback
             if auto_stash_ref is not None:
                 print(f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})")
@@ -2002,6 +2002,9 @@ def _cmd_update_impl(args, gateway_mode: bool):
             rollback_branch=_plan.rollback_branch,
             sync_upstream=(is_fork and branch == "main" and not release_sha and opts.upstream_sync),
             assume_yes=assume_yes,
+            # The same intent the plan-time check carries: `--upstream` alone applies the merge,
+            # `--no-gateway-restart` only prepares it.
+            upstream_apply=not opts.no_gateway_restart,
             in_place_update=_plan.in_place_update, _windows_gateway_resume=_windows_gateway_resume,
             expected_sha=completion_request.get("expected_sha"))
         _apply_pulled_update(
