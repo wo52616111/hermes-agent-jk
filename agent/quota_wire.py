@@ -106,13 +106,20 @@ def group_from_view(provider: str, view: dict) -> dict | None:
 def _view_groups() -> tuple[list[dict], set[str]]:
     """Per-account groups for every provider whose profile-scoped view exists (D41), plus the
     providers that view was read for — one disk read per provider, and the caller can tell
-    "this provider has no view" from "its view claims no row" (D51)."""
+    "this provider has no view" from "its view claims no row" (D51).
+
+    A provider with no live credential claims no row either: pausing a lane (``suppressed_sources``)
+    drops its pool entry while its facts stay on disk, and the view — which must keep reading them
+    for selection (D7) — would otherwise rebuild a row out of history that nobody can refresh.
+    """
     from agent import quota_state
     profile = quota_state.current_profile()
     groups: list[dict] = []
     viewed: set[str] = set()
     for provider in quota_state.SUPPORTED:
         try:
+            if not quota_state.default_connected(provider):
+                continue
             view = quota_state.read_view(profile, provider)
         except Exception:
             logger.debug("quota view read failed for %s", provider, exc_info=True)

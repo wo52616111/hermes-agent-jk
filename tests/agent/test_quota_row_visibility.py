@@ -201,6 +201,22 @@ def test_a_spent_pool_keeps_its_capacity_row(qdir, monkeypatch):
     assert [w["used_percent"] for w in groups[0]["windows"]] == [100.0]
 
 
+def test_a_paused_lane_claims_no_row(qdir, monkeypatch):
+    """Pausing a lane drops its credential but keeps its facts; the row must go with the credential.
+
+    ``read_view`` keeps reading those facts on purpose (selection stays fail-open, D7), so the wire
+    is the only place that can tell "this account is not live any more" apart from "unknown".
+    """
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    monkeypatch.setattr(qs, "default_connected", lambda provider: False)
+    _facts("sha256:aaa", windows=[_window(percent=11.0)])
+
+    assert quota_wire.all_groups() == []
+    # The selection view is untouched: the account is still there for the pool.
+    view = qs.read_view("default", PROVIDER, now=NOW)
+    assert view and view["accounts"]
+
+
 def test_selection_still_sees_the_unentitled_account(qdir, monkeypatch):
     """D7 stays: the display drops the row, the pool keeps the account (fail-open, no eviction)."""
     monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
