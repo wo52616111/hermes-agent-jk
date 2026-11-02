@@ -173,6 +173,34 @@ def test_unentitled_account_claims_no_sub_row(qdir, monkeypatch):
     assert groups[0]["windows"][0]["status"] == "rate-limited"
 
 
+def test_a_pool_in_hiding_state_claims_no_capacity_row(qdir, monkeypatch):
+    """The refused credential must not come back through the legacy status line.
+
+    ``status_groups`` builds a ``quota_aware`` provider's legacy line from the SERVING account's
+    windows and attaches no error, so the row survives a filter that only reads ``error``. A
+    cancelled subscription then renders as a clean row of rolled-forward zeros, which reads as
+    "plenty left" - the exact opposite of the truth.
+    """
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    _facts("sha256:aaa", error={"status": 403, "kind": "unentitled",
+                                "message": "OpenCode Go subscription required."})
+
+    assert [g["provider"] for g in qs.status_groups()] == [PROVIDER]  # the unfiltered line exists
+    assert quota_wire.all_groups() == []
+
+
+def test_a_spent_pool_keeps_its_capacity_row(qdir, monkeypatch):
+    """The same path must still show quota that is USED UP: hiding is for refused credentials."""
+    monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)
+    _facts("sha256:bbb", windows=[_window(percent=100.0, status="rate-limited")],
+           error={"status": 429, "kind": "rate_limit"})
+
+    groups = quota_wire.all_groups()
+
+    assert [g["provider"] for g in groups] == [PROVIDER]
+    assert [w["used_percent"] for w in groups[0]["windows"]] == [100.0]
+
+
 def test_selection_still_sees_the_unentitled_account(qdir, monkeypatch):
     """D7 stays: the display drops the row, the pool keeps the account (fail-open, no eviction)."""
     monkeypatch.setattr(qs, "_is_quota_aware", lambda provider: provider == PROVIDER)

@@ -752,12 +752,28 @@ def status_groups(now: Optional[datetime] = None,
             # snapshot (written by an earlier build) must NEVER be shown - it would present one
             # account's usage as the whole subscription's. Serve the profile view or nothing.
             view = read_view(current_profile(), provider, now=now)
+            line = serving_account(view)
             windows = [{k: w.get(k) for k in ("period", "used_percent", "reset_at", "rolled") if k in w}
-                       for w in (view or {}).get("windows") or []]
+                       for w in line.get("windows") or []]
             if not windows:
                 continue
-            groups.append({"provider": provider, "fetched_at": None, "age_s": None,
-                           "error": None, "backoff_until": None, "windows": windows, "hint": None})
+            # The line speaks for ONE credential, so it carries THAT credential's read verdict: a
+            # refused read must not reach a caller as a clean row of rolled-forward zeros (the
+            # capacity filter and `hermes usage --all-subscriptions` both read this).
+            fingerprint = line.get("fingerprint")
+            facts = read_account_facts(provider, fingerprint) if isinstance(fingerprint, str) and fingerprint else None
+            err = (facts or {}).get("error")
+            fetched = _dt(line.get("fetched_at"))
+            groups.append({
+                "provider": provider,
+                "fetched_at": line.get("fetched_at"),
+                "age_s": int((now - fetched).total_seconds()) if fetched else None,
+                "error": {"status": err.get("status"), "message": err.get("message"),
+                          "kind": error_kind(err)} if err else None,
+                "backoff_until": line.get("backoff_until"),
+                "windows": windows,
+                "hint": None,
+            })
             continue
         snap = read_snapshot(provider, now)
         if not snap or not snap.get("windows"):

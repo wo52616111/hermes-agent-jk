@@ -103,11 +103,14 @@ def group_from_view(provider: str, view: dict) -> dict | None:
     }
 
 
-def view_groups() -> list[dict]:
-    """Per-account groups for every provider whose profile-scoped view exists (D41)."""
+def _view_groups() -> tuple[list[dict], set[str]]:
+    """Per-account groups for every provider whose profile-scoped view exists (D41), plus the
+    providers that view was read for — one disk read per provider, and the caller can tell
+    "this provider has no view" from "its view claims no row" (D51)."""
     from agent import quota_state
     profile = quota_state.current_profile()
-    groups = []
+    groups: list[dict] = []
+    viewed: set[str] = set()
     for provider in quota_state.SUPPORTED:
         try:
             view = quota_state.read_view(profile, provider)
@@ -115,10 +118,16 @@ def view_groups() -> list[dict]:
             logger.debug("quota view read failed for %s", provider, exc_info=True)
             continue
         if view and view.get("accounts"):
+            viewed.add(provider)
             group = group_from_view(provider, view)
             if group is not None:
                 groups.append(group)
-    return groups
+    return groups, viewed
+
+
+def view_groups() -> list[dict]:
+    """Per-account groups for every provider whose profile-scoped view claims a row (D41/D51)."""
+    return _view_groups()[0]
 
 
 def all_groups() -> list[dict]:
@@ -131,6 +140,11 @@ def all_groups() -> list[dict]:
     A group whose last read says the credential is not entitled is dropped here rather than in the
     renderer (D51): every surface that shows this row gets the same answer, and ``quota_state``
     keeps its own full view for selection and for ``hermes usage``.
+
+    A provider with a per-account view is decided by that view ALONE - its group, or no row. The
+    legacy ``status_groups`` line for a ``quota_aware`` provider is built from the SERVING account's
+    windows with no entitlement verdict, so letting it stand after the view hid the provider would
+    resurrect the refused credential as a clean row of rolled-forward zeros.
     """
     try:
         from agent import quota_state
@@ -139,14 +153,22 @@ def all_groups() -> list[dict]:
         logger.debug("quota status read failed", exc_info=True)
         groups = []
     try:
-        view_by_provider = view_groups()
+        view_by_provider, viewed = _view_groups()
     except Exception:
         logger.debug("quota view groups read failed", exc_info=True)
         return groups
-    if not view_by_provider:
+    if not viewed:
         return groups
     by_provider = {g["provider"]: g for g in view_by_provider}
-    merged = [by_provider.pop(g["provider"], g) for g in groups]
+    merged = []
+    for group in groups:
+        provider = group.get("provider")
+        if provider in viewed:
+            group = by_provider.pop(provider, None)
+            if group is not None:
+                merged.append(group)
+            continue
+        merged.append(group)
     merged.extend(by_provider.values())
     return merged
 
