@@ -64,7 +64,7 @@ async def prepare_model(authority, live, payload, prepared):
         is_global=False, user_providers=resolution.get('providers'),
         custom_providers=get_compatible_custom_providers(resolution))
     if not result.success:
-        raise RuntimeStoreError('model_resolution_failed')
+        raise RuntimeStoreError('model_resolution_failed', detail=result.error_message)
     refusal = await _selection_guard_refusal(authority, live, payload, prepared['snapshot'], current, result)
     if refusal is not None:
         return refusal
@@ -277,7 +277,7 @@ def _alias_credential(authority, result):
             for part in (*section, written, 'api_key'):
                 value = value.get(part) if isinstance(value, dict) else None
             if not value:
-                raise RuntimeStoreError('model_resolution_failed')
+                raise RuntimeStoreError('model_resolution_failed', detail=result.error_message)
             return None, (*section, written, 'api_key'), value
     return None, None, None
 
