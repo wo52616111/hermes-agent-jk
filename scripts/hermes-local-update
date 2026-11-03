@@ -4,6 +4,11 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
+HJK_PROG=hermes-local-update
+HERMES_HOME_DIR=${HERMES_HOME:-$HOME/.hermes}
+# shellcheck source=scripts/hermes-local-lib.sh
+source "$ROOT/scripts/hermes-local-lib.sh"
+
 UPSTREAM_REMOTE=${HERMES_UPSTREAM_REMOTE:-upstream}
 UPSTREAM_BRANCH=${HERMES_UPSTREAM_BRANCH:-main}
 CUSTOMIZED_REMOTE=${HERMES_CUSTOMIZED_REMOTE:-origin}
@@ -41,12 +46,10 @@ git fetch "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 printf 'Rebasing customized stack onto %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 git rebase "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
-uv sync --extra dev
-npx -y npm@11.17.0 ci --include=dev
-npx -y npm@11.17.0 run build:ink --workspace ui-tui
-npx -y npm@11.17.0 run build --workspace ui-tui
+hjk_sync_python
+hjk_select_node
+hjk_build_tui
 
-HERMES_HOME_DIR=${HERMES_HOME:-$HOME/.hermes}
 mkdir -p "$HERMES_HOME_DIR/skins"
 cp "$ROOT/skins/jk-spaceduck.yaml" "$HERMES_HOME_DIR/skins/jk-spaceduck.yaml"
 "$ROOT/.venv/bin/hermes" config set display.skin jk-spaceduck >/dev/null

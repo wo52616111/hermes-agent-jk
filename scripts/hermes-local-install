@@ -4,15 +4,18 @@ set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
-command -v uv >/dev/null 2>&1 || { printf 'hermes-local-install: uv is required\n' >&2; exit 1; }
-command -v npx >/dev/null 2>&1 || { printf 'hermes-local-install: npx is required\n' >&2; exit 1; }
-
-uv sync --extra dev
-npx -y npm@11.17.0 ci --include=dev
-npx -y npm@11.17.0 run build:ink --workspace ui-tui
-npx -y npm@11.17.0 run build --workspace ui-tui
-
+HJK_PROG=hermes-local-install
 HERMES_HOME_DIR=${HERMES_HOME:-$HOME/.hermes}
+# shellcheck source=scripts/hermes-local-lib.sh
+source "$ROOT/scripts/hermes-local-lib.sh"
+
+command -v uv >/dev/null 2>&1 || hjk_die 'uv is required (https://astral.sh/uv)'
+
+hjk_sync_python
+hjk_select_node
+hjk_build_tui
+hjk_assert_tui_built
+
 mkdir -p "$HERMES_HOME_DIR/skins"
 cp "$ROOT/skins/jk-spaceduck.yaml" "$HERMES_HOME_DIR/skins/jk-spaceduck.yaml"
 "$ROOT/.venv/bin/hermes" config set display.skin jk-spaceduck >/dev/null
@@ -20,4 +23,5 @@ cp "$ROOT/skins/jk-spaceduck.yaml" "$HERMES_HOME_DIR/skins/jk-spaceduck.yaml"
 "$ROOT/scripts/hermes-local-link"
 
 printf 'Installed customized Hermes in %s\n' "$ROOT"
+hjk_node_runtime_note
 printf 'Run with: hermes --tui\n'

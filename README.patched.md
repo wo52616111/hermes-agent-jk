@@ -29,10 +29,9 @@ upstream Hermes:
 Requirements:
 
 - macOS, Linux, WSL2, or another POSIX-like environment;
-- Python 3.11–3.13;
-- `uv`;
-- Node.js >= 22.22;
-- network access for Python and npm dependencies.
+- `uv` (it also fetches a suitable Python, 3.11–3.14, if the system has none);
+- network access for Python and npm dependencies;
+- Node.js is **not** a prerequisite — see [Node.js](#nodejs) below.
 
 Install `uv` if necessary, then clone and install:
 
@@ -43,11 +42,42 @@ cd hermes-agent-jk
 ./scripts/hermes-local-install
 ```
 
-The installer creates the local Python environment, installs dependencies,
+The installer creates the local Python environment (`uv sync --group dev`;
+dev tooling is a dependency group, so `--extra dev` does not exist), makes sure
+a suitable Node.js is in use, installs the TUI's JavaScript dependencies,
 builds the TUI bundle, installs the bundled `jk-spaceduck` skin into
 `$HERMES_HOME/skins`, selects it as the default skin, and rewires the current
 user-writable `hermes` launcher to this checkout. It does not copy credentials
 or session history from the publisher.
+
+### Node.js
+
+`package.json` declares `engines.node` (currently `>=26`) and `.npmrc` sets
+`engine-strict=true`, so `npm ci` refuses an older Node such as the 24.x that
+mise or apt commonly provide. The installer does not weaken either file
+(they are upstream-owned, so edits would conflict on every upstream sync).
+It picks a Node in this order:
+
+1. the `node` already on `PATH`, if it satisfies `engines.node`;
+2. a Node already in Hermes' tool store (`hermes pm env node`) or in
+   `$HERMES_HOME/node`;
+3. otherwise it runs `hermes pm install node`, which downloads the pinned,
+   sha256-verified Node into the Hermes tool store (`$HERMES_HOME/tools`).
+
+Nothing is installed system-wide and your existing Node is left alone.
+`hermes --tui` resolves its own Node through the same tool store, so `PATH`
+does not need to change; `export HERMES_NODE=<path>/node` overrides it.
+
+### JavaScript dependencies and native modules
+
+The installer runs `npm ci` for the TUI workspaces only (`ui-tui`,
+`ui-tui/packages/hermes-ink`, `apps/shared`), without `--ignore-scripts`.
+The desktop app (`apps/desktop`) is what depends on Electron and the native
+`get-windows` addon; the TUI does not, so they are neither downloaded nor
+compiled. Lifecycle scripts that do run (esbuild, node-pty) are the ones the TUI
+needs, and a failed native build now fails the install instead of being skipped
+silently. If you also build the desktop app from this checkout, install every
+workspace with `HERMES_LOCAL_NPM_SCOPE=all ./scripts/hermes-local-install`.
 
 Authenticate using the normal Hermes flow:
 
@@ -150,8 +180,9 @@ git fetch origin main
 git rebase origin/main
 git fetch upstream main
 git rebase upstream/main
-uv sync --extra dev
-npm ci --include=dev
+uv sync --group dev
+use/install a Node that satisfies engines.node (same rules as the installer)
+npm ci --include=dev   # TUI workspaces
 build the TUI
 ```
 
