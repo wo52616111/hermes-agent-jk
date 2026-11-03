@@ -188,6 +188,35 @@ async def test_a_pick_never_switches_from_the_fallback_route(home, endpoints):
 
 
 @pytest.mark.asyncio
+async def test_a_pick_of_a_provider_without_credentials_names_why_and_the_key_env(home, endpoints, monkeypatch):
+    """The refusal's reason stays ``model_resolution_failed``; ``data.detail`` carries switch_model's
+    own sentence, including the env var to set (the TUI printed only the bare code)."""
+    from gateway.session_controls import _refusal_data
+    from hermes_state_runtime import RuntimeStoreError
+    (_, url), _ = endpoints
+    monkeypatch.delenv('DEEPSEEK_API_KEY', raising=False)
+    monkeypatch.delenv('DEEPSEEK_BASE_URL', raising=False)
+    _configure(home, 'original', url, 'key-launch')
+    store, runner, authority, owner = _owner(home)
+    _bind_resolver(runner)
+    try:
+        created = await _create(owner, authority, home, 'bare')
+        sid = next(sid for sid, value in authority.sessions.items() if value is created)
+
+        response = await _pick(owner, authority, sid, {'model': 'deepseek-chat', 'provider': 'deepseek'})
+
+        error = response.get('error', {})
+        assert error.get('message') == 'model_resolution_failed', response
+        assert error['data']['reason'] == 'model_resolution_failed'
+        detail = error['data'].get('detail', '')
+        assert 'not connected' in detail and 'DEEPSEEK_API_KEY' in detail, detail
+        assert _refusal_data(RuntimeStoreError('model_resolution_failed', detail=detail))['detail'] == detail
+    finally:
+        await owner.close()
+        store.close_all_db_handles()
+
+
+@pytest.mark.asyncio
 async def test_a_route_that_cannot_authenticate_does_not_block_switching_away(home, endpoints):
     """#138879: resolving the route being replaced raised AuthError out of ``session.mutate``, so the
     client got ``internal error`` and could never leave a route it cannot use."""
