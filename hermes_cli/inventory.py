@@ -8,6 +8,7 @@ from contextvars import copy_context
 from dataclasses import dataclass, replace
 from threading import Lock, Thread, current_thread
 from typing import Any, Optional
+from urllib.parse import urlparse
 from datetime import UTC
 
 _pricing_prewarm_lock = Lock()
@@ -837,15 +838,58 @@ def _raw_config_has_enabled_moa_preset() -> bool:
     return any(key in moa for key in legacy_keys) and bool(moa.get("enabled", True))
 
 
+def _row_has_real_credentials(slug: str) -> bool:
+    """True when *slug* has a credential the picker can actually switch with.
+
+    Reuses ``models_detect.provider_has_credentials`` (env/.env key, auth-store login, usable pool
+    entry) — the same ladder ``switch_model`` fails on — and additionally accepts a pool entry that
+    carries a real token but is in cooldown (human pickers keep rate-limited providers selectable),
+    plus Anthropic's OAuth files. A declared ``fallback_models`` list or a stale tokenless
+    ``env:`` pool entry is NOT evidence of a credential. Keyless-by-design loopback providers
+    (LM Studio, Ollama, ...) need none."""
+    try:
+        from hermes_cli.auth import PROVIDER_REGISTRY, has_usable_secret
+        from hermes_cli.models_detect import provider_has_credentials
+
+        pconfig = PROVIDER_REGISTRY.get(slug)
+        host = urlparse(str(getattr(pconfig, "inference_base_url", "") or "")).hostname or ""
+        if host in ("localhost", "127.0.0.1", "::1"):
+            return True
+        if provider_has_credentials(slug):
+            return True
+        if slug == "anthropic" and _anthropic_oauth_credentials_present():
+            return True
+        from agent.credential_pool import load_pool
+
+        return any(
+            has_usable_secret(getattr(e, "access_token", "") or getattr(e, "runtime_api_key", "") or "")
+            for e in load_pool(slug).entries()
+        )
+    except Exception:
+        return False
+
+
+def _is_credential_checked_row(row: dict) -> bool:
+    """Provider-catalog rows whose ``authenticated`` must mirror real credentials. User-defined/custom
+    endpoints, the managed local runtime and virtual MoA carry their own credential story."""
+    slug = str(row.get("slug", "")).strip().lower()
+    return not (row.get("is_user_defined") or row.get("source") in ("local-runtime", "user-config")
+                or slug in ("moa", "custom", "llamacpp") or slug.startswith("custom:"))
+
+
 def _apply_picker_hints(rows: list[dict]) -> None:
-    """Add ``authenticated``/``auth_type``/``key_env``/``warning`` per row."""
+    """Add ``authenticated``/``auth_type``/``key_env``/``warning`` per row. ``authenticated`` reflects real
+    credential presence, never merely that the provider declares models (``fallback_models``)."""
     for row in rows:
         if "authenticated" in row:
             continue
         # Skeleton rows (_append_unconfigured_rows) have empty `models` AND source="canonical".
         is_skeleton = row.get("source") == "canonical" and not row.get("models")
-        row["authenticated"] = not is_skeleton
-        if not is_skeleton or row.get("is_user_defined"):
+        unauthenticated = is_skeleton or (
+            _is_credential_checked_row(row) and not _row_has_real_credentials(str(row["slug"]).strip().lower())
+        )
+        row["authenticated"] = not unauthenticated
+        if not unauthenticated or row.get("is_user_defined"):
             continue
         auth_type, key_env = _provider_auth_hint(row["slug"])
         row["auth_type"] = auth_type

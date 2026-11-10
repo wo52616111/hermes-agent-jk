@@ -20,6 +20,10 @@ class SessionGoneEvent(NamedTuple):
     reason: str
 
 
+# Long enough for a model switch's "not connected" sentence AND its "Set <KEY_ENV>" tail.
+DETAIL_LIMIT = 400
+
+
 class RuntimeStoreError(ValueError):
     """A refusal by the state authority. ``reason`` is the bounded wire code (callers compare it as a
     string); ``field`` and ``detail`` name the check that fired and why, so a client and the gateway
@@ -28,7 +32,7 @@ class RuntimeStoreError(ValueError):
     def __init__(self, reason: str, *, field: str | None = None, detail: str | None = None):
         self.reason = reason
         self.field = _one_line(field, 80)
-        self.detail = _one_line(detail, 160)
+        self.detail = _one_line(detail, DETAIL_LIMIT)
         super().__init__(reason)
 
 

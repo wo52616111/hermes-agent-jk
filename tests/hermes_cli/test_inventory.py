@@ -24,6 +24,7 @@ from unittest.mock import patch
 
 from hermes_cli.inventory import (
     ConfigContext,
+    build_model_options_payload,
     build_models_payload,
     load_picker_context,
 )
@@ -352,7 +353,8 @@ def test_anthropic_oauth_presence_accepts_pool_only_oauth_entry():
 # ─── picker_hints ──────────────────────────────────────────────────────
 
 
-def test_picker_hints_marks_authed_rows_authenticated():
+def test_picker_hints_marks_authed_rows_authenticated(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test-key")
     rows = [
         {"slug": "openrouter", "name": "OpenRouter", "models": ["m1"],
          "total_models": 1, "is_current": True, "is_user_defined": False,
@@ -818,3 +820,81 @@ def test_apply_limits_skips_window_plan_rows():
         inventory._apply_limits(rows)
     assert "limit" not in rows[0]
     assert rows[1]["limit"]["scope"] == "account"
+
+
+# ─── authenticated reflects real credentials, not declared models ──────
+
+
+def _deepseek_fallback_row() -> dict:
+    """What the overlay lap emits for a plugin provider that declares fallback_models."""
+    return {"slug": "deepseek", "name": "DeepSeek", "models": ["deepseek-v4-pro", "deepseek-flash"],
+            "total_models": 2, "is_current": False, "is_user_defined": False, "source": "hermes"}
+
+
+def _offline_options_payload(ctx, rows):
+    """build_model_options_payload with every network/catalog decorator stubbed out."""
+    import hermes_cli.inventory as inv
+    with _list_auth_returning(rows), \
+            patch.object(inv, "_apply_pricing"), patch.object(inv, "_apply_capabilities"), \
+            patch.object(inv, "_apply_featured"), patch.object(inv, "_apply_limits"), \
+            patch.object(inv, "_apply_usage"), patch.object(inv, "_prewarm_pricing_async"), \
+            patch.object(inv, "_local_runtime_row", return_value=None), \
+            patch.object(inv, "_moa_provider_row", return_value=None):
+        return build_model_options_payload(ctx)
+
+
+def _paths_for(ctx, rows):
+    opts = _offline_options_payload(ctx, [dict(r) for r in rows])
+    with _list_auth_returning([dict(r) for r in rows]):
+        hints = build_models_payload(ctx, picker_hints=True)
+    pick = lambda payload: next(r for r in payload["providers"] if r["slug"] == "deepseek")
+    return pick(opts), pick(hints)
+
+
+def test_declared_fallback_models_without_credentials_is_unauthenticated(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    opts_row, hints_row = _paths_for(_empty_ctx(), [_deepseek_fallback_row()])
+    for row in (opts_row, hints_row):
+        assert row["authenticated"] is False
+        assert row["key_env"] == "DEEPSEEK_API_KEY"
+        assert "DEEPSEEK_API_KEY" in row["warning"]
+        assert row["models"] == ["deepseek-v4-pro", "deepseek-flash"]  # still selectable to go fill the key
+
+
+def test_stale_tokenless_env_pool_entry_is_not_a_credential(monkeypatch, tmp_path):
+    """auth.json keeps an env:-seeded pool entry after the var is deleted; it carries no token."""
+    import json, os
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    (tmp_path / "auth.json").write_text(json.dumps({"version": 1, "credential_pool": {"deepseek": [{
+        "id": "abc123", "label": "DEEPSEEK_API_KEY", "auth_type": "api_key", "priority": 0,
+        "source": "env:DEEPSEEK_API_KEY", "access_token": ""}]}}))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    opts_row, hints_row = _paths_for(_empty_ctx(), [_deepseek_fallback_row()])
+    assert opts_row["authenticated"] is False and hints_row["authenticated"] is False
+
+
+def test_declared_fallback_models_with_credentials_is_authenticated(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test-deepseek-key")
+    opts_row, hints_row = _paths_for(_empty_ctx(), [_deepseek_fallback_row()])
+    for row in (opts_row, hints_row):
+        assert row["authenticated"] is True
+        assert "warning" not in row
+
+
+def test_both_payload_paths_agree_for_every_credential_state(monkeypatch):
+    for key in (None, "sk-test-deepseek-key"):
+        if key is None:
+            monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        else:
+            monkeypatch.setenv("DEEPSEEK_API_KEY", key)
+        opts_row, hints_row = _paths_for(_empty_ctx(), [_deepseek_fallback_row()])
+        assert opts_row["authenticated"] == hints_row["authenticated"] == (key is not None)
+
+
+def test_unconfigured_provider_stays_listed_with_include_unconfigured(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    ctx = _empty_ctx()
+    with _list_auth_returning([]):
+        payload = build_models_payload(ctx, include_unconfigured=True, picker_hints=True)
+    row = next(r for r in payload["providers"] if r["slug"] == "deepseek")
+    assert row["authenticated"] is False and row["key_env"] == "DEEPSEEK_API_KEY"
