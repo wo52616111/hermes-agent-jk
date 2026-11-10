@@ -7745,10 +7745,17 @@ def _ladder_credential_rungs(
             if first_err is None:
                 return resp, None
             # Rotated key also hit a wall: mark it now so concurrent processes skip it, then fall back.
-            # ``first_err`` carries the retry's own client, so ``_recover_failure_pool`` re-reads the
-            # key that actually failed from it.
+            # The failing credential is the one THIS retry sent. ``_failure_pool`` only re-reads it
+            # from the retry's own client when the rung recorded one; a driver that raises the raw
+            # error (an in-process caller, a test harness) leaves no client, so fall back to the key
+            # we just rotated to rather than re-blaming the credential that already failed.
             if first_err.verdict.should_rotate_credential:
-                _recover_failure_pool(route, first_err)
+                pool_provider_2, failed_key_2 = _failure_pool(route, first_err)
+                _recover_provider_pool(
+                    pool_provider_2 or pool_provider, first_err.error,
+                    failed_api_key=failed_key_2 if _failure_sender(route, first_err) is not route.client
+                    else (rotated_key or failed_key_2),
+                    verdict=first_err.verdict)
     return None, first_err
 
 

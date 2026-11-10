@@ -147,7 +147,7 @@ def test_rotated_key_is_empty_without_a_pool(monkeypatch):
 # --------------------------------------------------------------- the real credential rung
 
 
-def _fake_provider_fallback(first_err, route):
+def _fake_provider_fallback(first_err, route, **_kwargs):
     yield from ()
     return "chain-response"
 
@@ -175,7 +175,7 @@ def test_rotation_retry_carries_the_pool_credential_even_on_an_auto_route(monkey
     rotations = []
     monkeypatch.setattr(aux, "_recoverable_pool_provider", lambda *a, **kw: "opencode-go")
     monkeypatch.setattr(aux, "_recover_provider_pool",
-                        lambda provider, exc, failed_api_key="": (
+                        lambda provider, exc, failed_api_key="", **_kw: (
                             rotations.append((provider, failed_api_key)) or True))
     monkeypatch.setattr(aux, "load_pool",
                         lambda provider: _FakePool([FAILED_KEY, ROTATED_KEY], current=ROTATED_KEY))
@@ -190,7 +190,9 @@ def test_rotation_retry_carries_the_pool_credential_even_on_an_auto_route(monkey
 
     ladder = _ladder(resolved_provider="auto", resolved_api_key=FAILED_KEY, client=client)
     assert aux._drive_ladder(ladder, perform) == "chain-response"
-    assert seen == [("auto", AUX_MODEL, ROTATED_KEY)]
+    # (provider, model, repairs, rotated_key): the strips the failed request already carried come
+    # third, so the rotated credential rides last.
+    assert seen == [("auto", AUX_MODEL, (), ROTATED_KEY)]
     # The retry's failure is attributed to the credential that actually served it, not guessed
     # from the pool's current entry after the fact.
     assert rotations == [("opencode-go", FAILED_KEY), ("opencode-go", ROTATED_KEY)]
