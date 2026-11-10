@@ -28,7 +28,9 @@ describe('/compress slash command', () => {
     const rpc = vi.fn(() => pending)
 
     const ctx = {
-      gateway: { rpc },
+      // The compress command branches on the canonical gateway first; this test pins the
+      // legacy (non-canonical) path.
+      gateway: { gw: { isCanonical: false }, rpc },
       guarded,
       guardedErr: vi.fn(),
       sid: 'sid-1',
@@ -52,7 +54,9 @@ describe('/compress slash command', () => {
     const rpc = vi.fn(() => Promise.reject(new Error('compression failed')))
 
     const ctx = {
-      gateway: { rpc },
+      // The compress command branches on the canonical gateway first; this test pins the
+      // legacy (non-canonical) path.
+      gateway: { gw: { isCanonical: false }, rpc },
       guarded,
       guardedErr: vi.fn(),
       sid: 'sid-1',

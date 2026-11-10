@@ -8,7 +8,7 @@ import {
   quotaStaleMarker,
   StatusRule
 } from '../components/appChrome.js'
-import type { AccountUsageAccount, AccountUsageGroup } from '../gatewayTypes.js'
+import type { AccountUsageAccount, AccountUsageGroup } from '@hermes/shared/gateway-types'
 import { DEFAULT_THEME } from '../theme.js'
 
 type ReactNodeLike = React.ReactNode

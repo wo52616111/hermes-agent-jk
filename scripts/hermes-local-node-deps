@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Prepare this checkout's Node workspaces (ui-tui + apps/shared) the way upstream does.
+#
+# Upstream switched the JS workspaces from npm to pnpm (pm/lock.json pins the pnpm
+# version; package.json's preinstall refuses any other package manager). These helpers
+# therefore call PM's own build scripts instead of `npm ci`/`npm run`:
+#   scripts/build/node-deps.mjs  -> installs the pnpm lockfile for the given workspaces
+#   scripts/build/tui.mjs        -> builds ui-tui/dist/entry.js (hermes-ink included)
+#
+# Usage: hermes-local-node-deps <repo-root>
+set -euo pipefail
+
+ROOT=$1
+cd "$ROOT"
+
+# PM owns every tool this needs (node, pnpm). `python -m pm.cli env` prints the PATH of
+# the pinned tool closure, so the helpers never rely on the caller's PATH picks.
+pm_env_json=$(python3 -m pm.cli env pnpm 2>/dev/null || true)
+if [[ -n "$pm_env_json" ]]; then
+  eval "$(printf '%s' "$pm_env_json" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("export PATH=%s:$PATH" % json.dumps(d["PATH"]))')"
+fi
+
+if ! command -v pnpm >/dev/null 2>&1; then
+  printf 'hermes-local-node-deps: pnpm is required; run `python3 -m pm.cli install --tools-only`\n' >&2
+  exit 1
+fi
+
+node scripts/build/node-deps.mjs --source "$ROOT" --workspace ui-tui --workspace apps/shared
+# No argv = the developer build (writes ui-tui/dist). `--source/--out` is the packaged
+# path, and it refuses an output directory that overlaps a build input.
+node scripts/build/tui.mjs

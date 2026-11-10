@@ -41,10 +41,8 @@ git fetch "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 printf 'Rebasing customized stack onto %s/%s...\n' "$UPSTREAM_REMOTE" "$UPSTREAM_BRANCH"
 git rebase "$UPSTREAM_REMOTE/$UPSTREAM_BRANCH"
 
-uv sync --extra dev
-npx -y npm@11.17.0 ci --include=dev
-npx -y npm@11.17.0 run build:ink --workspace ui-tui
-npx -y npm@11.17.0 run build --workspace ui-tui
+uv sync --group dev
+"$ROOT/scripts/hermes-local-node-deps" "$ROOT"
 
 HERMES_HOME_DIR=${HERMES_HOME:-$HOME/.hermes}
 mkdir -p "$HERMES_HOME_DIR/skins"

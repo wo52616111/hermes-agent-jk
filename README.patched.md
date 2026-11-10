@@ -151,8 +151,7 @@ git rebase origin/main
 git fetch upstream main
 git rebase upstream/main
 uv sync --extra dev
-npm ci --include=dev
-build the TUI
+./scripts/hermes-local-node-deps .   # pnpm install (upstream pin) + TUI build
 ```
 
 If an upstream change conflicts with the local work, rebase stops normally so the

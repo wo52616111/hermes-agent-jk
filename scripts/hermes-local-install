@@ -5,12 +5,9 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 
 command -v uv >/dev/null 2>&1 || { printf 'hermes-local-install: uv is required\n' >&2; exit 1; }
-command -v npx >/dev/null 2>&1 || { printf 'hermes-local-install: npx is required\n' >&2; exit 1; }
 
-uv sync --extra dev
-npx -y npm@11.17.0 ci --include=dev
-npx -y npm@11.17.0 run build:ink --workspace ui-tui
-npx -y npm@11.17.0 run build --workspace ui-tui
+uv sync --group dev
+"$ROOT/scripts/hermes-local-node-deps" "$ROOT"
 
 HERMES_HOME_DIR=${HERMES_HOME:-$HOME/.hermes}
 mkdir -p "$HERMES_HOME_DIR/skins"
