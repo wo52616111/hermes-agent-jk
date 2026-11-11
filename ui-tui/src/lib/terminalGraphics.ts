@@ -8,11 +8,16 @@
  * supports_kitty_placeholders, the TMUX check), plus GNU screen and the
  * dashboard's xterm.js, which drop the kitty transmit too.
  */
+import { tmuxPassesGraphics } from './tmuxPassthrough.js'
+
 export type TerminalGraphics = 'kitty' | 'unicode'
 
 const lower = (value?: string) => (value ?? '').trim().toLowerCase()
 
-export const detectTerminalGraphics = (env: NodeJS.ProcessEnv = process.env): TerminalGraphics => {
+export const detectTerminalGraphics = (
+  env: NodeJS.ProcessEnv = process.env,
+  passesGraphics: (env: NodeJS.ProcessEnv) => boolean = tmuxPassesGraphics
+): TerminalGraphics => {
   const term = lower(env.TERM)
   const program = lower(env.TERM_PROGRAM)
 
@@ -21,8 +26,10 @@ export const detectTerminalGraphics = (env: NodeJS.ProcessEnv = process.env): Te
     return 'unicode'
   }
 
-  // Multiplexers swallow the APC transmit (tmux without allow-passthrough, screen always).
-  if (env.TMUX || env.STY) {
+  // tmux swallows a bare transmit but forwards a DCS-wrapped one while the
+  // pane's window allows passthrough (lib/tmuxPassthrough.ts); GNU screen
+  // never forwards it.
+  if (env.STY || (env.TMUX && !passesGraphics(env))) {
     return 'unicode'
   }
 

@@ -10,6 +10,7 @@ import { INLINE_IMAGE_MAX_COLS, INLINE_IMAGE_MAX_ROWS } from '../config/limits.j
 import { transcriptBodyWidth, transcriptGutterWidth } from '../lib/inputMetrics.js'
 import { asRpcResult } from '../lib/rpc.js'
 import { detectTerminalGraphics } from '../lib/terminalGraphics.js'
+import { tmuxWrap } from '../lib/tmuxPassthrough.js'
 import type { Theme } from '../theme.js'
 import type { Msg } from '../types.js'
 
@@ -104,7 +105,7 @@ const requestRender = (
         // Single-flight: every mount of this key shares this one write.
         if (res.mode === 'kitty' && res.transmit) {
           try {
-            write(res.transmit)
+            write(tmuxWrap(res.transmit))
             placed.set(res.color ?? '', sizeOf(res))
           } catch {
             // a dead tty paints nothing either way

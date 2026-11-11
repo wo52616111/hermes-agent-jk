@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { CellGrid } from '../components/cellImage.js'
 import { createPetSingleFlight, requestPetUpdate } from '../lib/petPolling.js'
+import { tmuxWrap } from '../lib/tmuxPassthrough.js'
 
 import { useGateway } from './gatewayContext.js'
 import { $overlayState, getOverlayState, hasSensitivePrompt } from './overlayStore.js'
@@ -184,7 +185,7 @@ export function usePet(): PetRender {
   const releaseKitty = useCallback(() => {
     if (imageIdRef.current) {
       try {
-        write(`\x1b_Ga=d,d=i,i=${imageIdRef.current},q=2\x1b\\`)
+        write(tmuxWrap(`\x1b_Ga=d,d=i,i=${imageIdRef.current},q=2\x1b\\`))
       } catch {
         // best-effort cleanup
       }
@@ -323,7 +324,7 @@ export function usePet(): PetRender {
         // Transmit this frame's image under the shared id; the static
         // placeholder cells (set below) render it. No Ink repaint needed.
         try {
-          write(entry.frames[idx] ?? '')
+          write(tmuxWrap(entry.frames[idx] ?? ''))
         } catch {
           // ignore transmit failures
         }

@@ -313,9 +313,10 @@ def resolve_inline_mode(
     it can reserve blank rows and paint a cell-pinned image over them (the classic CLI's
     scrollback can, Ink's re-laid-out frame can't). ``auto`` picks kitty placeholders where they
     paint (kitty, Ghostty), then iTerm2 images over reserved rows where the painter allows it
-    (iTerm2, WezTerm, Konsole), else half-blocks. tmux and GNU screen swallow both transmits,
-    so ``auto`` stays on half-blocks there. Pinning a protocol opts in: the classic CLI wraps its
-    transmits for tmux's ``allow-passthrough on``; the TUI and GNU screen send them unwrapped.
+    (iTerm2, WezTerm, Konsole), else half-blocks. tmux swallows a bare transmit and GNU screen
+    forwards none, so ``auto`` stays on half-blocks there unless the client says it can show pixels:
+    the TUI reports ``kitty`` only after reading its pane's ``allow-passthrough`` and wraps every
+    transmit in a DCS passthrough, and the classic CLI does the same wrap. Pinning a protocol opts in.
 
     ``detected`` is a remote painter's own ``auto`` pick (``kitty``/``unicode``), made from its
     terminal's env: a shared gateway serves many clients, and its own env names none of them.
