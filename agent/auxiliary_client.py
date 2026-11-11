@@ -8325,7 +8325,8 @@ async def _async_call_llm_impl(
         return await asyncio.to_thread(_validate_llm_response, await _relay_async_completion(
             client, kwargs, provider=request_provider, api_mode=req.resolved_api_mode, create=_acreate), task, **validate_kw)
     # Retry ONCE on the same provider for a transient blip before fallback (see call_llm()). (PR #16587)
-    resp, exc = await _aoutcome(_primary, **validate_kw)
+    # _aoutcome takes the awaitable itself (unlike the sync _outcome), so the coroutine is created here.
+    resp, exc = await _aoutcome(_primary(**validate_kw))
     if exc is None:
         return resp
     failure = _primary_failure(req, exc)
@@ -8333,7 +8334,7 @@ async def _async_call_llm_impl(
     if _should_retry_same_provider(task, failure, " (async)"):
         logger.info("Auxiliary %s (async): transient transport error; retrying "
                     "once on the same provider before fallback: %s", task or "call", failure.error)
-        resp, exc = await _aoutcome(_primary, **validate_kw)
+        resp, exc = await _aoutcome(_primary(**validate_kw))
         if exc is None:
             return resp
         failure = _primary_failure(req, exc)
