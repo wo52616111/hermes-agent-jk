@@ -1,14 +1,14 @@
-"""Regression tests for the Anthropic model-picker dropping curated aliases.
+"""The Anthropic picker merge must never drop reachable curated aliases — and must not let them
+bury newer live releases.
 
-Bug — newly-routed curated aliases vanished on a native Anthropic setup
-    ``provider_model_ids("anthropic")`` returned the live ``/v1/models`` dump
-    verbatim whenever Anthropic credentials were configured. Anthropic's API
-    lags behind freshly-routed aliases (e.g. ``claude-fable-5``, which is
-    reachable on Anthropic before the models endpoint enumerates it), so the
-    curated entry disappeared from the picker. The picker now merges the
-    curated ``_PROVIDER_MODELS["anthropic"]`` list with the live catalog —
-    curated entries first, live-only models appended, deduped — mirroring the
-    OpenAI curated-merge philosophy.
+Bug — curated-first ordering buried new releases
+    ``_anthropic_catalog`` merged ``_PROVIDER_MODELS["anthropic"]`` *ahead of* the live
+    ``/v1/models`` dump, so a model Anthropic had already enumerated (but nobody had added to
+    the static list) rendered behind older 4.x rows in every picker surface.
+
+Contract now: the live dump leads (it is account-scoped, authoritative, and carries
+``created_at``); curated entries only fill ids the dump has not enumerated yet — an alias
+Anthropic routes before listing it still shows up, and no id appears twice.
 """
 
 from unittest.mock import patch
@@ -16,23 +16,23 @@ from unittest.mock import patch
 from hermes_cli import models as M
 
 
-def test_anthropic_merge_dedupes_overlap_and_appends_live_only():
-    """Models in both lists appear once; live-only models are appended."""
+def test_anthropic_merge_dedupes_overlap_and_appends_curated_only_aliases():
+    """Live rows lead; curated-only aliases trail; overlap appears once."""
     live = [
+        "claude-sonnet-5-5",        # live-only: new release, not in the curated row
         "claude-opus-4-8",          # overlaps curated
         "claude-sonnet-4-6",        # overlaps curated
-        "claude-future-9-99",       # live-only, not curated
     ]
     with patch.object(M, "_fetch_anthropic_models", return_value=live):
         result = M.provider_model_ids("anthropic")
 
-    # No duplicates introduced by the merge.
     assert result.count("claude-opus-4-8") == 1
-    # Live-only entry is preserved (discovery still works for unknown models).
-    assert "claude-future-9-99" in result
-    # Curated entries lead, live-only trails.
-    curated = list(M._PROVIDER_MODELS["anthropic"])
-    assert result[:len(curated)] == curated and result[-1] == "claude-future-9-99"
+    # The live order is preserved verbatim at the head of the picker.
+    assert result[: len(live)] == live
+    # Curated-only aliases are still offered, after the live rows.
+    curated_only = [m for m in M._PROVIDER_MODELS["anthropic"] if m not in live]
+    assert curated_only, "fixture assumption: the curated row has ids live does not list"
+    assert result[len(live):] == curated_only
 
 
 def test_anthropic_falls_back_to_curated_when_live_unavailable():

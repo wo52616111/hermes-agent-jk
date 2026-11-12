@@ -31,6 +31,11 @@ from agent.proxy_bypass import is_loopback_host
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.urllib_security import open_credentialed_url
 from hermes_cli.version_info import hermes_user_agent
+from hermes_cli.models_anthropic import (
+    _ANTHROPIC_MODELS_MAX_PAGES,
+    _anthropic_model_sort_key,
+    _anthropic_models_url,
+    _anthropic_next_cursor)
 from hermes_cli.models_catalog_static import (
     CuratedFallbackModels,
     CANONICAL_PROVIDERS,
@@ -914,33 +919,6 @@ def _base_url_looks_like_anthropic_messages(base_url: str) -> bool:
     return urllib.parse.urlparse(normalized).path.rstrip("/").endswith(("/anthropic", "/anthropic/v1"))
 
 
-def _anthropic_models_url(base_url: Optional[str] = None, *, after_id: Optional[str] = None) -> str:
-    """Anthropic ``/v1/models`` page URL. The endpoint is cursor-paginated with a default page of
-    20 (smaller than the live catalog), so every request asks for the maximum page size and
-    ``after_id`` continues from a previous page's ``last_id``."""
-    endpoint = str(base_url or "https://api.anthropic.com").strip().rstrip("/")
-    url = endpoint + ("/models" if endpoint.endswith("/v1") else "/v1/models")
-    params = {"limit": "1000"}
-    if after_id:
-        params["after_id"] = after_id
-    return url + ("&" if "?" in url else "?") + urllib.parse.urlencode(params)
-
-
-_ANTHROPIC_MODELS_MAX_PAGES = 20
-
-
-def _anthropic_next_cursor(page: Any, seen_cursors: set[str]) -> Optional[str]:
-    """``last_id`` to continue from, or None when the page is final or the server repeats a
-    cursor (which would otherwise loop forever)."""
-    if not isinstance(page, dict) or page.get("has_more") is not True:
-        return None
-    last_id = page.get("last_id")
-    if not isinstance(last_id, str) or not last_id or last_id in seen_cursors:
-        return None
-    seen_cursors.add(last_id)
-    return last_id
-
-
 def curated_models_for_provider(
     provider: Optional[str],
     *,
@@ -1428,9 +1406,12 @@ def _anthropic_catalog(normalized: str, force_refresh: bool) -> list[str]:
         # A placeholder for the outage, not this account/proxy's catalog: the disk cache must
         # never pin it over a same-credentials live row (#107391).
         return CuratedFallbackModels(curated)
-    # The live /v1/models dump lags newly-routed curated aliases (reachable before enumerated):
-    # curated first, then live-only extras, so a fresh curated model never disappears.
-    return live if cfg_base_url else _merge_unique(curated, live)
+    # The live dump is this account's authoritative catalog AND it carries ``created_at``, so it
+    # leads the picker; the curated row only fills ids the dump has not enumerated yet (aliases
+    # Anthropic routes before listing them) and stays the offline placeholder below. Curated-first
+    # ordering buried every release missing from that hand-maintained list at the tail of the
+    # picker (claude-sonnet-5-5/… behind 4.x rows) until someone edited the static catalog.
+    return live if cfg_base_url else _merge_unique(live, curated)
 
 
 def _openai_catalog(normalized: str, force_refresh: bool) -> Optional[list[str]]:
@@ -2165,17 +2146,23 @@ def _fetch_anthropic_models(
                 [b for b in _COMMON_BETAS if b != _CONTEXT_1M_BETA] + list(_OAUTH_ONLY_BETAS)
             )
             data = _get_json(url, timeout=timeout, headers=headers)
-        models = [m["id"] for m in data.get("data", []) if m.get("id")]
+        rows: dict[str, dict] = {}
+
+        def _absorb(page: Any) -> None:
+            for m in (page.get("data") or []) if isinstance(page, dict) else []:
+                if isinstance(m, dict) and m.get("id"):
+                    rows.setdefault(str(m["id"]), m)  # first page wins on a repeated id
+
+        _absorb(data)
         seen_cursors: set[str] = set()
         for _page in range(_ANTHROPIC_MODELS_MAX_PAGES):
             cursor = _anthropic_next_cursor(data, seen_cursors)
             if cursor is None:
                 break
             data = _get_json(_anthropic_models_url(resolved_base_url, after_id=cursor), timeout=timeout, headers=headers)
-            models.extend(m["id"] for m in data.get("data", []) if m.get("id"))
-        models = list(dict.fromkeys(models))
-        # opus, then sonnet, then haiku; alphabetical within tier.
-        return sorted(models, key=lambda m: ("opus" not in m, "sonnet" not in m, "haiku" not in m, m))
+            _absorb(data)
+        # opus → sonnet → haiku → fable, newest release first inside each line.
+        return sorted(rows, key=lambda model_id: _anthropic_model_sort_key(rows[model_id]))
     except Exception as e:
         logger.debug("Failed to fetch Anthropic models: %s", e)
         return None
